@@ -8,7 +8,8 @@ export default class GukiChatPlugin extends Plugin {
 
 		this.addCommand({
 			id: 'open-chat',
-			name: 'Open GuKi Chat',
+			// Obsidian already prefixes the palette entry with "GuKi Chat: ".
+			name: 'Open chat',
 			// No default hotkey by design; the command palette is the only entry point.
 			callback: () => {
 				void this.activateView();
@@ -21,9 +22,9 @@ export default class GukiChatPlugin extends Plugin {
 		});
 	}
 
-	onunload(): void {
-		this.app.workspace.detachLeavesOfType(VIEW_TYPE_GUKI_CHAT);
-	}
+	// No onunload leaf teardown on purpose: unregistering the view type is enough for
+	// Obsidian to clear the leaf, while detachLeavesOfType would also destroy wherever
+	// the user had moved the panel, on every reload (obsidianmd/detach-leaves).
 
 	/** Reveals the existing chat leaf, or creates a pinned one in the main area. */
 	private async activateView(): Promise<void> {
