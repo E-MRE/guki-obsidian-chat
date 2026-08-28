@@ -3,4 +3,3 @@ main.js
 *.js.map
 data.json
 .DS_Store
-sample-plugin/

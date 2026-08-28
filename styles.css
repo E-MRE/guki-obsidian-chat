@@ -1,0 +1,49 @@
+/*
+ * Phase 1 skeleton layout. Colours come only from Obsidian CSS variables —
+ * no hardcoded values, so every theme and light/dark switch stays readable.
+ * The visual language lands in Phase 4.
+ */
+
+.guki-chat-content {
+	padding: 0;
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+}
+
+.guki-root {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	min-height: 0;
+	gap: var(--size-4-2);
+	padding: var(--size-4-4);
+}
+
+.guki-messages {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	padding: var(--size-4-3);
+}
+
+.guki-placeholder {
+	color: var(--text-muted);
+}
+
+.guki-footer {
+	flex: 0 0 auto;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	border-top: 1px solid var(--background-modifier-border);
+	padding-top: var(--size-4-2);
+}
+
+.guki-root.guki-narrow {
+	padding: var(--size-4-2);
+}
+
+.guki-root.guki-narrow .guki-messages {
+	padding: var(--size-4-2);
+}
