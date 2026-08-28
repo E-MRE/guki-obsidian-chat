@@ -1,7 +1,11 @@
 /*
- * Phase 1 skeleton layout. Colours come only from Obsidian CSS variables —
- * no hardcoded values, so every theme and light/dark switch stays readable.
- * The visual language lands in Phase 4.
+ * GuKi Chat.
+ *
+ * Content is Obsidian-native: everything inside .guki-message-body is rendered by Obsidian's own
+ * markdown renderer and keeps the theme's typography, code blocks and link styling untouched.
+ * The shell around it is Apple-inspired: bubbles, a card-shaped composer, generous rounding and
+ * spacing. Every colour is an Obsidian CSS variable, so light/dark and third-party themes stay
+ * readable without a single hardcoded value.
  */
 
 .guki-chat-content {
@@ -15,35 +19,205 @@
 	flex-direction: column;
 	height: 100%;
 	min-height: 0;
-	gap: var(--size-4-2);
+	gap: var(--size-4-3);
 	padding: var(--size-4-4);
 }
+
+/* --- message list ------------------------------------------------------- */
 
 .guki-messages {
 	flex: 1 1 auto;
 	min-height: 0;
 	overflow-y: auto;
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-m);
-	padding: var(--size-4-3);
+	overscroll-behavior: contain;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-3);
+	padding: var(--size-4-2) var(--size-4-1);
+	scrollbar-gutter: stable;
 }
 
-.guki-placeholder {
-	color: var(--text-muted);
+.guki-message {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+	max-width: 85%;
 }
+
+.guki-message-body {
+	border-radius: var(--radius-l);
+	padding: var(--size-4-2) var(--size-4-3);
+	line-height: var(--line-height-normal);
+	overflow-wrap: anywhere;
+}
+
+/* Obsidian's markdown renderer wraps every block in its own element; strip the outer margins
+   so a one-paragraph reply is a tight bubble rather than a padded box. */
+.guki-message-body > :first-child {
+	margin-top: 0;
+}
+
+.guki-message-body > :last-child {
+	margin-bottom: 0;
+}
+
+.guki-message-meta {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+	padding: 0 var(--size-4-2);
+}
+
+.guki-message-meta:empty {
+	display: none;
+}
+
+/* User: accent bubble, right-aligned, verbatim text. */
+.guki-message-user {
+	align-self: flex-end;
+	align-items: flex-end;
+}
+
+.guki-message-user .guki-message-body {
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+	white-space: pre-wrap;
+	border-bottom-right-radius: var(--radius-s);
+}
+
+/* Assistant: a quiet card on the left. */
+.guki-message-assistant {
+	align-self: flex-start;
+	align-items: flex-start;
+	max-width: 100%;
+}
+
+.guki-message-assistant .guki-message-body {
+	background-color: var(--background-secondary);
+	color: var(--text-normal);
+	border: 1px solid var(--background-modifier-border);
+	border-bottom-left-radius: var(--radius-s);
+}
+
+.guki-message-assistant .guki-message-body:empty {
+	display: none;
+}
+
+/* Notice: out-of-band, centred, no bubble tail. */
+.guki-message-notice {
+	align-self: center;
+	align-items: center;
+	max-width: 100%;
+	text-align: center;
+}
+
+.guki-message-notice .guki-message-body {
+	background-color: var(--background-primary-alt);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	border-radius: var(--radius-m);
+}
+
+.guki-message-notice .guki-message-meta code {
+	font-size: var(--font-smallest);
+	white-space: pre-wrap;
+}
+
+/* Error: applied to assistant turns and notices alike. */
+.guki-message-error .guki-message-body {
+	background-color: var(--background-modifier-error);
+	border-color: var(--text-error);
+	color: var(--text-normal);
+}
+
+.guki-message-error .guki-message-meta {
+	color: var(--text-error);
+}
+
+/* --- composer ----------------------------------------------------------- */
 
 .guki-footer {
 	flex: 0 0 auto;
-	color: var(--text-muted);
-	font-size: var(--font-ui-smaller);
-	border-top: 1px solid var(--background-modifier-border);
-	padding-top: var(--size-4-2);
 }
+
+.guki-composer {
+	display: flex;
+	align-items: flex-end;
+	gap: var(--size-4-2);
+	padding: var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-l);
+	background-color: var(--background-primary-alt);
+	box-shadow: var(--shadow-s);
+	transition: border-color 120ms ease-in-out;
+}
+
+.guki-composer:focus-within {
+	border-color: var(--interactive-accent);
+}
+
+.guki-composer-input {
+	flex: 1 1 auto;
+	min-width: 0;
+	resize: none;
+	border: none;
+	box-shadow: none;
+	background-color: transparent;
+	color: var(--text-normal);
+	font-family: inherit;
+	font-size: var(--font-ui-medium);
+	line-height: var(--line-height-normal);
+	padding: var(--size-4-1) var(--size-4-2);
+}
+
+.guki-composer-input:focus,
+.guki-composer-input:focus-visible,
+.guki-composer-input:active {
+	border: none;
+	box-shadow: none;
+	outline: none;
+}
+
+.guki-composer-input::placeholder {
+	color: var(--text-faint);
+}
+
+.guki-composer-send {
+	flex: 0 0 auto;
+	border-radius: var(--radius-l);
+	padding: var(--size-4-2) var(--size-4-4);
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+	font-weight: var(--font-medium);
+	box-shadow: none;
+	cursor: pointer;
+}
+
+.guki-composer-send:hover {
+	background-color: var(--interactive-accent-hover);
+	color: var(--text-on-accent);
+}
+
+/* --- narrow panel ------------------------------------------------------- */
 
 .guki-root.guki-narrow {
 	padding: var(--size-4-2);
+	gap: var(--size-4-2);
 }
 
 .guki-root.guki-narrow .guki-messages {
-	padding: var(--size-4-2);
+	padding: var(--size-4-1) 0;
+	gap: var(--size-4-2);
+}
+
+.guki-root.guki-narrow .guki-message {
+	max-width: 95%;
+}
+
+.guki-root.guki-narrow .guki-composer {
+	padding: var(--size-4-1);
+	gap: var(--size-4-1);
+}
+
+.guki-root.guki-narrow .guki-composer-send {
+	padding: var(--size-4-2) var(--size-4-2);
 }
