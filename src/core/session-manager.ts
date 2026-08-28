@@ -17,6 +17,8 @@ import { StreamReducer } from './stream-reducer';
 interface QueuedTurn {
 	text: string;
 	item: AssistantItem;
+	/** Set by `interrupt` when Stop is pressed before this turn ever reached the CLI. */
+	cancelled?: boolean;
 }
 
 export class SessionManager {
@@ -74,9 +76,18 @@ export class SessionManager {
 	 *
 	 * A message the user queued behind this one is still a message they asked for, so the queue is
 	 * left alone — `onTurnEnd` sends it as soon as the aborted result lands.
+	 *
+	 * Before the turn begins there is nothing to interrupt but there is something to cancel: the
+	 * composer shows Stop from the moment anything is queued, and on the first message the six-step
+	 * binary resolution runs before the turn starts. Returning early there left the button reading
+	 * "Stop" and doing nothing for that whole window.
 	 */
 	interrupt(): void {
-		if (this.disposed || !this.reducer.hasActiveTurn()) {
+		if (this.disposed) {
+			return;
+		}
+		if (!this.reducer.hasActiveTurn()) {
+			this.cancelQueuedTurns();
 			return;
 		}
 		this.interruptCount += 1;
@@ -86,6 +97,24 @@ export class SessionManager {
 			// leaving the panel on a Stop button that does nothing.
 			this.reducer.failActiveTurn('The turn could not be stopped: the process is gone.');
 		}
+	}
+
+	/**
+	 * Drops every turn that has not been handed to the CLI yet and shows each as stopped.
+	 *
+	 * The flag matters as much as the removal: a `pump` already suspended on `ensureProcess` holds
+	 * its own reference to the head of the queue and would otherwise send the message after the
+	 * user cancelled it.
+	 */
+	private cancelQueuedTurns(): void {
+		if (this.queue.length === 0) {
+			return;
+		}
+		for (const turn of this.queue.splice(0, this.queue.length)) {
+			turn.cancelled = true;
+			turn.item.status = 'stopped';
+		}
+		this.state.emitChange();
 	}
 
 	private async pump(): Promise<void> {
@@ -98,7 +127,9 @@ export class SessionManager {
 		}
 
 		const ready = await this.ensureProcess();
-		if (this.disposed) {
+		// Binary resolution takes seconds on the first message. Stop, dispose and a second pump can
+		// all land inside that window, so the head of the queue is re-checked rather than trusted.
+		if (this.disposed || next.cancelled === true || this.queue[0] !== next) {
 			return;
 		}
 		if (!ready) {
@@ -181,9 +212,11 @@ export class SessionManager {
 		if (this.disposed) {
 			return;
 		}
+		// Cleared first: `failActiveTurn` pumps the queue, and pumping it here would just try to
+		// spawn the same unusable binary again.
+		this.queue.length = 0;
 		this.reducer.failActiveTurn(`The Claude Code CLI could not be started: ${error.message}`);
 		this.state.addNotice('error', 'The Claude Code CLI could not be started.', error.message);
-		this.queue.length = 0;
 	}
 
 	/**
@@ -198,6 +231,9 @@ export class SessionManager {
 		}
 
 		const how = info.signal !== null ? `signal ${info.signal}` : `exit code ${String(info.code)}`;
+		// Same ordering rule as `handleSpawnError`: the queue goes before the turn is failed, so
+		// the pump that `failActiveTurn` triggers finds nothing to restart the process for.
+		this.queue.length = 0;
 		const failed = this.reducer.failActiveTurn(`The Claude Code process stopped (${how}).`);
 		this.state.addNotice(
 			'error',
@@ -206,7 +242,6 @@ export class SessionManager {
 				: 'The Claude Code process stopped. The next message starts a new conversation.',
 			info.stderr.trim().length > 0 ? info.stderr.trim() : how,
 		);
-		this.queue.length = 0;
 	}
 
 	/** `onunload` and `workspace.on('quit')` both land here. Safe to call twice. */

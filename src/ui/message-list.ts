@@ -33,10 +33,13 @@ interface RenderedBlock {
 	/** Whether that content went through the markdown renderer or `setText`. */
 	renderedFinal: boolean;
 	/** Thinking blocks only. */
-	headerEl?: HTMLElement;
+	headerEl?: HTMLButtonElement;
+	/** Created lazily, on the first character of thinking text — see `setThinkingExpandable`. */
 	contentEl?: HTMLElement;
 	headerText?: string;
 	expanded?: boolean;
+	/** Whether the header currently offers an expander. Starts false: there is nothing to open. */
+	expandable?: boolean;
 }
 
 interface RenderedItem {
@@ -232,14 +235,22 @@ export class MessageList {
 		if (block.kind === 'thinking') {
 			// Collapsed, never hidden: the header is present from the first thinking delta, so a
 			// long silent stretch reads as work in progress rather than as a freeze.
+			//
+			// It starts `disabled`, i.e. as a plain label. Thinking text is model-dependent and is
+			// usually encrypted, in which case the deltas carry `""` for the whole turn — offering
+			// an expander then opens an empty box. `setThinkingExpandable` turns the label into a
+			// real control if, and only if, text actually arrives.
 			const headerEl = el.createEl('button', { cls: 'guki-thinking-header' });
-			const contentEl = el.createDiv({ cls: 'guki-thinking-content' });
-			contentEl.hide();
+			headerEl.disabled = true;
 			rendered.headerEl = headerEl;
-			rendered.contentEl = contentEl;
 			rendered.expanded = false;
+			rendered.expandable = false;
 			this.component.registerDomEvent(headerEl, 'click', () => {
-				rendered.expanded = !rendered.expanded;
+				const contentEl = rendered.contentEl;
+				if (rendered.expandable !== true || !contentEl) {
+					return;
+				}
+				rendered.expanded = rendered.expanded !== true;
 				el.toggleClass('guki-thinking-open', rendered.expanded);
 				if (rendered.expanded) {
 					contentEl.show();
@@ -308,12 +319,47 @@ export class MessageList {
 		rendered.el.toggleClass('guki-thinking-live', !block.final);
 
 		if (rendered.renderedText !== block.text) {
+			this.setThinkingExpandable(rendered, block.text.length > 0);
 			// Never markdown: it is prose, it changes on every delta, and it is collapsed anyway.
 			rendered.contentEl?.setText(block.text);
 			rendered.renderedText = block.text;
 			changed = true;
 		}
 		return changed;
+	}
+
+	/**
+	 * Adds or removes the expander, keeping the header itself untouched.
+	 *
+	 * The header's duration and live token counter are the only signal the reader gets during a
+	 * silent stretch — with an encrypted thinking block that stretch can be 20 s and more — so the
+	 * header always renders. What is conditional is whether it is a *control*. With no text there
+	 * is no content element at all, and the button is `disabled`, so it neither looks nor behaves
+	 * clickable.
+	 *
+	 * Text arriving after the header was drawn as a label upgrades it in place and leaves the block
+	 * **collapsed**: expanding on its own would push the answer down mid-read, and thinking is
+	 * secondary content by decision. The reverse transition (text replaced by an empty
+	 * authoritative block) collapses and disables it again rather than leaving an empty box behind.
+	 */
+	private setThinkingExpandable(rendered: RenderedBlock, expandable: boolean): void {
+		if (rendered.expandable === expandable) {
+			return;
+		}
+		rendered.expandable = expandable;
+		if (rendered.headerEl) {
+			rendered.headerEl.disabled = !expandable;
+		}
+		if (expandable) {
+			rendered.contentEl ??= rendered.el.createDiv({ cls: 'guki-thinking-content' });
+			if (rendered.expanded !== true) {
+				rendered.contentEl.hide();
+			}
+			return;
+		}
+		rendered.expanded = false;
+		rendered.el.removeClass('guki-thinking-open');
+		rendered.contentEl?.hide();
 	}
 
 	// --- notices ------------------------------------------------------------

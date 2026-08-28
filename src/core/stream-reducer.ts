@@ -319,17 +319,24 @@ export class StreamReducer {
 	/**
 	 * Fails the in-flight turn from outside the stream — the subprocess died, or the binary could
 	 * not be resolved. Without this the panel would sit on "pending" forever.
+	 *
+	 * This ends the turn, so it fires `onTurnEnd` exactly like `applyResult` does — including when
+	 * there was no turn to fail. Not firing it left a message queued behind a dead turn stranded
+	 * forever, because `pump` is only reached from `send` and from this callback. Callers that must
+	 * *not* have the queue drained (a spawn failure, an unexpected exit) clear it first.
 	 */
 	failActiveTurn(message: string): boolean {
 		const item = this.active;
 		this.active = null;
 		if (!item) {
+			this.onTurnEnd?.();
 			return false;
 		}
 		closeOpenBlocks(item);
 		item.status = 'error';
 		item.errorText = message;
 		this.state.emitChange();
+		this.onTurnEnd?.();
 		return true;
 	}
 

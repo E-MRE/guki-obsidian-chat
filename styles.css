@@ -170,9 +170,19 @@
 	text-align: left;
 }
 
-.guki-thinking-header:hover {
+.guki-thinking-header:enabled:hover {
 	background-color: var(--background-modifier-hover);
 	color: var(--text-normal);
+}
+
+/* Redacted thinking has nothing to expand, so the header is a plain label there. It keeps its full
+   weight — the duration and the live token count are real information — it just stops inviting a
+   click that would open an empty box. */
+.guki-thinking-header:disabled {
+	opacity: 1;
+	cursor: default;
+	background-color: transparent;
+	color: var(--text-muted);
 }
 
 /* While the block is still streaming, breathe — the one moving thing on an otherwise still panel. */
