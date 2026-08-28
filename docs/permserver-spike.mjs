@@ -1,7 +1,7 @@
 // Minimal MCP stdio server exposing a permission_prompt tool.
 // Logs every request so we can see EXACTLY what the CLI sends.
 import fs from 'node:fs';
-const log = m => fs.appendFileSync('permserver.log', JSON.stringify(m)+'\n');
+const log = m => fs.appendFileSync(process.env.PERM_LOG || 'permserver.log', JSON.stringify(m)+'\n');
 const DECISION = process.env.PERM_DECISION || 'allow';
 let buf='';
 process.stdin.on('data', d => {
