@@ -38,9 +38,13 @@ export default class GukiChatPlugin extends Plugin {
 			await leaf.setViewState({
 				type: VIEW_TYPE_GUKI_CHAT,
 				active: true,
-				pinned: true,
 			});
 		}
+
+		// Pin explicitly, on every path. ViewState.pinned does not actually apply the
+		// pin (verified by hand 2026-08-28), and a leaf restored from the saved layout
+		// never goes through setViewState at all.
+		leaf.setPinned(true);
 
 		await workspace.revealLeaf(leaf);
 	}
