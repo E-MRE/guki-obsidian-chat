@@ -5,13 +5,22 @@ import {
 	NARROW_BREAKPOINT_PX,
 	VIEW_TYPE_GUKI_CHAT,
 } from '../constants';
+import type { SessionManager } from '../core/session-manager';
+import { Composer } from './composer';
+import { MessageList } from './message-list';
 
 export class ChatView extends ItemView {
 	private rootEl: HTMLElement | null = null;
 	private resizeObserver: ResizeObserver | null = null;
 	private pendingMeasure: number | null = null;
+	private messageList: MessageList | null = null;
+	private unsubscribe: (() => void) | null = null;
 
-	constructor(leaf: WorkspaceLeaf) {
+	/**
+	 * The session lives on the plugin, not here: the subprocess and the transcript must survive
+	 * the panel being closed and reopened.
+	 */
+	constructor(leaf: WorkspaceLeaf, private readonly session: SessionManager) {
 		super(leaf);
 	}
 
@@ -35,15 +44,23 @@ export class ChatView extends ItemView {
 		this.rootEl = root;
 
 		const messages = root.createDiv({ cls: 'guki-messages' });
-		messages.createDiv({
-			cls: 'guki-placeholder',
-			text: 'GuKi Chat is not connected yet.',
+		this.messageList = new MessageList(this.app, messages, this);
+
+		const footer = root.createDiv({ cls: 'guki-footer' });
+		// Not kept as a field: nothing focuses or clears it from outside, and auto-focusing on
+		// open would steal focus from the editor when the panel is restored at startup.
+		new Composer(footer, this, {
+			onSubmit: (text: string) => {
+				this.session.send(text);
+				return true;
+			},
 		});
 
-		root.createDiv({
-			cls: 'guki-footer',
-			text: 'Composer arrives in a later phase.',
-		});
+		// The state is the single source of truth, so a reopened panel re-renders the whole
+		// conversation from it rather than starting empty.
+		this.unsubscribe = this.session.state.subscribe(() => this.syncMessages());
+		this.syncMessages();
+		this.messageList.scrollToBottom();
 
 		this.observeWidth(root);
 
@@ -61,6 +78,10 @@ export class ChatView extends ItemView {
 	}
 
 	protected async onClose(): Promise<void> {
+		this.unsubscribe?.();
+		this.unsubscribe = null;
+		this.messageList = null;
+
 		// A ResizeObserver is not covered by Component.register*, so disconnect it by hand.
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
@@ -70,6 +91,10 @@ export class ChatView extends ItemView {
 		}
 		this.rootEl = null;
 		this.contentEl.empty();
+	}
+
+	private syncMessages(): void {
+		this.messageList?.sync(this.session.state.items);
 	}
 
 	/**

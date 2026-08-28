@@ -1,10 +1,25 @@
 import { Plugin, WorkspaceLeaf } from 'obsidian';
 import { VIEW_TYPE_GUKI_CHAT } from './constants';
+import { SessionManager } from './core/session-manager';
 import { ChatView } from './ui/chat-view';
 
 export default class GukiChatPlugin extends Plugin {
+	private session: SessionManager | null = null;
+
 	async onload(): Promise<void> {
-		this.registerView(VIEW_TYPE_GUKI_CHAT, (leaf) => new ChatView(leaf));
+		// The session outlives any single view; the view only subscribes to its state.
+		const session = new SessionManager(this.app);
+		this.session = session;
+
+		this.registerView(VIEW_TYPE_GUKI_CHAT, (leaf) => new ChatView(leaf, session));
+
+		// Obsidian's quit path does not guarantee onunload, and a surviving subprocess would
+		// outlive the app (RESEARCH C). Both routes call dispose(), which is idempotent.
+		this.registerEvent(
+			this.app.workspace.on('quit', () => {
+				session.dispose();
+			}),
+		);
 
 		this.addCommand({
 			id: 'open-chat',
@@ -20,6 +35,12 @@ export default class GukiChatPlugin extends Plugin {
 		this.app.workspace.onLayoutReady(() => {
 			void this.activateView();
 		});
+	}
+
+	onunload(): void {
+		// The subprocess is not covered by Component.register* — kill it by hand.
+		this.session?.dispose();
+		this.session = null;
 	}
 
 	// No onunload leaf teardown on purpose: unregistering the view type is enough for
