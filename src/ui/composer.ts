@@ -9,10 +9,14 @@ import type { Component } from 'obsidian';
 export interface ComposerOptions {
 	/** Called with the trimmed text. The composer clears itself only if this returns true. */
 	onSubmit(text: string): boolean;
+	/** Called when the button is in its Stop state (RESEARCH B4's `interrupt` control request). */
+	onStop(): void;
 }
 
 export class Composer {
 	private readonly inputEl: HTMLTextAreaElement;
+	private readonly actionEl: HTMLButtonElement;
+	private busy = false;
 
 	constructor(
 		containerEl: HTMLElement,
@@ -30,7 +34,7 @@ export class Composer {
 			},
 		});
 
-		const sendEl = form.createEl('button', {
+		this.actionEl = form.createEl('button', {
 			cls: 'guki-composer-send',
 			text: 'Send',
 		});
@@ -41,12 +45,29 @@ export class Composer {
 				return;
 			}
 			event.preventDefault();
+			// Enter always sends, even mid-turn: the message queues behind the running one. Only
+			// the button stops, so a stray Enter can never throw away a reply in progress.
 			this.submit();
 		});
 
-		component.registerDomEvent(sendEl, 'click', () => {
+		component.registerDomEvent(this.actionEl, 'click', () => {
+			if (this.busy) {
+				this.options.onStop();
+				return;
+			}
 			this.submit();
 		});
+	}
+
+	/** Swaps the button between Send and Stop. Idempotent — called on every state change. */
+	setBusy(busy: boolean): void {
+		if (busy === this.busy) {
+			return;
+		}
+		this.busy = busy;
+		this.actionEl.setText(busy ? 'Stop' : 'Send');
+		this.actionEl.toggleClass('guki-composer-stop', busy);
+		this.actionEl.setAttr('aria-label', busy ? 'Stop the current reply' : 'Send the message');
 	}
 
 	private submit(): void {

@@ -9,7 +9,7 @@
 import { App, FileSystemAdapter } from 'obsidian';
 import { BinaryNotFoundError, resolveClaudeBinary } from '../cli/binary-resolver';
 import { ClaudeProcess, type ProcessExitInfo } from '../cli/claude-process';
-import { userMessageLine, type StreamJsonEvent } from '../cli/events';
+import { interruptRequestLine, userMessageLine, type StreamJsonEvent } from '../cli/events';
 import { CLAUDE_BINARY_OVERRIDE, FALLBACK_VAULT_PATH } from '../constants';
 import { ChatState, type AssistantItem } from './chat-state';
 import { StreamReducer } from './stream-reducer';
@@ -26,8 +26,21 @@ export class SessionManager {
 	private startPromise: Promise<boolean> | null = null;
 	private readonly queue: QueuedTurn[] = [];
 	private disposed = false;
+	private interruptCount = 0;
 
-	constructor(private readonly app: App) {}
+	constructor(private readonly app: App) {
+		// Nothing drained the queue when a turn *ended* — `pump` was only ever reached from
+		// `send`, so a message typed while the previous one was still streaming stayed queued
+		// forever. Latent since Phase 2; Phase 3 makes overlapping turns easy to hit.
+		this.reducer.onTurnEnd = () => {
+			void this.pump();
+		};
+	}
+
+	/** True while a turn is in flight or waiting. Drives the composer's Send/Stop swap. */
+	get busy(): boolean {
+		return this.reducer.hasActiveTurn() || this.queue.length > 0;
+	}
 
 	/**
 	 * The vault root, for `spawn`'s `cwd`. Checked with `instanceof` rather than cast: a cast that
@@ -52,6 +65,27 @@ export class SessionManager {
 		const item = this.state.addAssistantMessage();
 		this.queue.push({ text: trimmed, item });
 		void this.pump();
+	}
+
+	/**
+	 * Stops the turn in flight. The subprocess survives and the next turn is normal (RESEARCH B4);
+	 * the CLI answers in about 2 ms and closes the turn with `terminal_reason:"aborted_streaming"`,
+	 * which the reducer renders as "stopped" rather than an error.
+	 *
+	 * A message the user queued behind this one is still a message they asked for, so the queue is
+	 * left alone — `onTurnEnd` sends it as soon as the aborted result lands.
+	 */
+	interrupt(): void {
+		if (this.disposed || !this.reducer.hasActiveTurn()) {
+			return;
+		}
+		this.interruptCount += 1;
+		const sent = this.process?.write(interruptRequestLine(`guki-int-${String(this.interruptCount)}`)) ?? false;
+		if (!sent) {
+			// No live process to interrupt: the turn is already dead, so say so instead of
+			// leaving the panel on a Stop button that does nothing.
+			this.reducer.failActiveTurn('The turn could not be stopped: the process is gone.');
+		}
 	}
 
 	private async pump(): Promise<void> {

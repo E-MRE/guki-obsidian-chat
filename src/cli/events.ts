@@ -61,7 +61,7 @@ export interface SystemOtherEvent {
 	session_id?: string;
 }
 
-export type SystemEvent = SystemInitEvent | SystemOtherEvent;
+export type SystemEvent = SystemInitEvent | SystemThinkingTokensEvent | SystemOtherEvent;
 
 export interface AssistantEvent {
 	type: 'assistant';
@@ -89,12 +89,92 @@ export interface UserEvent {
 	};
 }
 
+/**
+ * The raw Anthropic SSE events carried inside `stream_event.event`, captured verbatim in
+ * PHASE3-STATE F1. The index lives on the event, the content on `delta`; the outer
+ * `StreamPartialEvent` — not the inner event — is what carries `parent_tool_use_id`.
+ */
+export interface SseMessageStart {
+	type: 'message_start';
+	message?: {
+		id?: string;
+		model?: string;
+		usage?: unknown;
+	};
+}
+
+export interface SseContentBlockStart {
+	type: 'content_block_start';
+	index: number;
+	/** The empty shell of the block that is opening: `{"type":"thinking","thinking":"","signature":""}`. */
+	content_block?: ContentBlock;
+}
+
+export interface SseTextDelta {
+	type: 'text_delta';
+	text: string;
+}
+
+export interface SseThinkingDelta {
+	type: 'thinking_delta';
+	thinking: string;
+	/** Observed as `null` throughout; the usable counter is `system/thinking_tokens` instead. */
+	estimated_tokens?: number | null;
+}
+
+/** The redacted-thinking signature. Carries no user-visible content. */
+export interface SseSignatureDelta {
+	type: 'signature_delta';
+	signature: string;
+}
+
+export type SseDelta = SseTextDelta | SseThinkingDelta | SseSignatureDelta | { type: string };
+
+export interface SseContentBlockDelta {
+	type: 'content_block_delta';
+	index: number;
+	delta?: SseDelta;
+}
+
+export interface SseContentBlockStop {
+	type: 'content_block_stop';
+	index: number;
+}
+
+export interface SseMessageDelta {
+	type: 'message_delta';
+	delta?: { stop_reason?: string | null };
+	usage?: unknown;
+}
+
+export type SseEvent =
+	| SseMessageStart
+	| SseContentBlockStart
+	| SseContentBlockDelta
+	| SseContentBlockStop
+	| SseMessageDelta
+	| { type: string };
+
 /** Only present with `--include-partial-messages` (Phase 3). Carries the raw Anthropic SSE event. */
 export interface StreamPartialEvent {
 	type: 'stream_event';
 	session_id?: string;
+	/** Populated for subagent output, which is hidden in v1. Sits here, not on `event`. */
 	parent_tool_use_id?: string | null;
-	event?: unknown;
+	event?: SseEvent;
+	ttft_ms?: number;
+}
+
+/**
+ * `system/thinking_tokens`. `estimated_tokens` is cumulative within the message and restarts on the
+ * next turn (PHASE3-STATE F3), so it is written to the open thinking block, not accumulated.
+ */
+export interface SystemThinkingTokensEvent {
+	type: 'system';
+	subtype: 'thinking_tokens';
+	estimated_tokens?: number;
+	estimated_tokens_delta?: number;
+	session_id?: string;
 }
 
 export interface ResultEvent {
@@ -117,11 +197,19 @@ export interface ResultEvent {
 	ttft_ms?: number;
 }
 
+/**
+ * The reply to a `control_request`. The payload nests twice — the subtype and the echoed
+ * `request_id` are inside `response`, not at the top level (PHASE3-STATE F4):
+ * `{"type":"control_response","response":{"subtype":"success","request_id":"int-1","response":{"still_queued":[]}}}`
+ */
 export interface ControlResponseEvent {
 	type: 'control_response';
-	request_id?: string;
-	subtype?: string;
-	response?: unknown;
+	response?: {
+		subtype?: string;
+		request_id?: string;
+		error?: string;
+		response?: unknown;
+	};
 }
 
 export interface RateLimitEvent {
@@ -154,6 +242,14 @@ export function isAssistantEvent(ev: StreamJsonEvent): ev is AssistantEvent {
 
 export function isResultEvent(ev: StreamJsonEvent): ev is ResultEvent {
 	return ev.type === 'result';
+}
+
+export function isStreamPartialEvent(ev: StreamJsonEvent): ev is StreamPartialEvent {
+	return ev.type === 'stream_event';
+}
+
+export function isThinkingTokensEvent(ev: StreamJsonEvent): ev is SystemThinkingTokensEvent {
+	return ev.type === 'system' && (ev as SystemOtherEvent).subtype === 'thinking_tokens';
 }
 
 /**
@@ -192,6 +288,19 @@ export function userMessageLine(text: string): string {
 			role: 'user',
 			content: [{ type: 'text', text }],
 		},
+	};
+	return `${JSON.stringify(payload)}\n`;
+}
+
+/**
+ * The stdin payload that stops the turn in flight (RESEARCH B4, re-measured in PHASE3-STATE F4:
+ * 2 ms to the `control_response`). The process stays alive and the next turn is normal.
+ */
+export function interruptRequestLine(requestId: string): string {
+	const payload = {
+		type: 'control_request',
+		request_id: requestId,
+		request: { subtype: 'interrupt' },
 	};
 	return `${JSON.stringify(payload)}\n`;
 }

@@ -25,6 +25,16 @@
 
 /* --- message list ------------------------------------------------------- */
 
+/* The scroller's positioned parent. The jump-to-bottom button is anchored to this, not to
+   .guki-messages: a child of the scroller would scroll away with the content. */
+.guki-messages-wrap {
+	position: relative;
+	flex: 1 1 auto;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
 .guki-messages {
 	flex: 1 1 auto;
 	min-height: 0;
@@ -91,15 +101,136 @@
 	max-width: 100%;
 }
 
+/* An assistant turn is a column of blocks, so the body itself carries no bubble — the bubble
+   belongs to each text block. That is what lets a thinking block sit on its own surface without
+   losing its place in the block order. */
 .guki-message-assistant .guki-message-body {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: var(--size-2-3);
+	padding: 0;
+	width: 100%;
+}
+
+.guki-message-assistant .guki-block-text {
+	border-radius: var(--radius-l);
+	border-bottom-left-radius: var(--radius-s);
+	padding: var(--size-4-2) var(--size-4-3);
+	line-height: var(--line-height-normal);
+	overflow-wrap: anywhere;
 	background-color: var(--background-secondary);
 	color: var(--text-normal);
 	border: 1px solid var(--background-modifier-border);
-	border-bottom-left-radius: var(--radius-s);
 }
 
-.guki-message-assistant .guki-message-body:empty {
+/* Only while the block is streaming. A block still being written is plain text (architectural
+   rule #4), so its newlines have to survive; once the markdown renderer replaces it, Obsidian's
+   own block elements handle their own whitespace and pre-wrap would turn soft wraps inside a
+   paragraph into hard line breaks. Hence a class that is removed, not a permanent rule. */
+.guki-message-assistant .guki-block-text.guki-block-streaming {
+	white-space: pre-wrap;
+}
+
+/* Obsidian's markdown renderer wraps every block in its own element; strip the outer margins
+   so a one-paragraph reply is a tight bubble rather than a padded box. */
+.guki-message-assistant .guki-block-text > :first-child {
+	margin-top: 0;
+}
+
+.guki-message-assistant .guki-block-text > :last-child {
+	margin-bottom: 0;
+}
+
+.guki-message-assistant .guki-block-text:empty {
 	display: none;
+}
+
+/* --- thinking block ------------------------------------------------------ */
+
+/* Collapsed by default, never hidden: a header that is visible from the first thinking delta is
+   the difference between "it is working" and "it has frozen". */
+.guki-block-thinking {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: var(--size-2-2);
+	max-width: 100%;
+}
+
+.guki-thinking-header {
+	box-shadow: none;
+	background-color: transparent;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	padding: var(--size-2-1) var(--size-4-2);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	cursor: var(--cursor);
+	text-align: left;
+}
+
+.guki-thinking-header:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+/* While the block is still streaming, breathe — the one moving thing on an otherwise still panel. */
+.guki-block-thinking.guki-thinking-live .guki-thinking-header {
+	animation: guki-thinking-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes guki-thinking-pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.55; }
+}
+
+.guki-thinking-content {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font-size: var(--font-ui-smaller);
+	line-height: var(--line-height-normal);
+	color: var(--text-muted);
+	background-color: var(--background-primary-alt);
+	border-left: 2px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	padding: var(--size-4-2) var(--size-4-3);
+	max-height: 40vh;
+	overflow-y: auto;
+}
+
+/* --- jump to bottom ------------------------------------------------------ */
+
+/* Not yanking the reader down is correct; leaving them with no sign that a reply landed is not. */
+.guki-jump {
+	position: absolute;
+	bottom: var(--size-4-3);
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 1;
+	padding: var(--size-2-2) var(--size-4-3);
+	border-radius: var(--radius-l);
+	font-size: var(--font-ui-smaller);
+	background-color: var(--background-secondary-alt);
+	color: var(--text-muted);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: var(--shadow-s);
+	cursor: var(--cursor);
+}
+
+.guki-jump:hover {
+	color: var(--text-normal);
+}
+
+.guki-jump.guki-jump-new {
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border-color: var(--interactive-accent);
+}
+
+.guki-jump.guki-jump-new:hover {
+	background-color: var(--interactive-accent-hover);
+	color: var(--text-on-accent);
 }
 
 /* Notice: out-of-band, centred, no bubble tail. */
@@ -195,6 +326,18 @@
 .guki-composer-send:hover {
 	background-color: var(--interactive-accent-hover);
 	color: var(--text-on-accent);
+}
+
+/* Stop: the same button, so the control the reader is already looking at is the one that stops
+   the reply. Deliberately not the error red — stopping is a normal thing to do, not a failure. */
+.guki-composer-send.guki-composer-stop {
+	background-color: var(--background-modifier-border);
+	color: var(--text-normal);
+}
+
+.guki-composer-send.guki-composer-stop:hover {
+	background-color: var(--background-modifier-border-hover);
+	color: var(--text-normal);
 }
 
 /* --- narrow panel ------------------------------------------------------- */

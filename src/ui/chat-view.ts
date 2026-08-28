@@ -14,6 +14,7 @@ export class ChatView extends ItemView {
 	private resizeObserver: ResizeObserver | null = null;
 	private pendingMeasure: number | null = null;
 	private messageList: MessageList | null = null;
+	private composer: Composer | null = null;
 	private unsubscribe: (() => void) | null = null;
 
 	/**
@@ -43,16 +44,20 @@ export class ChatView extends ItemView {
 		const root = this.contentEl.createDiv({ cls: 'guki-root' });
 		this.rootEl = root;
 
-		const messages = root.createDiv({ cls: 'guki-messages' });
+		// A positioned wrapper, not the scroller itself: the jump-to-bottom button has to stay put
+		// while the content behind it scrolls, so it cannot live inside the scrolling element.
+		const messages = root.createDiv({ cls: 'guki-messages-wrap' });
 		this.messageList = new MessageList(this.app, messages, this);
 
 		const footer = root.createDiv({ cls: 'guki-footer' });
-		// Not kept as a field: nothing focuses or clears it from outside, and auto-focusing on
-		// open would steal focus from the editor when the panel is restored at startup.
-		new Composer(footer, this, {
+		// Kept as a field now: the Send/Stop swap is driven from the session state.
+		this.composer = new Composer(footer, this, {
 			onSubmit: (text: string) => {
 				this.session.send(text);
 				return true;
+			},
+			onStop: () => {
+				this.session.interrupt();
 			},
 		});
 
@@ -81,6 +86,7 @@ export class ChatView extends ItemView {
 		this.unsubscribe?.();
 		this.unsubscribe = null;
 		this.messageList = null;
+		this.composer = null;
 
 		// A ResizeObserver is not covered by Component.register*, so disconnect it by hand.
 		this.resizeObserver?.disconnect();
@@ -95,6 +101,7 @@ export class ChatView extends ItemView {
 
 	private syncMessages(): void {
 		this.messageList?.sync(this.session.state.items);
+		this.composer?.setBusy(this.session.busy);
 	}
 
 	/**

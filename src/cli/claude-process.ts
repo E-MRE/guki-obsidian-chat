@@ -67,6 +67,9 @@ export class ClaudeProcess {
 	/**
 	 * `--verbose` is mandatory: without it, `--print` plus `--output-format stream-json` exits 1
 	 * with a one-line stderr (RESEARCH B0).
+	 *
+	 * `--include-partial-messages` is what adds the `stream_event` type — without it the reply
+	 * arrives in one burst when each block completes (RESEARCH B3).
 	 */
 	private buildArgs(): string[] {
 		return [
@@ -76,6 +79,7 @@ export class ClaudeProcess {
 			'--output-format',
 			'stream-json',
 			'--verbose',
+			'--include-partial-messages',
 		];
 	}
 
