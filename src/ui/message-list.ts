@@ -21,6 +21,7 @@ import {
 	type UserItem,
 } from '../core/chat-state';
 import { renderChatMarkdown } from './markdown';
+import { createToolCard, updateToolCard, type RenderedToolCard } from './tool-card';
 
 /** Treat the view as "at the bottom" within this many pixels, so new content keeps following. */
 const STICKY_BOTTOM_SLACK_PX = 48;
@@ -40,6 +41,8 @@ interface RenderedBlock {
 	expanded?: boolean;
 	/** Whether the header currently offers an expander. Starts false: there is nothing to open. */
 	expandable?: boolean;
+	/** `tool_use` blocks only. Holds its own expansion state, so it is updated, never rebuilt. */
+	toolCard?: RenderedToolCard;
 }
 
 interface RenderedItem {
@@ -176,8 +179,9 @@ export class MessageList {
 				break;
 			case 'streaming':
 				// Deferred item D1: blanking this while nothing is on screen yet read as "no reply
-				// is coming". The thinking header now normally fills that gap, but a turn whose
-				// first block is neither text nor thinking would still be silent.
+				// is coming". The thinking header fills that gap, and since Phase 4 a tool card
+				// does too — `hasRenderableContent` counts one, so a turn that opens with a tool
+				// call drops "Working…" as soon as the card appears rather than holding it.
 				entry.metaEl.setText(hasRenderableContent(item) ? '' : 'Working…');
 				break;
 			case 'stopped':
@@ -200,10 +204,6 @@ export class MessageList {
 		const seen = new Set<number>();
 
 		for (const block of blocks) {
-			// tool_use is Phase 4; it is held in the model but has no surface yet.
-			if (block.kind === 'tool_use') {
-				continue;
-			}
 			seen.add(block.index);
 			let rendered = entry.blocks.get(block.index);
 			if (!rendered) {
@@ -231,6 +231,12 @@ export class MessageList {
 			renderedText: '',
 			renderedFinal: false,
 		};
+
+		if (block.kind === 'tool_use') {
+			// Drawn from `content_block_start`, before the arguments have finished streaming — the
+			// header appearing at all is what tells the reader the turn is still moving.
+			rendered.toolCard = createToolCard(el, this.component);
+		}
 
 		if (block.kind === 'thinking') {
 			// Collapsed, never hidden: the header is present from the first thinking delta, so a
@@ -281,6 +287,9 @@ export class MessageList {
 	}
 
 	private updateBlock(block: MessageBlock, rendered: RenderedBlock): boolean {
+		if (block.kind === 'tool_use') {
+			return rendered.toolCard ? updateToolCard(block, rendered.toolCard) : false;
+		}
 		if (block.kind === 'thinking') {
 			return this.updateThinkingBlock(block, rendered);
 		}

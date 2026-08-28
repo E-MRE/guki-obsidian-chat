@@ -32,10 +32,22 @@ export interface ToolUseBlock {
 	input?: unknown;
 }
 
+/**
+ * Arrives on a `user` event, one per completed tool call (PHASE4-STATE F4).
+ *
+ * `content` is typed `unknown` because it genuinely has more than one runtime shape: a plain
+ * `string` on the two error results in the capture, an **array of blocks** on the success result.
+ * `toolResultText()` in `core/tool-policy.ts` is what narrows it.
+ */
 export interface ToolResultBlock {
 	type: 'tool_result';
 	tool_use_id: string;
 	content?: unknown;
+	/**
+	 * Three observed states, not two: **absent** (most successes), explicit `false` (Bash results
+	 * in the Phase 4 capture), and `true`. So every test must be `=== true` — `!== false` marks
+	 * every absent-key success as a failure (PHASE4-STATE F4).
+	 */
 	is_error?: boolean;
 }
 
@@ -61,7 +73,11 @@ export interface SystemOtherEvent {
 	session_id?: string;
 }
 
-export type SystemEvent = SystemInitEvent | SystemThinkingTokensEvent | SystemOtherEvent;
+export type SystemEvent =
+	| SystemInitEvent
+	| SystemThinkingTokensEvent
+	| SystemTaskEvent
+	| SystemOtherEvent;
 
 export interface AssistantEvent {
 	type: 'assistant';
@@ -177,6 +193,35 @@ export interface SystemThinkingTokensEvent {
 	session_id?: string;
 }
 
+/**
+ * `system/task_started`, `task_progress` and `task_notification` — the subagent lifecycle
+ * (PHASE4-STATE F7, captured in `docs/capture-phase4-tools.jsonl`).
+ *
+ * These are what make the "subagent running…" line *live* rather than static: `description`
+ * changes as the subagent works — in the capture it runs "Running List dir and find sample.txt",
+ * then "Finding sample.txt by glob", then "Reading sample.txt" — and `usage.tool_uses` counts up.
+ *
+ * All three carry `tool_use_id`, which is what ties them to the parent `Agent` card.
+ * `task_updated` is deliberately **not** modelled: it carries `task_id` only, with no
+ * `tool_use_id`, so it would need a second index to be useful and it says nothing the
+ * `task_notification` does not.
+ */
+export interface SystemTaskEvent {
+	type: 'system';
+	subtype: 'task_started' | 'task_progress' | 'task_notification';
+	task_id?: string;
+	/** The parent `Agent` tool call's id. */
+	tool_use_id?: string;
+	/** A live, human-readable description of what the subagent is doing right now. */
+	description?: string;
+	subagent_type?: string;
+	usage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number };
+	last_tool_name?: string;
+	/** `task_notification` only: `'completed'` when the subagent has finished. */
+	status?: string;
+	session_id?: string;
+}
+
 export interface ResultEvent {
 	type: 'result';
 	subtype: string;
@@ -242,6 +287,16 @@ export function isAssistantEvent(ev: StreamJsonEvent): ev is AssistantEvent {
 
 export function isResultEvent(ev: StreamJsonEvent): ev is ResultEvent {
 	return ev.type === 'result';
+}
+
+export function isUserEvent(ev: StreamJsonEvent): ev is UserEvent {
+	return ev.type === 'user';
+}
+
+const TASK_SUBTYPES = new Set(['task_started', 'task_progress', 'task_notification']);
+
+export function isTaskEvent(ev: StreamJsonEvent): ev is SystemTaskEvent {
+	return ev.type === 'system' && TASK_SUBTYPES.has((ev as SystemOtherEvent).subtype);
 }
 
 export function isStreamPartialEvent(ev: StreamJsonEvent): ev is StreamPartialEvent {

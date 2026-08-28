@@ -45,6 +45,14 @@
 	gap: var(--size-4-3);
 	padding: var(--size-4-2) var(--size-4-1);
 	scrollbar-gutter: stable;
+
+	/* The bubbles re-enable selection themselves, but the gaps between them must too: Chromium
+	   does not collapse an existing selection on a mousedown that lands in a `user-select: none`
+	   region, so clicking beside a selected reply left it stuck highlighted until the reader
+	   clicked the selection itself (Emre, Phase 4 acceptance run). The scroller is content; only
+	   the composer and the buttons stay unselectable. */
+	-webkit-user-select: text;
+	user-select: text;
 }
 
 .guki-message {
@@ -52,6 +60,12 @@
 	flex-direction: column;
 	gap: var(--size-2-2);
 	max-width: 85%;
+
+	/* Obsidian's shell turns selection off everywhere outside an editor surface, and our panel is
+	   not on its list — so a reply could be read but never copied. Nothing here disabled it; this
+	   turns it back on for message content only, leaving the composer and buttons alone. */
+	-webkit-user-select: text;
+	user-select: text;
 }
 
 .guki-message-body {
@@ -92,6 +106,16 @@
 	color: var(--text-on-accent);
 	white-space: pre-wrap;
 	border-bottom-right-radius: var(--radius-s);
+}
+
+/* Obsidian's selection highlight is accent-tinted, and so is this bubble — so a selection inside
+   the user's own message was invisible and only the cursor shape gave it away (Emre, Phase 4
+   acceptance run). The reply bubbles sit on a neutral background and never had the problem.
+   Inverting the two colours the bubble already uses keeps it inside the theme. */
+.guki-message-user .guki-message-body::selection,
+.guki-message-user .guki-message-body ::selection {
+	background-color: var(--text-on-accent);
+	color: var(--interactive-accent);
 }
 
 /* Assistant: a quiet card on the left. */
@@ -207,6 +231,234 @@
 	padding: var(--size-4-2) var(--size-4-3);
 	max-height: 40vh;
 	overflow-y: auto;
+}
+
+/* --- tool card ----------------------------------------------------------- */
+
+/* A tool call is a quieter surface than a reply: same width, less contrast, no bubble tail. It
+   still has to be visible from the moment it opens — three consecutive tool calls with no card at
+   all is what made the panel look frozen before Phase 4. */
+.guki-block-tool_use {
+	width: 100%;
+	max-width: 100%;
+}
+
+.guki-tool-card {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background-color: var(--background-primary-alt);
+	overflow: hidden;
+}
+
+.guki-tool-header {
+	display: flex;
+	align-items: center;
+	/* Explicit, because this is a <button> and Obsidian's own button rule centres its content. It
+	   only showed in the narrow layout: while the summary sits on the same row it absorbs every
+	   spare pixel, so there is nothing to centre, but once it wraps to its own line the icon and
+	   the tool name drifted to the middle of the row (Emre's Phase 4 acceptance run, step 9). */
+	justify-content: flex-start;
+	gap: var(--size-2-3);
+	width: 100%;
+	/* Same reason: Obsidian gives buttons a fixed height, which is fine while the header is one
+	   row. In the narrow layout the summary wraps to a second row, the button does not grow, and
+	   the card's `overflow: hidden` sliced the path in half (Emre's Phase 4 acceptance run). */
+	height: auto;
+	min-height: 0;
+	box-shadow: none;
+	background-color: transparent;
+	border: none;
+	border-radius: 0;
+	padding: var(--size-2-2) var(--size-4-2);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	cursor: var(--cursor);
+	text-align: left;
+}
+
+.guki-tool-header:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.guki-tool-icon {
+	display: flex;
+	flex: 0 0 auto;
+	color: var(--text-faint);
+}
+
+/* `IconName` is just `string`, so a name that stops existing silently adds no SVG. Collapsing the
+   empty holder means that costs a glyph, not a hole in the row. */
+.guki-tool-icon:empty {
+	display: none;
+}
+
+.guki-tool-icon .svg-icon {
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
+.guki-tool-name {
+	flex: 0 0 auto;
+	font-weight: var(--font-medium);
+	color: var(--text-normal);
+}
+
+/* The primary argument. It gives up its width first, because the tool name and the status are
+   what the reader scans for. */
+.guki-tool-summary {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--font-monospace);
+	font-size: var(--font-smallest);
+	color: var(--text-muted);
+}
+
+/* The subagent line lives here and carries a live description, so it can be long. It is capped
+   and ellipsised rather than allowed to push the tool name off the row. */
+.guki-tool-status {
+	flex: 0 1 auto;
+	min-width: 0;
+	max-width: 50%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--text-faint);
+}
+
+.guki-tool-status:empty {
+	display: none;
+}
+
+/* Running: the same pulse the thinking header uses, for the same reason — one moving thing on an
+   otherwise still panel reads as progress rather than as a freeze. */
+.guki-tool-card.guki-tool-running .guki-tool-status {
+	animation: guki-thinking-pulse 1.6s ease-in-out infinite;
+	color: var(--text-accent);
+}
+
+.guki-tool-card.guki-tool-error {
+	border-color: var(--text-error);
+}
+
+.guki-tool-card.guki-tool-error .guki-tool-status {
+	color: var(--text-error);
+}
+
+.guki-tool-body {
+	border-top: 1px solid var(--background-modifier-border);
+	padding: var(--size-4-2);
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+}
+
+.guki-tool-diffstat {
+	font-size: var(--font-smallest);
+	color: var(--text-faint);
+}
+
+.guki-tool-result-title {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+}
+
+.guki-tool-card.guki-tool-error .guki-tool-result-title {
+	color: var(--text-error);
+}
+
+/* Tool output is not prose. It keeps a scroll cap so one long Read cannot push the reply that
+   follows it off the screen. */
+.guki-tool-args,
+.guki-tool-result {
+	margin: 0;
+	max-height: 30vh;
+	overflow: auto;
+	font-size: var(--font-smallest);
+	background-color: var(--background-primary);
+	border-radius: var(--radius-s);
+	padding: var(--size-4-1) var(--size-4-2);
+}
+
+.guki-tool-empty {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+}
+
+/* --- diff ---------------------------------------------------------------- */
+
+/* Side by side by default; the vertical switch is at the bottom of this file, under .guki-narrow.
+   The layout is decided in CSS, not in TypeScript, so dragging the panel between the main area
+   and a sidebar re-lays it out without re-rendering the diff. */
+.guki-diff {
+	display: flex;
+	flex-direction: row;
+	gap: var(--size-2-3);
+	align-items: stretch;
+}
+
+.guki-diff-pane {
+	flex: 1 1 0;
+	min-width: 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	overflow: hidden;
+}
+
+.guki-diff-pane-title {
+	padding: var(--size-2-1) var(--size-4-1);
+	font-size: var(--font-smallest);
+	color: var(--text-faint);
+	background-color: var(--background-secondary);
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.guki-diff-lines {
+	max-height: 30vh;
+	overflow: auto;
+	background-color: var(--background-primary);
+}
+
+.guki-diff-line {
+	display: flex;
+	gap: var(--size-2-2);
+	font-family: var(--font-monospace);
+	font-size: var(--font-smallest);
+	line-height: var(--line-height-tight);
+	padding: 0 var(--size-4-1);
+}
+
+.guki-diff-marker {
+	flex: 0 0 auto;
+	width: 1ch;
+	color: var(--text-faint);
+	user-select: none;
+}
+
+.guki-diff-text {
+	flex: 1 1 auto;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.guki-diff-line.guki-diff-removed {
+	background-color: var(--background-modifier-error);
+}
+
+.guki-diff-line.guki-diff-added {
+	background-color: var(--background-modifier-success);
+}
+
+.guki-diff-line.guki-diff-context {
+	color: var(--text-muted);
+}
+
+.guki-diff-line.guki-diff-empty {
+	color: var(--text-faint);
+	font-style: italic;
 }
 
 /* --- jump to bottom ------------------------------------------------------ */
@@ -373,4 +625,30 @@
 
 .guki-root.guki-narrow .guki-composer-send {
 	padding: var(--size-4-2) var(--size-4-2);
+}
+
+/* The diff goes vertical in the sidebar (PLAN Phase 4.3). Two panes side by side in a 400px pane
+   leaves ~20 characters per line, which turns every line of code into a wrapped paragraph. */
+.guki-root.guki-narrow .guki-diff {
+	flex-direction: column;
+}
+
+/* `flex: 1 1 0` sizes the panes along the main axis, which the line above just turned into the
+   vertical one — so the panes' basis becomes a height of 0, the container's own height is auto so
+   there is no free space to grow into, and `overflow: auto` on `.guki-diff-lines` zeroes the
+   `min-height: auto` that would otherwise hold them open. The whole diff collapsed to a hairline
+   in the sidebar (found in Emre's Phase 4 acceptance run, step 9). Stacked panes size to content. */
+.guki-root.guki-narrow .guki-diff-pane {
+	flex: 0 0 auto;
+}
+
+/* The tool summary drops to its own line rather than being ellipsised down to nothing — in a
+   narrow pane the file path is most of what the card has to say. */
+.guki-root.guki-narrow .guki-tool-header {
+	flex-wrap: wrap;
+}
+
+.guki-root.guki-narrow .guki-tool-summary {
+	flex-basis: 100%;
+	order: 3;
 }

@@ -19,7 +19,9 @@ import {
 	isResultEvent,
 	isStreamPartialEvent,
 	isSystemInitEvent,
+	isTaskEvent,
 	isThinkingTokensEvent,
+	isUserEvent,
 	type AssistantEvent,
 	type ContentBlock,
 	type ResultEvent,
@@ -28,8 +30,12 @@ import {
 	type SseContentBlockStop,
 	type StreamJsonEvent,
 	type StreamPartialEvent,
+	type SystemTaskEvent,
 	type SystemThinkingTokensEvent,
+	type ToolResultBlock,
+	type UserEvent,
 } from '../cli/events';
+import { toolResultText } from './tool-policy';
 import type { AssistantItem, BlockKind, ChatState, MessageBlock } from './chat-state';
 
 /** `terminal_reason` for a turn the user interrupted — "stopped", not an error (RESEARCH B4). */
@@ -44,6 +50,33 @@ export class StreamReducer {
 	private blockBase = 0;
 	private nextFreeSlot = 0;
 	private assistantSlot = 0;
+
+	/**
+	 * `tool_use_id` → slot, for the turn in flight.
+	 *
+	 * This is what makes a `tool_result` find its card. Results **interleave**: in the captured
+	 * turn a result arrives in the middle of a message, before the next `tool_use` block has even
+	 * opened (PHASE4-STATE F4). Consuming results in arrival order would line up on that capture
+	 * and put the output under the wrong tool on the next one, silently.
+	 */
+	private toolSlots = new Map<string, number>();
+
+	/**
+	 * Set when the user pressed Stop and the interrupt control request actually went out for the
+	 * turn in flight. Cleared by `beginTurn`.
+	 *
+	 * `terminal_reason: "aborted_streaming"` is not a reliable cancellation marker on its own. When
+	 * Stop lands while a tool call is waiting for permission, the CLI closes the turn with
+	 * `subtype: "error_during_execution"` and **no `terminal_reason` at all** — found in Emre's
+	 * Phase 4 acceptance run, step 10, which showed a red "The turn ended with
+	 * error_during_execution." for a turn the user had simply stopped.
+	 *
+	 * The subtype cannot be mapped to "stopped" on its own either: `error_during_execution` also
+	 * arrives with no Stop involved, and that is a real error the reader has to see. What separates
+	 * the two is knowing whether *we* asked for the cancellation, and only the SessionManager knows
+	 * that — hence this flag rather than a wider subtype check.
+	 */
+	private interruptSent = false;
 
 	/**
 	 * Called whenever the active turn ends, for any reason. The SessionManager uses it to send the
@@ -69,8 +102,25 @@ export class StreamReducer {
 		this.blockBase = 0;
 		this.nextFreeSlot = 0;
 		this.assistantSlot = 0;
+		this.toolSlots = new Map();
+		this.interruptSent = false;
 		item.status = 'pending';
 		this.state.emitChange();
+	}
+
+	/**
+	 * The SessionManager put an interrupt control request on stdin for the turn in flight. From
+	 * here on this turn ends as "stopped" whatever the CLI reports, because the user asked for it.
+	 *
+	 * A turn that had already finished when the request went out is marked stopped too. That is
+	 * deliberate: the alternative is deciding after the fact which of a completed reply and a
+	 * pressed Stop button was "really" the outcome, and the one thing that must never happen is a
+	 * cancellation surfacing as a failure (the closed Phase 3 decision).
+	 */
+	noteInterruptSent(): void {
+		if (this.active) {
+			this.interruptSent = true;
+		}
 	}
 
 	apply(event: StreamJsonEvent): void {
@@ -90,13 +140,19 @@ export class StreamReducer {
 			this.applyAssistant(event);
 			return;
 		}
+		if (isTaskEvent(event)) {
+			this.applyTaskEvent(event);
+			return;
+		}
+		if (isUserEvent(event)) {
+			this.applyUser(event);
+			return;
+		}
 		if (isResultEvent(event)) {
 			this.applyResult(event);
 			return;
 		}
-		// system/status, hook_*, user, rate_limit_event, control_response: nothing to render yet.
-		// `user` carries tool_result blocks and the synthetic "[Request interrupted by user]" text;
-		// both belong to Phase 4 and to the "stopped" badge respectively, neither needs the text.
+		// system/status, hook_*, rate_limit_event, control_response: nothing to render yet.
 	}
 
 	private applyInit(sessionId: string | null): void {
@@ -111,7 +167,9 @@ export class StreamReducer {
 
 	private applyStreamEvent(event: StreamPartialEvent): void {
 		// Subagent output is hidden in v1; on a stream_event the marker is on the outer envelope.
+		// Hidden, but not silent: the parent card is told that work is happening under it.
 		if (event.parent_tool_use_id) {
+			this.noteSubagentActivity(event.parent_tool_use_id);
 			return;
 		}
 		const item = this.active;
@@ -163,9 +221,139 @@ export class StreamReducer {
 		if (opening?.type === 'tool_use') {
 			block.toolUseId = opening.id;
 			block.toolName = opening.name;
+			// `input` is `{}` here and stays unparseable until the block closes: the
+			// `input_json_delta` fragments split mid-token and the first one is always the empty
+			// string (PHASE4-STATE F2). The complete object arrives on the `assistant` event, so
+			// the card shows "running" until then rather than a half-parsed argument.
+			block.toolPending = true;
+			this.toolSlots.set(opening.id, slot);
 		}
 		item.blocks.set(slot, block);
 		this.markStreaming(item);
+	}
+
+	// --- tool results -------------------------------------------------------
+
+	/**
+	 * Fills a tool card from a `user` event's `tool_result` blocks.
+	 *
+	 * Matched by `tool_use_id` against `toolSlots`, never by arrival order — see the field's own
+	 * comment for why the capture makes that difference load-bearing. An id we do not know is
+	 * dropped: guessing a slot would put a tool's output under a different tool's name.
+	 */
+	private applyUser(event: UserEvent): void {
+		const item = this.active;
+		// A subagent's own tool results arrive as `user` events under the parent's id. Their
+		// content stays hidden in v1; what they contribute is the knowledge that work is still
+		// happening. Their inner `tool_use_id`s are not in `toolSlots` anyway — the subagent's
+		// `assistant` events never registered them — so they could not match a card by accident.
+		if (event.parent_tool_use_id) {
+			this.noteSubagentActivity(event.parent_tool_use_id);
+			return;
+		}
+		const content = event.message.content;
+		if (!item || typeof content === 'string' || content === undefined) {
+			// A `string` content is the synthetic "[Request interrupted by user]" message; the
+			// "stopped" badge already comes from `result.terminal_reason` (RESEARCH B4).
+			return;
+		}
+
+		let touched = false;
+		for (const block of content) {
+			if (block.type !== 'tool_result') {
+				continue;
+			}
+			touched = this.applyToolResult(item, block) || touched;
+		}
+		if (touched) {
+			this.state.emitChange();
+		}
+	}
+
+	private applyToolResult(item: AssistantItem, result: ToolResultBlock): boolean {
+		const slot = this.toolSlots.get(result.tool_use_id);
+		if (slot === undefined) {
+			return false;
+		}
+		const block = item.blocks.get(slot);
+		if (!block) {
+			return false;
+		}
+
+		block.toolPending = false;
+		// Strict `=== true`: the key is absent on a successful result, so `!== false` would mark
+		// every success as an error (PHASE4-STATE F4).
+		block.toolIsError = result.is_error === true;
+		block.toolResultText = toolResultText(result.content);
+		// The parent `Task` call has returned, so its subagent is no longer running.
+		block.subagentActive = false;
+		return true;
+	}
+
+	/**
+	 * A subagent event arrived under `parentId`. Its content stays hidden (closed v1 decision);
+	 * what the parent card gains is a live "subagent running…" line. Emre's rule: silence reads as
+	 * a frozen plugin, and a `Task` call can run for minutes with nothing else on screen.
+	 */
+	private noteSubagentActivity(parentId: string): void {
+		const block = this.toolBlockFor(parentId);
+		if (!block || block.subagentActive === true) {
+			// Already flagged. Subagent events arrive by the hundred; re-emitting on each one
+			// would re-render the transcript for no visible change.
+			return;
+		}
+		block.subagentActive = true;
+		this.state.emitChange();
+	}
+
+	/**
+	 * `system/task_started` / `task_progress` / `task_notification` — what makes the subagent line
+	 * *live* rather than a fixed string. `description` tracks the subagent's current step and
+	 * `usage.tool_uses` counts up, so a `Agent` call that runs for a minute keeps showing movement.
+	 * That is the entire reason PLAN 4.5 exists: silence reads as a frozen plugin.
+	 *
+	 * `task_updated` is not handled: it carries `task_id` with no `tool_use_id`, so it cannot be
+	 * tied to a card without a second index, and `task_notification` already reports completion.
+	 */
+	private applyTaskEvent(event: SystemTaskEvent): void {
+		if (event.tool_use_id === undefined) {
+			return;
+		}
+		const block = this.toolBlockFor(event.tool_use_id);
+		if (!block) {
+			return;
+		}
+
+		if (event.subtype === 'task_notification') {
+			// The subagent is done. The parent card's own `tool_result` will follow and carry the
+			// summary; the live line has nothing left to say.
+			block.subagentActive = false;
+			block.subagentLabel = undefined;
+			this.state.emitChange();
+			return;
+		}
+
+		block.subagentActive = true;
+		if (typeof event.description === 'string' && event.description.length > 0) {
+			block.subagentLabel = event.description;
+		}
+		if (typeof event.usage?.tool_uses === 'number') {
+			block.subagentToolUses = event.usage.tool_uses;
+		}
+		this.state.emitChange();
+	}
+
+	/** The `tool_use` block a `tool_use_id` belongs to, or null. Never guesses a slot. */
+	private toolBlockFor(toolUseId: string): MessageBlock | null {
+		const item = this.active;
+		if (!item) {
+			return null;
+		}
+		const slot = this.toolSlots.get(toolUseId);
+		if (slot === undefined) {
+			return null;
+		}
+		return item.blocks.get(slot) ?? null;
 	}
 
 	private appendDelta(item: AssistantItem, sse: SseContentBlockDelta): void {
@@ -244,6 +432,7 @@ export class StreamReducer {
 	private applyAssistant(event: AssistantEvent): void {
 		// Subagent output is hidden in v1 (closed decision); it is identified by this field.
 		if (event.parent_tool_use_id) {
+			this.noteSubagentActivity(event.parent_tool_use_id);
 			return;
 		}
 		const item = this.active;
@@ -267,6 +456,25 @@ export class StreamReducer {
 			mapped.startedAt = streamed?.startedAt;
 			mapped.endedAt = streamed?.endedAt ?? Date.now();
 			mapped.thinkingTokens = streamed?.thinkingTokens;
+
+			if (mapped.kind === 'tool_use') {
+				// This event replaces the block, so anything the tool card already gained has to
+				// survive it. A `tool_result` is not ordered against this event by anything we
+				// control, so it can already have landed; without this the output would be wiped
+				// and the card would sit on "running" forever.
+				mapped.toolResultText = streamed?.toolResultText;
+				mapped.toolIsError = streamed?.toolIsError;
+				mapped.subagentActive = streamed?.subagentActive;
+				mapped.subagentLabel = streamed?.subagentLabel;
+				mapped.subagentToolUses = streamed?.subagentToolUses;
+				mapped.toolPending = streamed?.toolResultText === undefined;
+				if (mapped.toolUseId !== undefined) {
+					// Also registered here, not only at `content_block_start`: without
+					// `--include-partial-messages` there is no opening event at all.
+					this.toolSlots.set(mapped.toolUseId, slot);
+				}
+			}
+
 			// Replace, not append: this event is authoritative for the block (RESEARCH B3).
 			item.blocks.set(slot, mapped);
 		}
@@ -293,7 +501,9 @@ export class StreamReducer {
 		// cancelled turn leaves a thinking header saying "Thinking…" forever.
 		closeOpenBlocks(item);
 
-		if (event.terminal_reason === ABORTED_STREAMING) {
+		// The interrupt flag is checked first and independently of the subtype: see its declaration
+		// for why `terminal_reason` alone misses a Stop pressed during a pending tool call.
+		if (this.interruptSent || event.terminal_reason === ABORTED_STREAMING) {
 			item.status = 'stopped';
 		} else if (event.is_error === true) {
 			item.status = 'error';
@@ -351,6 +561,12 @@ function closeOpenBlocks(item: AssistantItem): void {
 	for (const block of item.blocks.values()) {
 		block.endedAt ??= now;
 		block.final = true;
+		// A tool whose result never arrived — the turn was cancelled, or the call was denied
+		// before it ran — must stop claiming it is running. Leaving `toolPending` set is the
+		// tool-card version of the thinking header stuck on "Thinking…".
+		block.toolPending = false;
+		block.subagentActive = false;
+		block.subagentLabel = undefined;
 	}
 }
 
@@ -381,6 +597,9 @@ function mapBlock(block: ContentBlock, index: number): MessageBlock | null {
 				final: true,
 				toolUseId: block.id,
 				toolName: block.name,
+				// The fully parsed arguments arrive here and only here (PHASE4-STATE F3). Phase 3
+				// dropped this field, which is why the card had nothing to summarise.
+				toolInput: block.input,
 			};
 		default:
 			// tool_result blocks arrive on `user` events, not here.

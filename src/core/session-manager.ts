@@ -92,7 +92,12 @@ export class SessionManager {
 		}
 		this.interruptCount += 1;
 		const sent = this.process?.write(interruptRequestLine(`guki-int-${String(this.interruptCount)}`)) ?? false;
-		if (!sent) {
+		if (sent) {
+			// The reducer cannot tell a cancellation from a failure by the result event alone: a
+			// Stop pressed while a tool call is pending comes back as `error_during_execution` with
+			// no `terminal_reason`. Telling it that we asked for this is what keeps it "stopped".
+			this.reducer.noteInterruptSent();
+		} else {
 			// No live process to interrupt: the turn is already dead, so say so instead of
 			// leaving the panel on a Stop button that does nothing.
 			this.reducer.failActiveTurn('The turn could not be stopped: the process is gone.');
