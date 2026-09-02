@@ -743,9 +743,11 @@
 	flex: 0 0 auto;
 }
 
+/* A column now: the attachment chips sit above the input row. The row below keeps the layout the
+   composer had before chips existed, so the narrow-pane overrides still apply to this element. */
 .guki-composer {
 	display: flex;
-	align-items: flex-end;
+	flex-direction: column;
 	gap: var(--size-4-2);
 	padding: var(--size-4-2);
 	border: 1px solid var(--background-modifier-border);
@@ -757,6 +759,105 @@
 
 .guki-composer:focus-within {
 	border-color: var(--interactive-accent);
+}
+
+/* The drop target is the whole composer, so the highlight is too — a border on the textarea alone
+   would suggest the text is where the file goes. */
+.guki-composer.guki-composer-dragover {
+	border-color: var(--interactive-accent);
+	background-color: var(--background-modifier-hover);
+}
+
+.guki-composer-row {
+	display: flex;
+	align-items: flex-end;
+	gap: var(--size-4-2);
+}
+
+.guki-composer-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-1);
+}
+
+/* `display: none` rather than an empty flex row: the composer keeps exactly its old height until
+   there is something to show, so attaching nothing changes nothing. */
+.guki-composer-chips-empty {
+	display: none;
+}
+
+.guki-composer-chip {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-1);
+	max-width: 100%;
+	padding: var(--size-4-1) var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background-color: var(--background-secondary);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.guki-composer-chip-icon {
+	display: flex;
+	flex: 0 0 auto;
+	color: var(--text-faint);
+}
+
+/* The name is what gets ellipsised; the icon and the remove button keep their size. The full path
+   is on the chip's aria-label, which is also its tooltip. */
+.guki-composer-chip-name {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.guki-composer-chip-remove {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex: 0 0 auto;
+	padding: 0;
+	width: var(--size-4-4);
+	height: var(--size-4-4);
+	border: none;
+	box-shadow: none;
+	background-color: transparent;
+	color: var(--text-faint);
+	cursor: pointer;
+}
+
+.guki-composer-chip-remove:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+/* Same footprint as the send button's height so the row's baseline does not shift. */
+.guki-composer-attach {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex: 0 0 auto;
+	padding: var(--size-4-2);
+	border: none;
+	box-shadow: none;
+	background-color: transparent;
+	color: var(--text-muted);
+	border-radius: var(--radius-m);
+	cursor: pointer;
+}
+
+.guki-composer-attach:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.guki-composer-attach:disabled {
+	color: var(--text-faint);
+	cursor: default;
 }
 
 .guki-composer-input {
@@ -831,6 +932,10 @@
 
 .guki-root.guki-narrow .guki-composer {
 	padding: var(--size-4-1);
+	gap: var(--size-4-1);
+}
+
+.guki-root.guki-narrow .guki-composer-row {
 	gap: var(--size-4-1);
 }
 

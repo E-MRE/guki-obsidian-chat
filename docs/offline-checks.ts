@@ -31,6 +31,10 @@
  * M.  A real Stop-pressed-while-a-card-is-open turn, replayed from
  *     `docs/capture-phase5a-stop.jsonl`. §L's own cancellation checks answered the broker directly
  *     and missed the ordering that made the defect; this replays the CLI's real event order.
+ * O.  Phase 6: attachments — that an in-vault chip always reaches the CLI as an `@"…"` reference,
+ *     and that nothing which failed the vault-boundary check can become one. The `@` form skips
+ *     the permission system entirely, so this is the same class of invisible decision as §N's
+ *     auto-allows: a wrong reference produces no error, just a model that never saw the file.
  * N.  Phase 5b: the permission policy — PLAN §2b's table and the Bash gate, over a real temp vault
  *     with a real symlink out of it, plus the broker end to end. Longer than any other section
  *     because an auto-allow is invisible: it produces no card, so every `allow` branch needs an
@@ -70,6 +74,16 @@ import { containsPath, permissionVerdict } from '../src/core/permission-policy';
 import { FALLBACK_VAULT_PATH } from '../src/constants';
 import { tokenizeCommand } from '../src/core/bash-whitelist';
 import { createVaultPaths } from '../src/core/vault-path-resolver';
+import {
+	addAttachment,
+	attachmentReference,
+	composeMessage,
+	hasSendableContent,
+	type Attachment,
+	type AttachmentLocation,
+} from '../src/core/attachments';
+import { resolveVaultFile } from '../src/core/attachment-resolver';
+import { FileSystemAdapter, TFile } from 'obsidian';
 
 let failures = 0;
 
@@ -103,6 +117,26 @@ function eqCall<T>(name: string, produce: () => T, expected: T): void {
 		return;
 	}
 	eq(name, actual, expected);
+}
+
+/**
+ * A harness precondition, not an assertion: the thing the section is about must exist before any
+ * of its checks mean anything.
+ *
+ * Throwing is deliberate, and it is the opposite of `check`. If `mcpServers['guki-perm']` is
+ * missing, or `spawn` handed back no `stdin`, then every assertion below it is testing nothing —
+ * a `check` there would report a tidy FAIL and let the run continue past a harness that is no
+ * longer wired up. This stops the run at the first real cause instead.
+ *
+ * It also exists because `noUncheckedIndexedAccess` is on: indexing a `Record` yields
+ * `T | undefined`, and the alternative to a named helper is `!` scattered at each site, which
+ * silences the compiler without saying why the value is there.
+ */
+function required<T>(value: T | null | undefined, what: string): T {
+	if (value === null || value === undefined) {
+		throw new Error(`harness precondition failed: ${what} is missing`);
+	}
+	return value;
 }
 
 // --- A. replay the real capture -------------------------------------------
@@ -1204,9 +1238,12 @@ async function startBridge(): Promise<{
 
 	const configPath = broker.cliArgs[1] ?? '';
 	const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
-	const entry = (config.mcpServers as Record<string, { command: string; args: string[]; env: Record<string, string> }>)[
-		'guki-perm'
-	];
+	const entry = required(
+		(config.mcpServers as Record<string, { command: string; args: string[]; env: Record<string, string> }>)[
+			'guki-perm'
+		],
+		"mcpServers['guki-perm']",
+	);
 
 	const child = spawn(entry.command, entry.args, {
 		env: { ...process.env, ...entry.env },
@@ -1321,9 +1358,12 @@ console.log('K1. The generated mcp.json is the one PLAN Phase 5 task 3 specifies
 	check('no --permission-mode flag at all', !args.includes('--permission-mode'), args.join(' '));
 	check('no --strict-mcp-config', !args.includes('--strict-mcp-config'), args.join(' '));
 
-	const entry = (bridge.config.mcpServers as Record<string, { command: string; args: string[]; env: Record<string, string> }>)[
-		'guki-perm'
-	];
+	const entry = required(
+		(bridge.config.mcpServers as Record<string, { command: string; args: string[]; env: Record<string, string> }>)[
+			'guki-perm'
+		],
+		"mcpServers['guki-perm']",
+	);
 	// A bare `node` fails silently — the stdio server never spawns and never appears in the tool
 	// list, with no error of its own (RESEARCH B5, trap 7).
 	check('the interpreter is an absolute path, never a bare name', entry.command.startsWith('/'), entry.command);
@@ -1581,7 +1621,7 @@ console.log('K7. The server dies with the panel even when dispose() never runs')
 	// has to be enough on its own — otherwise a crashed Obsidian leaves an orphan behind.
 	const harness = await spawnServerAgainstBareSocket();
 	const socket = await harness.socket;
-	harness.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })}\n`);
+	required(harness.child.stdin, 'the spawned server\'s stdin').write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })}\n`);
 	const init = await harness.rpc.next();
 	eq('the server is serving', init.id, 1);
 
@@ -1609,7 +1649,7 @@ console.log('K8. The server dies with the CLI');
 	// The pid is what `dispose()` sends SIGTERM to; without it the backstop has no target.
 	eq('...and its own pid', hello.pid, harness.child.pid);
 
-	harness.child.stdin.end();
+	required(harness.child.stdin, 'the spawned server\'s stdin').end();
 	const exit = await waitForExit(harness.child);
 	check('stdin ending ends the server', !exit.timedOut, JSON.stringify(exit));
 	eq('...cleanly', exit.code, 0);
@@ -3224,6 +3264,282 @@ console.log('N13. A policy that throws produces a card, not a hung CLI');
 	eq('...on the right id', answered.id, 71);
 	bridge.stop();
 	process.removeListener('uncaughtException', onUncaught);
+}
+
+// --- O. Phase 6: attachments -----------------------------------------------
+
+/*
+ * Two things, and only the second one is about a string.
+ *
+ * `attachmentReference` decides the *syntax*, and the syntax is a security decision (PLAN's Phase
+ * 6 table): `@path` is expanded by the CLI client-side, before the model sees the message — no
+ * `Read`, no tool call, no policy consultation. So `@` is correct for a path already inside the
+ * vault, where §2b would allow the read anyway, and catastrophic for one outside it.
+ *
+ * `resolveVaultFile` decides *whether a chip may exist at all*, and it is the only thing that
+ * authorises an `@`. It runs against `POLICY_VAULT` — a real directory with a real symlink out of
+ * it — for the same reason §N does: the rule is "the resolved path", and a note that is a symlink
+ * pointing out of the vault looks like an ordinary note everywhere else in Obsidian.
+ *
+ * The quoting asserted below is not style. Measured 2026-09-02 against the real CLI (2.1.258),
+ * every read tool in `--disallowedTools` so no `Read` fallback could mask the result: a bare
+ * `@/path/with a space/note.md` **did not expand at all** — the model answered `NO_CONTENT` with
+ * `permission_denials: []`. Backslash-escaping the spaces did not expand either. `@"…"` expanded,
+ * with and without spaces, and with an emoji folder. In this vault (`🏰 300-Projects`,
+ * `📥 000-Inbox/Dump`) the unquoted form would have failed on nearly every real note while
+ * producing no error anywhere, which is why it is pinned here rather than left to the eye.
+ *
+ * To drive this section red: drop the quotes in `attachmentReference`, or make `resolveVaultFile`
+ * trust `getFullPath` without the `containsPath` check. Each breaks O1/O2 and O3 respectively.
+ */
+
+console.log('O1. attachmentReference: the @-form, and when there must not be one');
+{
+	/*
+	 * Table-driven so task 2 extends it by adding rows, not by writing a second test. The
+	 * `outside-vault` rows are already here: the *UI* for out-of-vault attachments is task 2, but
+	 * the rule is two-way and a two-way rule with one branch asserted is how the wrong half gets
+	 * filled in later.
+	 */
+	const cases: { name: string; path: string; location: AttachmentLocation; want: string | null }[] = [
+		{
+			name: 'an in-vault path is quoted',
+			path: '/vault/notes/todo.md',
+			location: 'in-vault',
+			want: '@"/vault/notes/todo.md"',
+		},
+		{
+			// The measured reason this function exists.
+			name: 'a space does not truncate it',
+			path: '/vault/300 Projects/My Note.md',
+			location: 'in-vault',
+			want: '@"/vault/300 Projects/My Note.md"',
+		},
+		{
+			name: 'an emoji folder is quoted like any other',
+			path: '/vault/\u{1F3F0} 300-Projects/Sellina.md',
+			location: 'in-vault',
+			want: '@"/vault/\u{1F3F0} 300-Projects/Sellina.md"',
+		},
+		{
+			// Quoting a spaceless path expands too (measured), so there is deliberately no branch
+			// on "does it contain a space" — one code path, and no rarely-taken half to rot.
+			name: 'a spaceless path is quoted anyway, so there is one code path',
+			path: '/vault/todo.md',
+			location: 'in-vault',
+			want: '@"/vault/todo.md"',
+		},
+		{
+			// `@"a "quoted" name"` closes early and expands to nothing — measured. Answering null
+			// sends the plain path instead, which the model reads through §2b's gate.
+			name: 'a double quote in the name gets no @-form at all',
+			path: '/vault/notes/Emre\'s "quoted" note.md',
+			location: 'in-vault',
+			want: null,
+		},
+		{
+			// Not separately measured — it follows from the measured rule that `@` parsing stops
+			// at whitespace, which a quoted string cannot carry past a line break.
+			name: 'a newline in the name gets no @-form either',
+			path: '/vault/notes/weird\nsecond line.md',
+			location: 'in-vault',
+			want: null,
+		},
+		{
+			name: 'an empty path is never a reference',
+			path: '',
+			location: 'in-vault',
+			want: null,
+		},
+		{
+			// The direction that matters: `@` here would silently disable all of Phase 5b for this
+			// file. A plain path makes the model call `Read`, which raises the card.
+			name: 'an out-of-vault path is a PLAIN path, never @',
+			path: '/etc/hosts',
+			location: 'outside-vault',
+			want: '/etc/hosts',
+		},
+	];
+
+	for (const c of cases) {
+		const attachment: Attachment = {
+			absolutePath: c.path,
+			displayName: 'x',
+			location: c.location,
+		};
+		eqCall(c.name, () => attachmentReference(attachment), c.want);
+	}
+
+	// Stated once as its own assertion rather than left implicit in the table: no reference for an
+	// out-of-vault path may begin with `@`.
+	const outside = attachmentReference({
+		absolutePath: '/etc/hosts',
+		displayName: 'hosts',
+		location: 'outside-vault',
+	});
+	check('...and it does not start with @', outside !== null && !outside.startsWith('@'), String(outside));
+}
+
+console.log('O2. composeMessage: an in-vault path reaches the CLI only as an @-form');
+{
+	/**
+	 * The acceptance criterion, as an assertion: **every** occurrence of the path in the outgoing
+	 * message is wrapped in `@"…"`, and there is at least one.
+	 *
+	 * Checking `message.includes('@"' + path + '"')` would not do it — that passes while a second,
+	 * bare copy of the same path also sits in the message, which is precisely the bug that has no
+	 * visible symptom. So this walks every occurrence.
+	 */
+	function everyMentionIsAtForm(message: string, absolutePath: string): boolean {
+		let from = 0;
+		let seen = 0;
+		for (;;) {
+			const at = message.indexOf(absolutePath, from);
+			if (at === -1) {
+				break;
+			}
+			seen += 1;
+			const before = message.slice(Math.max(0, at - 2), at);
+			const after = message.slice(at + absolutePath.length, at + absolutePath.length + 1);
+			if (before !== '@"' || after !== '"') {
+				return false;
+			}
+			from = at + absolutePath.length;
+		}
+		return seen > 0;
+	}
+
+	const spaced = '/vault/\u{1F3F0} 300-Projects/Sellina.md';
+	const inVault = (path: string): Attachment => ({
+		absolutePath: path,
+		displayName: 'n.md',
+		location: 'in-vault',
+	});
+
+	const one = composeMessage('what does this say?', [inVault(spaced)]);
+	check('the path appears only as @"…"', everyMentionIsAtForm(one, spaced), one);
+	check('...and the typed text survives', one.includes('what does this say?'), one);
+
+	// Two chips, and the text after them.
+	const other = '/vault/notes/todo.md';
+	const two = composeMessage('compare these', [inVault(spaced), inVault(other)]);
+	check('both paths are @-forms (first)', everyMentionIsAtForm(two, spaced), two);
+	check('both paths are @-forms (second)', everyMentionIsAtForm(two, other), two);
+
+	// An attachment on its own is a real message — "here, look at this".
+	const bare = composeMessage('', [inVault(spaced)]);
+	check('an attachment with no text still sends the reference', everyMentionIsAtForm(bare, spaced), bare);
+	eq('...and nothing else', bare, `@"${spaced}"`);
+
+	// No attachments: unchanged behaviour, and no stray decoration.
+	eq('no attachments leaves the text alone', composeMessage('  hello  ', []), 'hello');
+
+	// The quote-in-name case degrades to a plain path rather than to nothing. Asserted as its own
+	// row because "the file silently went missing from the prompt" is the failure to avoid.
+	const quoted = '/vault/notes/Emre\'s "quoted" note.md';
+	const degraded = composeMessage('read it', [inVault(quoted)]);
+	check('a quote-in-name path is still in the prompt, as a plain path', degraded.includes(quoted), degraded);
+	check('...and is not wrapped in a broken @-form', !degraded.includes(`@"${quoted}"`), degraded);
+}
+
+console.log('O3. resolveVaultFile: only a path that resolves inside the vault becomes a chip');
+{
+	// A real adapter instance, because the production guard is `instanceof FileSystemAdapter`. Its
+	// `getFullPath` does what Obsidian's does: vault-relative in, absolute out.
+	const adapter = new FileSystemAdapter();
+	adapter.getFullPath = (relative: string) => `${POLICY_VAULT.root}/${relative}`;
+
+	function vaultFile(relativePath: string): TFile {
+		const file = new TFile();
+		return Object.assign(file, {
+			path: relativePath,
+			name: relativePath.slice(relativePath.lastIndexOf('/') + 1),
+		}) as TFile;
+	}
+
+	const app = { vault: { adapter, getName: () => 'vault', getFileByPath: () => null } } as never;
+
+	const ordinary = resolveVaultFile(app, vaultPaths, vaultFile('notes/todo.md'));
+	check('an ordinary note resolves', ordinary !== null);
+	eq('...to an absolute path', ordinary?.absolutePath, `${POLICY_VAULT.root}/notes/todo.md`);
+	eq('...marked in-vault, which is what authorises the @', ordinary?.location, 'in-vault');
+	eq('...with the file name on the chip', ordinary?.displayName, 'todo.md');
+	// The whole point, joined up: this is the string the CLI will be handed.
+	eq(
+		'...and composes to an @-form',
+		composeMessage('', ordinary ? [ordinary] : []),
+		`@"${POLICY_VAULT.root}/notes/todo.md"`,
+	);
+
+	/*
+	 * The security case. `<vault>/escape` is a real symlink to `<outside>`, so
+	 * `escape/secret.txt` is a path Obsidian would happily show inside the vault and that resolves
+	 * outside it. An `@` on this would hand the CLI a file from outside the vault with no card and
+	 * no denial — the exact bypass PLAN §5 decision 11 refuses to add a fifth of.
+	 */
+	const escaped = resolveVaultFile(app, vaultPaths, vaultFile('escape/secret.txt'));
+	eq('a note that resolves through a symlink OUT of the vault is refused', escaped, null);
+
+	// And nothing that was refused can reach the message.
+	eq('...so it contributes nothing to the prompt', composeMessage('read it', []), 'read it');
+
+	// A vault-relative path climbing out with `..`. `realpath` applies `..` after the symlink, so
+	// this is the ordering trap §N2 exists for, arriving through the attachment door instead.
+	eq(
+		'`..` back out of the vault is refused',
+		resolveVaultFile(app, vaultPaths, vaultFile('escape/../outside/secret.txt')),
+		null,
+	);
+
+	/*
+	 * **Existence is deliberately not the gate.** A missing file inside the vault still resolves
+	 * inside it, because `createVaultPaths` resolves the closest existing *ancestor* and appends
+	 * the remainder — the behaviour §N needs so the policy can judge a `Write` to a file that does
+	 * not exist yet. Attachments inherit it, and that is right: the boundary is the security
+	 * question, and existence is not. A chip's source is always a `TFile` Obsidian just handed us,
+	 * so the only way to get here is a file deleted between the drag and the drop — a race whose
+	 * cost is an `@` that expands to nothing, not a file read from outside the vault.
+	 *
+	 * Asserted rather than left unsaid, because the tempting "fix" is to add an existence check,
+	 * and that would put a filesystem read into a function that deliberately does not do one.
+	 */
+	const missing = resolveVaultFile(app, vaultPaths, vaultFile('notes/gone.md'));
+	eq('a missing in-vault file is still in-vault', missing?.location, 'in-vault');
+	eq(
+		'...at the path it would have',
+		missing?.absolutePath,
+		`${POLICY_VAULT.root}/notes/gone.md`,
+	);
+
+	// The adapter guard. On a non-file adapter there is no filesystem path to hand over at all,
+	// and a cast that silently succeeded would produce a meaningless string.
+	const mobile = { vault: { adapter: {}, getName: () => 'vault', getFileByPath: () => null } } as never;
+	eq(
+		'a non-FileSystemAdapter vault attaches nothing',
+		resolveVaultFile(mobile, vaultPaths, vaultFile('notes/todo.md')),
+		null,
+	);
+}
+
+console.log('O4. the chip list');
+{
+	const chip = (path: string): Attachment => ({
+		absolutePath: path,
+		displayName: 'n.md',
+		location: 'in-vault',
+	});
+
+	// Dragging the same note twice is one chip — and the same guard is what stops the drag-manager
+	// source and the `dataTransfer` fallback from both adding it.
+	const once = addAttachment([], chip('/vault/a.md'));
+	eq('the first attachment is added', once.length, 1);
+	eq('the same path again is not', addAttachment(once, chip('/vault/a.md')).length, 1);
+	eq('a different path is', addAttachment(once, chip('/vault/b.md')).length, 2);
+
+	// The composer's emptiness check cannot be the textarea alone.
+	eq('empty text with no chips is not sendable', hasSendableContent('   ', []), false);
+	eq('empty text with a chip is', hasSendableContent('   ', [chip('/vault/a.md')]), true);
+	eq('text with no chips is', hasSendableContent('hi', []), true);
 }
 
 rmSync(POLICY_VAULT.base, { recursive: true, force: true });

@@ -17,9 +17,12 @@ import {
 	type SystemInitEvent,
 } from '../cli/events';
 import { CLAUDE_BINARY_OVERRIDE, FALLBACK_VAULT_PATH, MCP_SERVER_NAME } from '../constants';
+import { composeMessage, type Attachment } from './attachments';
 import { ChatState, type AssistantItem } from './chat-state';
 import { PermissionBroker, type PermissionBehavior } from './permission-broker';
+import type { VaultPaths } from './permission-policy';
 import { StreamReducer } from './stream-reducer';
+import { createVaultPaths } from './vault-path-resolver';
 
 /** The one status that means the approval gate is really there (PHASE5A-STATE F1). */
 const MCP_CONNECTED = 'connected';
@@ -40,6 +43,7 @@ export class SessionManager {
 	private readonly queue: QueuedTurn[] = [];
 	private disposed = false;
 	private interruptCount = 0;
+	private vaultPathsPromise: Promise<VaultPaths> | null = null;
 
 	/**
 	 * Set when the panel must stop accepting input, with the reason shown in the composer.
@@ -115,16 +119,38 @@ export class SessionManager {
 		return FALLBACK_VAULT_PATH;
 	}
 
-	/** Enqueues a message. Returns immediately; the UI follows `ChatState`. */
-	send(text: string): void {
-		const trimmed = text.trim();
-		if (trimmed.length === 0 || this.disposed || this.blockedReason !== null) {
+	/**
+	 * The vault boundary, for the attachment checks the view makes before a chip exists.
+	 *
+	 * Memoised, and built from `this.vaultPath` — the *same* string the broker is handed and the
+	 * CLI is spawned with. That single source is what the broker's own comment is about; two
+	 * `VaultPaths` objects over one root string cannot drift, whereas two derivations of the root
+	 * could. It is not taken from the broker because the broker only builds its copy inside
+	 * `start()`, which also spawns the permission server — attaching a chip must not do that.
+	 */
+	vaultPaths(): Promise<VaultPaths> {
+		this.vaultPathsPromise ??= createVaultPaths(this.vaultPath);
+		return this.vaultPathsPromise;
+	}
+
+	/**
+	 * Enqueues a message. Returns immediately; the UI follows `ChatState`.
+	 *
+	 * Attachments become path references in the text (`composeMessage`) rather than a separate
+	 * field on the wire: we hold a path, not bytes, so there is nothing to send but the prompt.
+	 * The composed message is what goes into `ChatState` too — the panel shows what was actually
+	 * sent, including the `@` references, rather than hiding the mechanism that skips the
+	 * permission gate.
+	 */
+	send(text: string, attachments: readonly Attachment[] = []): void {
+		const message = composeMessage(text, attachments);
+		if (message.length === 0 || this.disposed || this.blockedReason !== null) {
 			return;
 		}
 
-		this.state.addUserMessage(trimmed);
+		this.state.addUserMessage(message);
 		const item = this.state.addAssistantMessage();
-		this.queue.push({ text: trimmed, item });
+		this.queue.push({ text: message, item });
 		void this.pump();
 	}
 

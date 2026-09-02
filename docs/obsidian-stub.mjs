@@ -7,6 +7,12 @@ export class FileSystemAdapter {}
 // Nothing in these checks calls it; the stub only has to exist for the bundle to link.
 export const Platform = { isDesktop: true };
 
+// Phase 6: `attachment-resolver.ts` checks `instanceof TFile` on whatever Obsidian's drag state
+// hands back, and `instanceof FileSystemAdapter` before it trusts a path. Both have to be real
+// classes here, not shapes, or the guard under test would answer "no" for every input and §O would
+// pass by refusing everything.
+export class TFile {}
+
 // Phase 5: `permission-broker.ts` imports `normalizePath` as a value. Obsidian's own version
 // collapses duplicate slashes and strips a leading one; the broker only ever builds a
 // `.obsidian/plugins/...` path, so the identity of a well-formed path is all these checks need —

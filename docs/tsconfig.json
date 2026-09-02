@@ -1,0 +1,37 @@
+{
+	// Type-checking for the harnesses in this folder, and for the editor only.
+	//
+	// `docs/` is deliberately outside the root `tsconfig.json` (`include: ["src/**/*.ts"]`) and
+	// outside `eslint.config.mts`, because these files are standalone scripts the plugin build
+	// never bundles — `offline-checks.ts` imports `node:child_process`, `node:net` and `node:fs`,
+	// which `obsidianmd/no-nodejs-modules` rejects on sight and which the browser-targeted root
+	// config has no types for. That stays true: `npm run build` still checks `src/**` only, and a
+	// harness still only proves itself when it is actually run.
+	//
+	// What this file changes is nothing but the editor. Without a project that owns
+	// `offline-checks.ts`, the TS server falls back to its inferred defaults — ES5 target, no
+	// `@types/node` — and reports ~30 phantom errors ("Cannot find name 'node:child_process'",
+	// "Set<number> can only be iterated with --downlevelIteration"). The suggested fix, installing
+	// `@types/node`, is a misdiagnosis: it is already a devDependency. The missing piece is a
+	// project, not a package.
+	//
+	// It is worth having because the harness is 570 assertions long and every phase adds to it.
+	// Writing them with no type-checking is how a test that asserts the wrong shape gets written
+	// and still passes.
+	"extends": "../tsconfig.json",
+	"compilerOptions": {
+		// The root config is browser-targeted (`lib: ["ES2021", "DOM"]`). These scripts run under
+		// Node, so they need its globals and its builtin modules.
+		"types": ["node"],
+		"lib": ["ES2021", "DOM"],
+		// esbuild bundles these to ESM before Node ever sees them (see this folder's header for
+		// the command), so module resolution has to match the bundler's, not Node's.
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"noEmit": true,
+		// `obsidian` is aliased to `obsidian-stub.mjs` at bundle time; TS resolves it to the real
+		// package's types, which is what we want — the stub exists to be checked against them.
+		"allowJs": true
+	},
+	"include": ["**/*.ts"]
+}
