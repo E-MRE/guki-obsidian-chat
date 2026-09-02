@@ -121,6 +121,27 @@ export interface NoticeItem {
 export type PermissionStatus = 'pending' | 'allowed' | 'denied' | 'cancelled';
 
 /**
+ * What the target file held *before* a call, for the tools whose own input does not carry it.
+ *
+ * Three states, and the third one is the point. `Write` sends only the new content, so the approval
+ * card's Before pane can only be honest if someone looks at the file — and "we looked and it was
+ * empty" must never render the same as "we did not look". Emre's acceptance run hit exactly that: a
+ * `Write` about to destroy `merhaba\ndünya` showed `Before: (empty)`. That is the one case where
+ * the card is load-bearing — PLAN §2b carves "an existing file being emptied" out of the edit allow
+ * — and it was the case where the card said the opposite of the truth.
+ *
+ * It lives here rather than in `ui/diff-view.ts` because `core` may not depend on `ui`: this is a
+ * fact about the conversation, and the diff surface is one renderer of it.
+ */
+export type PriorContent =
+	/** Read, and this is what it held. */
+	| { kind: 'content'; text: string }
+	/** Looked, and there is no such file — a create. `(empty)` is the truth here. */
+	| { kind: 'absent' }
+	/** Could not look: unreadable, a directory, too large, or never attempted. */
+	| { kind: 'unknown' };
+
+/**
  * A permission request from the CLI, awaiting an Allow / Deny (PLAN Phase 5.4).
  *
  * It is a top-level item rather than a field on the `tool_use` block it belongs to. `tool_use_id`
@@ -139,6 +160,13 @@ export interface PermissionItem {
 	input: unknown;
 	/** Matches the `tool_use` block in the `assistant` event (RESEARCH B5). Unused in 5a. */
 	toolUseId?: string;
+	/**
+	 * What the target file held before this call, for a `Write` — whose input carries only the new
+	 * content, so the card's Before pane would otherwise be a guess. Read once by the broker, before
+	 * the card exists, so the card is never on screen in a state the reader could act on wrongly.
+	 * `undefined` means the same as `{kind:'unknown'}`.
+	 */
+	priorContent?: PriorContent;
 	status: PermissionStatus;
 }
 
@@ -194,6 +222,7 @@ export class ChatState {
 		toolName: string;
 		input: unknown;
 		toolUseId?: string;
+		priorContent?: PriorContent;
 	}): PermissionItem {
 		const item: PermissionItem = {
 			kind: 'permission',
@@ -202,6 +231,7 @@ export class ChatState {
 			toolName: request.toolName,
 			input: request.input,
 			toolUseId: request.toolUseId,
+			priorContent: request.priorContent,
 			status: 'pending',
 		};
 		this.itemList.push(item);

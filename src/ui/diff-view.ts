@@ -12,9 +12,16 @@
  * edit legible without pulling in a diff library for a panel that shows one hunk at a time.
  */
 
+import type { PriorContent } from '../core/chat-state';
+
 export interface DiffInput {
-	/** Absent for `Write`, which creates content rather than replacing it. */
+	/** Absent for `Write` unless prior content was supplied — see `PriorContent`. */
 	oldText?: string;
+	/**
+	 * Set when the Before side is genuinely unknown rather than empty. Kept separate from
+	 * `oldText === ''` because those two must not render alike.
+	 */
+	oldUnknown?: boolean;
 	newText: string;
 	/**
 	 * The edited file, when the tool input carried one.
@@ -34,7 +41,16 @@ export interface DiffInput {
  * not look the way we expect must fall back to the plain summary rather than throw inside the
  * renderer and take the whole card down with it.
  */
-export function diffFromToolInput(toolName: string | undefined, input: unknown): DiffInput | null {
+export function diffFromToolInput(
+	toolName: string | undefined,
+	input: unknown,
+	/**
+	 * Only `Write` uses it — `Edit` and `MultiEdit` carry their own `old_string`, which is real
+	 * content and needs no lookup. Omitted means `unknown`, which is what keeps the tool card
+	 * unchanged: it renders a call that has already happened and never looks at the file.
+	 */
+	prior: PriorContent = { kind: 'unknown' },
+): DiffInput | null {
 	if (typeof input !== 'object' || input === null || Array.isArray(input)) {
 		return null;
 	}
@@ -42,7 +58,17 @@ export function diffFromToolInput(toolName: string | undefined, input: unknown):
 	const path = typeof record.file_path === 'string' ? record.file_path : undefined;
 
 	if (toolName === 'Write') {
-		return typeof record.content === 'string' ? { newText: record.content, path } : null;
+		if (typeof record.content !== 'string') {
+			return null;
+		}
+		if (prior.kind === 'content') {
+			return { oldText: prior.text, newText: record.content, path };
+		}
+		if (prior.kind === 'absent') {
+			// Verifiably nothing there. `(empty)` is the honest Before for a file being created.
+			return { oldText: '', newText: record.content, path };
+		}
+		return { newText: record.content, oldUnknown: true, path };
 	}
 
 	if (toolName === 'Edit') {
@@ -164,8 +190,22 @@ export function renderDiff(parent: HTMLElement, diff: DiffInput): void {
 	const leadIn = hunk.context.slice(Math.max(0, hunk.context.length - CONTEXT_LINES));
 	const leadOut = hunk.trailing.slice(0, CONTEXT_LINES);
 
-	renderPane(parent, 'before', leadIn, hunk.removed, leadOut, '−');
-	renderPane(parent, 'after', leadIn, hunk.added, leadOut, '+');
+	renderPane(parent, 'before', leadIn, hunk.removed, leadOut, '−', emptyPaneText(diff, 'before'));
+	renderPane(parent, 'after', leadIn, hunk.added, leadOut, '+', emptyPaneText(diff, 'after'));
+}
+
+/**
+ * What a pane with no lines says. Exported so the three states can be asserted with no DOM in the
+ * loop — `renderDiff` needs Obsidian's element helpers, and this is the decision inside it.
+ *
+ * `(empty)` is a claim about the file. It is only ever made about a Before pane when someone
+ * actually looked.
+ */
+export function emptyPaneText(diff: DiffInput, side: 'before' | 'after'): string {
+	if (side === 'before' && diff.oldUnknown === true) {
+		return '(not read)';
+	}
+	return '(empty)';
 }
 
 function renderPane(
@@ -175,13 +215,14 @@ function renderPane(
 	changed: string[],
 	leadOut: string[],
 	marker: string,
+	emptyText: string,
 ): void {
 	const pane = parent.createDiv({ cls: `guki-diff-pane guki-diff-${side}` });
 	pane.createDiv({ cls: 'guki-diff-pane-title', text: side === 'before' ? 'Before' : 'After' });
 	const body = pane.createDiv({ cls: 'guki-diff-lines' });
 
 	if (leadIn.length === 0 && changed.length === 0 && leadOut.length === 0) {
-		body.createDiv({ cls: 'guki-diff-line guki-diff-empty', text: '(empty)' });
+		body.createDiv({ cls: 'guki-diff-line guki-diff-empty', text: emptyText });
 		return;
 	}
 

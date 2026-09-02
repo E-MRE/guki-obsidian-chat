@@ -55,7 +55,9 @@ export class SessionManager {
 		/** `PluginManifest.dir`, passed straight through to the broker. Optional in the API. */
 		pluginDir?: string,
 	) {
-		this.broker = new PermissionBroker(app, this.state, pluginDir);
+		// The vault root is handed over explicitly: it is the boundary PLAN §2b's whole table is
+		// written against, and it must be the *same* string the CLI is given as its cwd.
+		this.broker = new PermissionBroker(app, this.state, this.vaultPath, pluginDir);
 		// The broker knows requests and verdicts; the reducer knows blocks. Joining them here is
 		// what keeps a denial from painting the tool card red — the wire reports our own denial as
 		// `is_error: true`, indistinguishable from a tool that really failed.

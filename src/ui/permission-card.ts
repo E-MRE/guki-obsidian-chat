@@ -19,7 +19,7 @@ import { setIcon, type Component } from 'obsidian';
 import type { PermissionItem, PermissionStatus } from '../core/chat-state';
 import type { PermissionBehavior } from '../core/permission-broker';
 import { toolIcon, toolSummary } from '../core/tool-policy';
-import { diffFromToolInput, renderDiff } from './diff-view';
+import { diffFromToolInput, renderDiff, type DiffInput } from './diff-view';
 
 export interface PermissionActions {
 	decide(requestId: string, behavior: PermissionBehavior): void;
@@ -156,10 +156,24 @@ function statusText(status: PermissionStatus): string {
 	}
 }
 
+/**
+ * The card's diff, including the prior content that makes a `Write`'s Before pane honest.
+ *
+ * Exported, and a function rather than a line inside `renderBody`, for one reason: `renderBody`
+ * needs a DOM and the offline checks have none, so the one line that carries `priorContent` from
+ * the item to the parser would otherwise be untested. Deleting the third argument breaks nothing a
+ * check can see — and "the wiring is untested if a reversion of it is green" is how three earlier
+ * reversions in this project passed while a real call site was already gone.
+ */
+export function permissionDiff(item: PermissionItem): DiffInput | null {
+	// Absent `priorContent` means unknown, which is what `diffFromToolInput` defaults to.
+	return diffFromToolInput(item.toolName, item.input, item.priorContent);
+}
+
 function renderBody(item: PermissionItem, body: HTMLElement): void {
 	body.empty();
 
-	const diff = diffFromToolInput(item.toolName, item.input);
+	const diff = permissionDiff(item);
 	if (diff) {
 		// The path **is** rendered here, unlike on the tool card. Approving a write without being
 		// told which file is being written to is not a decision the reader can make; the header

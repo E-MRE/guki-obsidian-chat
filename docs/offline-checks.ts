@@ -31,13 +31,18 @@
  * M.  A real Stop-pressed-while-a-card-is-open turn, replayed from
  *     `docs/capture-phase5a-stop.jsonl`. §L's own cancellation checks answered the broker directly
  *     and missed the ordering that made the defect; this replays the CLI's real event order.
+ * N.  Phase 5b: the permission policy — PLAN §2b's table and the Bash gate, over a real temp vault
+ *     with a real symlink out of it, plus the broker end to end. Longer than any other section
+ *     because an auto-allow is invisible: it produces no card, so every `allow` branch needs an
+ *     assertion that names it. §N12 is the exception that proves the rule — the one decision the
+ *     reader *does* see, and it was being shown wrong.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import {
 	ChatState,
 	hasRenderableContent,
@@ -58,8 +63,13 @@ import {
 	type SystemInitEvent,
 } from '../src/cli/events';
 import { startsExpanded, toolCategory, toolResultText, toolSummary } from '../src/core/tool-policy';
-import { diffFromToolInput, diffStats } from '../src/ui/diff-view';
+import { diffFromToolInput, diffStats, emptyPaneText } from '../src/ui/diff-view';
 import { toolResultTitle, toolStatusText } from '../src/ui/tool-card';
+import { permissionDiff } from '../src/ui/permission-card';
+import { containsPath, permissionVerdict } from '../src/core/permission-policy';
+import { FALLBACK_VAULT_PATH } from '../src/constants';
+import { tokenizeCommand } from '../src/core/bash-whitelist';
+import { createVaultPaths } from '../src/core/vault-path-resolver';
 
 let failures = 0;
 
@@ -1113,6 +1123,34 @@ function ndjsonQueue(stream: NodeJS.ReadableStream): {
 	};
 }
 
+/**
+ * A real directory standing in for the vault, with real files and a real symlink out of it.
+ *
+ * From Phase 5b the broker judges every request against a vault root, so the bridge sections need
+ * one that exists — and §N needs one it can point `realpath` at. Everything §K, §L and §M send uses
+ * `/vault/...`, which is *outside* this root, so those sections keep asking exactly as they did
+ * before the policy existed; that is why their assertions are untouched.
+ *
+ * Layout:
+ *   <vault>/notes/todo.md      an ordinary note
+ *   <vault>/.git/config        inside the vault, but not covered by "git makes it reversible"
+ *   <vault>/escape             a symlink pointing at <outside>, which is not in the vault at all
+ *   <outside>/secret.txt       the thing a symlink or a `..` is trying to reach
+ */
+const POLICY_VAULT = (() => {
+	const base = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-vault-')));
+	const root = join(base, 'vault');
+	const outside = join(base, 'outside');
+	mkdirSync(join(root, 'notes'), { recursive: true });
+	mkdirSync(join(root, '.git'), { recursive: true });
+	mkdirSync(outside, { recursive: true });
+	writeFileSync(join(root, 'notes', 'todo.md'), '- one\n');
+	writeFileSync(join(root, '.git', 'config'), '[core]\n');
+	writeFileSync(join(outside, 'secret.txt'), 'secret\n');
+	symlinkSync(outside, join(root, 'escape'));
+	return { base, root, outside };
+})();
+
 /** The `content[0].text` of an MCP tool result, parsed. This is where the verdict lives. */
 function verdictOf(response: Record<string, unknown>): Record<string, unknown> | null {
 	const result = response.result as { content?: { type?: string; text?: string }[] } | undefined;
@@ -1161,7 +1199,7 @@ async function startBridge(): Promise<{
 }> {
 	const readPaths: string[] = [];
 	const state = new ChatState();
-	const broker = new PermissionBroker(brokerApp(readPaths), state);
+	const broker = new PermissionBroker(brokerApp(readPaths), state, POLICY_VAULT.root);
 	await broker.start();
 
 	const configPath = broker.cliArgs[1] ?? '';
@@ -1307,7 +1345,12 @@ console.log("K1b. manifest.dir wins over the reconstructed path");
 	// No server is spawned here: the broker only writes files and listens, and the *CLI* is what
 	// spawns the server. So this costs a socket, not a process.
 	const readPaths: string[] = [];
-	const broker = new PermissionBroker(brokerApp(readPaths), new ChatState(), 'Config/plugins/renamed-guki');
+	const broker = new PermissionBroker(
+		brokerApp(readPaths),
+		new ChatState(),
+		POLICY_VAULT.root,
+		'Config/plugins/renamed-guki',
+	);
 	await broker.start();
 	eq(
 		'the supplied plugin folder is the one read from',
@@ -2095,7 +2138,11 @@ console.log('L7. A request with no tool_use_id cannot mark a tool card');
 		jsonrpc: '2.0',
 		id: 31,
 		method: 'tools/call',
-		params: { name: 'permission_prompt', arguments: { tool_name: 'Bash', input: { command: 'ls' } } },
+		// `rm -rf /` rather than the `ls` this used to send: from Phase 5b `ls` clears the whitelist
+		// and is auto-allowed, which would produce no card at all and make this section assert on a
+		// card that was never meant to exist. What is under test here is the *absence* of an id
+		// handoff, so the command only has to be one the policy asks about.
+		params: { name: 'permission_prompt', arguments: { tool_name: 'Bash', input: { command: 'rm -rf /' } } },
 	});
 
 	let card: PermissionItem | undefined;
@@ -2608,6 +2655,578 @@ console.log('M5. Stop settles the request immediately, so the card never flashes
 	eq('the turn reads as stopped', turnItem.status, 'stopped');
 	manager.dispose();
 }
+
+// --- N. Phase 5b: the permission policy -----------------------------------
+
+/*
+ * The table in `src/core/permission-policy.ts` and the Bash gate in `src/core/bash-whitelist.ts`.
+ *
+ * This section is longer than any other for one reason: **an auto-allow is invisible.** An `ask`
+ * that is wrong shows up in Obsidian the first time it is hit — a card appears, or one does not.
+ * An `allow` that is wrong produces no card, no notice and no difference the reader can see; the
+ * file is simply written. So every `allow` branch below is named and asserted individually, and the
+ * reversion sweep drives each one red on its own. A table entry nothing tests is a hole with a
+ * comment over it.
+ *
+ * Everything path-shaped runs against `POLICY_VAULT` — a real directory, with a real symlink out of
+ * it — because the rule under test is "the resolved, symlink-free path", and a stubbed resolver
+ * would be testing the stub.
+ */
+
+console.log('N1. containsPath: the one line where "inside the vault" is defined');
+{
+	eq('the root itself is inside', containsPath('/vault', '/vault'), true);
+	eq('a trailing slash on the root changes nothing', containsPath('/vault/', '/vault/notes'), true);
+	eq('a child is inside', containsPath('/vault', '/vault/notes/todo.md'), true);
+	// The classic prefix bug: a sibling that merely starts with the root's name.
+	eq('a name-sharing sibling is NOT inside', containsPath('/vault', '/vault-backup/x.md'), false);
+	eq('...nor is a suffix match', containsPath('/vault', '/other/vault/x.md'), false);
+	eq('an unresolvable path is never inside', containsPath('/vault', null), false);
+	eq('an empty root matches nothing', containsPath('', '/anything'), false);
+	// A root of `/` would make every path on the machine "inside the vault" — the single most
+	// permissive failure this function has, so it is refused rather than computed.
+	eq('a root of / matches nothing', containsPath('/', '/etc/passwd'), false);
+}
+
+console.log('N2. createVaultPaths, against a real vault with a real symlink');
+const vaultPaths = await createVaultPaths(POLICY_VAULT.root);
+{
+	// A sibling that shares the root's name, on disk this time rather than as a string.
+	mkdirSync(`${POLICY_VAULT.root}-backup`, { recursive: true });
+	writeFileSync(`${POLICY_VAULT.root}-backup/stolen.md`, 'x\n');
+	// A symlink pointing *into* the vault from outside it: resolution must allow this one, which is
+	// what makes the check a resolution rather than a string comparison.
+	symlinkSync(join(POLICY_VAULT.root, 'notes'), join(POLICY_VAULT.outside, 'inlink'));
+
+	eq('the root is resolved once, at construction', vaultPaths.root, POLICY_VAULT.root);
+	eq('an absolute path inside the vault', vaultPaths.isInside(join(POLICY_VAULT.root, 'notes', 'todo.md')), true);
+	eq('a relative path is relative to the vault (the CLI cwd)', vaultPaths.isInside('notes/todo.md'), true);
+	// The Write case: the file does not exist yet, so only its ancestor can be resolved.
+	eq('a file that does not exist yet, inside the vault', vaultPaths.isInside(join(POLICY_VAULT.root, 'notes', 'new.md')), true);
+	eq('...even several levels of it', vaultPaths.isInside(join(POLICY_VAULT.root, 'a', 'b', 'c.md')), true);
+	eq('the vault root itself', vaultPaths.isInside(POLICY_VAULT.root), true);
+	eq('a symlink from outside pointing back in resolves inside', vaultPaths.isInside(join(POLICY_VAULT.outside, 'inlink', 'todo.md')), true);
+
+	// The four escapes. Each one is a plain string that *looks* like it is inside the vault.
+	eq('a symlink out of the vault is caught', vaultPaths.isInside(join(POLICY_VAULT.root, 'escape', 'secret.txt')), false);
+	eq('...and so is the symlink itself', vaultPaths.isInside(join(POLICY_VAULT.root, 'escape')), false);
+	// Built by concatenation, never with `path.join`: `join` collapses `..` itself, which would
+	// hand the resolver an already-normalised path and quietly test nothing. Caught by this very
+	// section — the first version of the symlink check below passed for exactly that reason.
+	eq('.. climbing out is caught', vaultPaths.isInside(`${POLICY_VAULT.root}/../outside/secret.txt`), false);
+	eq('a relative .. is caught too', vaultPaths.isInside('../outside/secret.txt'), false);
+	// A relative argument must not be normalised on its way to being made absolute either — this is
+	// the same ordering trap one level up, and `path.join` would collapse `escape/..` before the
+	// symlink was ever followed.
+	eq('a relative path through the symlink is caught', vaultPaths.isInside('escape/secret.txt'), false);
+	eq('...and a relative .. after the symlink too', vaultPaths.isInside('escape/../outside/sibling.txt'), false);
+	eq('a name-sharing sibling directory is caught', vaultPaths.isInside(`${POLICY_VAULT.root}-backup/stolen.md`), false);
+	eq('an unrelated absolute path is caught', vaultPaths.isInside('/etc/passwd'), false);
+	// `~` is expanded by a shell, and nothing here runs one. Left literal it would resolve to
+	// `<vault>/~/.ssh/id_rsa` — inside the vault, and completely wrong.
+	eq('~ is refused rather than treated as a directory name', vaultPaths.isInside('~/.ssh/id_rsa'), false);
+	eq('...and so is a bare ~', vaultPaths.isInside('~'), false);
+	eq('an empty path resolves to nothing', vaultPaths.resolve(''), null);
+
+	// The ordering trap the resolver is built around: `..` *after* a symlink. Collapsing it
+	// lexically first (what `path.resolve`/`path.join` do) turns this into `<vault>/secret.txt`.
+	writeFileSync(join(POLICY_VAULT.outside, 'sibling.txt'), 'x\n');
+	eq(
+		'.. is applied after the symlink, not before it',
+		vaultPaths.isInside(`${POLICY_VAULT.root}/escape/../outside/sibling.txt`),
+		false,
+	);
+	// The same string, collapsed the way `path.resolve` would collapse it, lands *inside* the
+	// vault — which is what the resolver would answer if it normalised before resolving.
+	eq('...and the lexical answer really is the wrong one', resolve(`${POLICY_VAULT.root}/escape/../outside/sibling.txt`).startsWith(POLICY_VAULT.root), true);
+	// F2, from the orchestrator's review: the ancestor walk used to fall back to `path.resolve` once
+	// its depth ran out, which collapses `..` lexically — reopening at the back door the exact hole
+	// `realpathSync.native` closes at the front. The fallback resolves the **whole** path, existing
+	// prefix included, and the symlink lives in that prefix. It needs an absurd path to reach, and
+	// the wrong answer was `allow`, which has no witness. Both "could not resolve" exits return null
+	// now, and null is never inside the vault.
+	const deepTail = Array.from({ length: 70 }, (_, i) => `d${String(i)}`).join('/');
+	eq(
+		'a path too deep to walk is not resolved into the vault',
+		vaultPaths.isInside(`${POLICY_VAULT.root}/escape/../${deepTail}/x`),
+		false,
+	);
+	eq('...and it resolves to nothing at all, rather than to a lexical guess', vaultPaths.resolve(`${POLICY_VAULT.root}/escape/../${deepTail}/x`), null);
+	// The same shape one component shallower still resolves properly — the guard must not be doing
+	// its job by refusing everything.
+	const shallowTail = Array.from({ length: 3 }, (_, i) => `d${String(i)}`).join('/');
+	eq('a shallow non-existent path through the symlink still resolves, and lands outside', vaultPaths.isInside(`${POLICY_VAULT.root}/escape/../${shallowTail}/x`), false);
+	eq('...and a shallow non-existent path inside the vault is still inside', vaultPaths.isInside(`${POLICY_VAULT.root}/${shallowTail}/x`), true);
+
+	eq(
+		'...and the resolved path really is the outside one',
+		vaultPaths.resolve(join(POLICY_VAULT.root, 'escape', 'secret.txt')),
+		join(POLICY_VAULT.outside, 'secret.txt'),
+	);
+}
+
+console.log('N3. The read-only row: allowed inside the vault, asked outside it');
+{
+	const inside = join(POLICY_VAULT.root, 'notes', 'todo.md');
+	eq('Read inside the vault is silent', permissionVerdict('Read', { file_path: inside }, vaultPaths), 'allow');
+	eq('Read outside the vault asks', permissionVerdict('Read', { file_path: '/etc/hosts' }, vaultPaths), 'ask');
+	eq('Read through a symlink out of the vault asks', permissionVerdict('Read', { file_path: join(POLICY_VAULT.root, 'escape', 'secret.txt') }, vaultPaths), 'ask');
+	eq('NotebookRead inside is silent', permissionVerdict('NotebookRead', { notebook_path: join(POLICY_VAULT.root, 'n.ipynb') }, vaultPaths), 'allow');
+	eq('NotebookRead outside asks', permissionVerdict('NotebookRead', { notebook_path: '/tmp/n.ipynb' }, vaultPaths), 'ask');
+	eq('LS inside is silent', permissionVerdict('LS', { path: POLICY_VAULT.root }, vaultPaths), 'allow');
+	eq('LS outside asks', permissionVerdict('LS', { path: POLICY_VAULT.outside }, vaultPaths), 'ask');
+	eq('Grep with a path inside is silent', permissionVerdict('Grep', { pattern: 'x', path: POLICY_VAULT.root }, vaultPaths), 'allow');
+	eq('Grep with a path outside asks', permissionVerdict('Grep', { pattern: 'x', path: '/etc' }, vaultPaths), 'ask');
+
+	// The optional-path case: no `path` means the CLI's cwd, which is the vault root, and asking
+	// for every one of these is the per-turn card storm RESEARCH B5b warns about.
+	eq('Grep with no path at all is silent', permissionVerdict('Grep', { pattern: 'spawn' }, vaultPaths), 'allow');
+	eq('Glob with no path at all is silent', permissionVerdict('Glob', { pattern: '**/*.md' }, vaultPaths), 'allow');
+	// ...but a *required* path that is missing is malformed, and malformed is never allowed.
+	eq('Read with no file_path asks', permissionVerdict('Read', {}, vaultPaths), 'ask');
+	eq('LS with no path asks', permissionVerdict('LS', {}, vaultPaths), 'ask');
+	eq('Read with a non-string file_path asks', permissionVerdict('Read', { file_path: 42 }, vaultPaths), 'ask');
+
+	// The glob-shaped arguments, which reach the filesystem without going through `path`.
+	eq('a Glob pattern climbing out asks', permissionVerdict('Glob', { pattern: '../outside/*' }, vaultPaths), 'ask');
+	eq('an absolute Glob pattern asks', permissionVerdict('Glob', { pattern: '/etc/**' }, vaultPaths), 'ask');
+	eq('a Grep glob filter climbing out asks', permissionVerdict('Grep', { pattern: 'x', glob: '../**' }, vaultPaths), 'ask');
+	// Grep's own `pattern` is a regular expression, where `..` means "any two characters". Checking
+	// it would ask on ordinary searches for no gain.
+	eq('a Grep regex containing .. is still silent', permissionVerdict('Grep', { pattern: 'a..b' }, vaultPaths), 'allow');
+}
+
+console.log('N4. The edit row: git makes it reversible, so the exceptions are where it does not');
+{
+	const note = join(POLICY_VAULT.root, 'notes', 'todo.md');
+	const fresh = join(POLICY_VAULT.root, 'notes', 'brand-new.md');
+	eq('Edit inside the vault is silent', permissionVerdict('Edit', { file_path: note, old_string: 'a', new_string: 'b' }, vaultPaths), 'allow');
+	eq('Write to a new file inside the vault is silent', permissionVerdict('Write', { file_path: fresh, content: 'hello\n' }, vaultPaths), 'allow');
+	eq('MultiEdit inside the vault is silent', permissionVerdict('MultiEdit', { file_path: note, edits: [{ old_string: 'a', new_string: 'b' }] }, vaultPaths), 'allow');
+	eq('NotebookEdit inside the vault is silent', permissionVerdict('NotebookEdit', { notebook_path: join(POLICY_VAULT.root, 'n.ipynb'), new_source: 'x' }, vaultPaths), 'allow');
+
+	eq('Write outside the vault asks', permissionVerdict('Write', { file_path: '/tmp/x.md', content: 'hi' }, vaultPaths), 'ask');
+	eq('Edit outside the vault asks', permissionVerdict('Edit', { file_path: '/etc/hosts', old_string: 'a', new_string: 'b' }, vaultPaths), 'ask');
+	eq('Write through a symlink out of the vault asks', permissionVerdict('Write', { file_path: join(POLICY_VAULT.root, 'escape', 'x.md'), content: 'hi' }, vaultPaths), 'ask');
+	eq('Write with no file_path asks', permissionVerdict('Write', { content: 'hi' }, vaultPaths), 'ask');
+
+	// PLAN's "deletion, or an existing file being emptied" row.
+	eq('Write with empty content asks', permissionVerdict('Write', { file_path: note, content: '' }, vaultPaths), 'ask');
+	eq('Write with whitespace-only content asks', permissionVerdict('Write', { file_path: note, content: '   \n' }, vaultPaths), 'ask');
+	eq('Write with no content at all asks', permissionVerdict('Write', { file_path: note }, vaultPaths), 'ask');
+	eq('NotebookEdit deleting a cell asks', permissionVerdict('NotebookEdit', { notebook_path: join(POLICY_VAULT.root, 'n.ipynb'), edit_mode: 'delete' }, vaultPaths), 'ask');
+	eq('NotebookEdit inserting a cell is silent', permissionVerdict('NotebookEdit', { notebook_path: join(POLICY_VAULT.root, 'n.ipynb'), edit_mode: 'insert', new_source: 'x' }, vaultPaths), 'allow');
+	eq('MultiEdit with a malformed edits field asks', permissionVerdict('MultiEdit', { file_path: note, edits: 'nope' }, vaultPaths), 'ask');
+
+	// F1, from the orchestrator's review: `Edit` and `MultiEdit` had no destructive branch at all,
+	// so an edit whose `new_string` is empty and whose `old_string` is the whole file emptied it
+	// silently. `Edit` requires `old_string` to match, so the file provably exists — PLAN §2b's
+	// "an existing file being emptied", verbatim, and it was the one row going the permissive way.
+	eq('Edit emptying its target asks', permissionVerdict('Edit', { file_path: note, old_string: '- one\n', new_string: '' }, vaultPaths), 'ask');
+	eq('MultiEdit with any entry emptying its target asks', permissionVerdict('MultiEdit', { file_path: note, edits: [{ old_string: 'a', new_string: 'b' }, { old_string: '- one\n', new_string: '' }] }, vaultPaths), 'ask');
+	eq('...even when the emptying entry is first', permissionVerdict('MultiEdit', { file_path: note, edits: [{ old_string: '- one\n', new_string: '' }] }, vaultPaths), 'ask');
+	// The shape this trade costs a card on, stated so the cost is visible: deleting a fragment
+	// anchored on context is the common shape and stays silent.
+	eq('an Edit deleting a line with context is still silent', permissionVerdict('Edit', { file_path: note, old_string: 'a\nb\nc', new_string: 'a\nc' }, vaultPaths), 'allow');
+	eq('a malformed Edit asks', permissionVerdict('Edit', { file_path: note, old_string: 'a' }, vaultPaths), 'ask');
+	eq('an Edit with a non-string new_string asks', permissionVerdict('Edit', { file_path: note, old_string: 'a', new_string: 7 }, vaultPaths), 'ask');
+
+	// Inside the vault, and still asked: the auto-allow rests on "git makes it reversible", and a
+	// write into `.git` is the one edit that revokes that argument.
+	eq('Write into .git asks', permissionVerdict('Write', { file_path: join(POLICY_VAULT.root, '.git', 'config'), content: 'x' }, vaultPaths), 'ask');
+	eq('Edit inside .git asks', permissionVerdict('Edit', { file_path: join(POLICY_VAULT.root, '.git', 'hooks', 'pre-commit'), old_string: 'a', new_string: 'b' }, vaultPaths), 'ask');
+	// A note that merely mentions git in its name is not `.git`.
+	eq('...but a note called git-notes.md is not .git', permissionVerdict('Write', { file_path: join(POLICY_VAULT.root, 'notes', 'git-notes.md'), content: 'x' }, vaultPaths), 'allow');
+}
+
+console.log('N5. The free row: web is free, but only over http(s)');
+{
+	eq('WebSearch is silent', permissionVerdict('WebSearch', { query: 'obsidian plugin api' }, vaultPaths), 'allow');
+	eq('TodoWrite is silent', permissionVerdict('TodoWrite', { todos: [] }, vaultPaths), 'allow');
+	eq('WebFetch over https is silent', permissionVerdict('WebFetch', { url: 'https://docs.obsidian.md/' }, vaultPaths), 'allow');
+	eq('WebFetch over http is silent', permissionVerdict('WebFetch', { url: 'http://localhost:8080/x' }, vaultPaths), 'allow');
+	// A URL is not always a web address: `file://` is a local file read wearing one.
+	eq('WebFetch of a file:// url asks', permissionVerdict('WebFetch', { url: 'file:///etc/passwd' }, vaultPaths), 'ask');
+	eq('...whatever the case of the scheme', permissionVerdict('WebFetch', { url: 'FILE:///etc/passwd' }, vaultPaths), 'ask');
+	eq('WebFetch with no url asks', permissionVerdict('WebFetch', {}, vaultPaths), 'ask');
+}
+
+console.log('N6. Unknown, malformed, and the subagent');
+{
+	eq('an unrecognised built-in asks', permissionVerdict('KillShell', { shell_id: '1' }, vaultPaths), 'ask');
+	eq('an MCP tool asks', permissionVerdict('mcp__mem0__add_memory', { text: 'x' }, vaultPaths), 'ask');
+	eq('our own permission tool asks', permissionVerdict('mcp__guki-perm__permission_prompt', {}, vaultPaths), 'ask');
+	eq('a missing tool name asks', permissionVerdict(undefined, {}, vaultPaths), 'ask');
+	eq('a non-string tool name asks', permissionVerdict(7, {}, vaultPaths), 'ask');
+	eq('an empty tool name asks', permissionVerdict('', {}, vaultPaths), 'ask');
+	eq('a null input asks', permissionVerdict('Read', null, vaultPaths), 'ask');
+	eq('a string input asks', permissionVerdict('Read', 'file.md', vaultPaths), 'ask');
+	// Case matters: the table is keyed on the CLI's own names, and a near-miss must not be allowed.
+	eq('a lowercased tool name is not the tool', permissionVerdict('read', { file_path: join(POLICY_VAULT.root, 'notes', 'todo.md') }, vaultPaths), 'ask');
+
+	// Settled by Emre's acceptance run, step 8: a subagent's inner calls are gated individually —
+	// its own `Write /tmp/agent-test.md` and its follow-up `Bash` each produced their own card. So
+	// allowing the parent grants nothing, and the deviation that asked about it is closed.
+	eq('Agent is silent — its inner calls are carded individually', permissionVerdict('Agent', { subagent_type: 'Explore', prompt: 'x' }, vaultPaths), 'allow');
+	eq('Task is silent, under either name', permissionVerdict('Task', { subagent_type: 'Explore', prompt: 'x' }, vaultPaths), 'allow');
+	// ...and the inner call itself, which is the reason the parent is safe to allow: a subagent's
+	// `Write` outside the vault is judged by this same table, on its own.
+	eq('a subagent-shaped Write outside the vault still asks', permissionVerdict('Write', { file_path: '/tmp/agent-test.md', content: 'x' }, vaultPaths), 'ask');
+}
+
+console.log('N7. Bash step 1: the metacharacter veto, on the raw string');
+{
+	const bash = (command: string): string => permissionVerdict('Bash', { command }, vaultPaths);
+
+	// PLAN §2b's three mandatory negatives, verbatim. Each one begins with a whitelisted name, which
+	// is exactly why name-based whitelisting is not what this is.
+	eq('"git status; rm -rf x" asks', bash('git status; rm -rf x'), 'ask');
+	eq('"ls $(whoami)" asks', bash('ls $(whoami)'), 'ask');
+	eq('"cat a > b" asks', bash('cat a > b'), 'ask');
+	eq('"echo hi\\nrm x" asks (embedded newline)', bash('echo hi\nrm x'), 'ask');
+
+	eq('&& asks', bash('ls && rm -rf x'), 'ask');
+	eq('|| asks', bash('ls || rm -rf x'), 'ask');
+	eq('a pipe asks', bash('cat notes/todo.md | sh'), 'ask');
+	eq('>> asks', bash('cat notes/todo.md >> notes/other.md'), 'ask');
+	eq('< asks', bash('wc -l < notes/todo.md'), 'ask');
+	eq('a background & asks', bash('ls &'), 'ask');
+	eq('a backtick asks', bash('ls `whoami`'), 'ask');
+	eq('a carriage return asks', bash('ls\rrm -rf x'), 'ask');
+
+	// The additions to PLAN's list, and the hole each of them closes. PLAN vetoes `$(` but not a
+	// bare `$`, and its step 3 only rejects tokens that resolve to an *existing* path — so the
+	// literal token `$HOME/.ssh/id_rsa`, which exists nowhere, would have cleared all three steps
+	// and the shell would then have expanded it.
+	eq('a bare $ asks — the shell expands it, the path check cannot see it', bash('cat $HOME/.ssh/id_rsa'), 'ask');
+	eq('${...} asks', bash('cat ${HOME}/x'), 'ask');
+	eq('~ asks', bash('cat ~/.ssh/id_rsa'), 'ask');
+	eq('a glob asks — it is unexpanded here and expanded by the shell', bash('cat ../*'), 'ask');
+	eq('a ? glob asks', bash('cat notes/todo.m?'), 'ask');
+	eq('a bracket glob asks', bash('cat notes/[a-z]*.md'), 'ask');
+	eq('brace expansion asks', bash('cat notes/{a,b}.md'), 'ask');
+	eq('a backslash escape asks', bash('cat notes/my\\ note.md'), 'ask');
+	eq('a subshell paren asks', bash('(cd /etc)'), 'ask');
+	eq('a comment asks', bash('ls # rm -rf x'), 'ask');
+	eq('history expansion asks', bash('ls !!'), 'ask');
+}
+
+console.log('N8. Bash step 2: argv exact match on leading tokens');
+{
+	const bash = (command: string): string => permissionVerdict('Bash', { command }, vaultPaths);
+
+	eq('"ls -la" is silent', bash('ls -la'), 'allow');
+	eq('"pwd" is silent', bash('pwd'), 'allow');
+	eq('"git status" is silent', bash('git status'), 'allow');
+	eq('"git log --oneline -5" is silent', bash('git log --oneline -5'), 'allow');
+	eq('"git diff" is silent', bash('git diff'), 'allow');
+	eq('"git branch" is silent', bash('git branch'), 'allow');
+	eq('"node --version" is silent', bash('node --version'), 'allow');
+	eq('"which node" is silent', bash('which node'), 'allow');
+	eq('"wc -l notes/todo.md" is silent', bash('wc -l notes/todo.md'), 'allow');
+	eq('leading and trailing whitespace does not matter', bash('   ls -la  '), 'allow');
+
+	// Prefix matching is on *tokens*, not on characters.
+	eq('"git statusx" asks — not a token match', bash('git statusx'), 'ask');
+	eq('"lsof" asks', bash('lsof'), 'ask');
+	eq('"rm -rf /" asks', bash('rm -rf /'), 'ask');
+	eq('"git push" asks — a whitelisted first token is not enough', bash('git push'), 'ask');
+	eq('"git" alone asks', bash('git'), 'ask');
+	eq('"node script.js" asks — only --version is whitelisted', bash('node script.js'), 'ask');
+	eq('an empty command asks', bash(''), 'ask');
+	eq('whitespace only asks', bash('   '), 'ask');
+	eq('a non-string command asks', permissionVerdict('Bash', { command: 42 }, vaultPaths), 'ask');
+	eq('a missing command asks', permissionVerdict('Bash', {}, vaultPaths), 'ask');
+
+	// The tokeniser itself, since step 3 reads its output as filenames.
+	eq('quotes are honoured and stripped', (tokenizeCommand("cat 'my notes.md'") ?? []).join('|'), 'cat|my notes.md');
+	eq('double quotes too', (tokenizeCommand('cat "my notes.md"') ?? []).join('|'), 'cat|my notes.md');
+	eq('an unbalanced quote does not tokenise', tokenizeCommand('cat "notes'), null);
+	eq('...and the gate asks about it', bash('cat "notes'), 'ask');
+	eq('an empty quoted token survives as a token', (tokenizeCommand("cat ''") ?? []).length, 2);
+}
+
+console.log('N9. Bash step 3: every non-flag token must stay inside the vault');
+{
+	const bash = (command: string): string => permissionVerdict('Bash', { command }, vaultPaths);
+
+	// PLAN §2b's own step 3 negatives.
+	eq('"wc -l /etc/passwd" asks', bash('wc -l /etc/passwd'), 'ask');
+	eq('"cat /etc/passwd" asks', bash('cat /etc/passwd'), 'ask');
+	// PLAN's own positive.
+	eq('"cat notes/todo.md" is silent', bash('cat notes/todo.md'), 'allow');
+	eq('an absolute path inside the vault is silent', bash(`cat ${join(POLICY_VAULT.root, 'notes', 'todo.md')}`), 'allow');
+
+	eq('climbing out with .. asks', bash('ls ../outside'), 'ask');
+	eq('a symlink out of the vault asks', bash('cat escape/secret.txt'), 'ask');
+	eq('a name-sharing sibling directory asks', bash(`ls ${POLICY_VAULT.root}-backup`), 'ask');
+	eq('a quoted path outside the vault asks', bash(`cat "${POLICY_VAULT.outside}/secret.txt"`), 'ask');
+
+	// Subcommands and flags are tokens too, and must not produce spurious cards.
+	eq('a subcommand token is not mistaken for a path', bash('git status'), 'allow');
+	eq('a flag is skipped', bash('ls -la'), 'allow');
+	// ...but a flag that carries a path is refused rather than reasoned about.
+	eq('a flag carrying a path asks', bash('git --git-dir=/etc/x status'), 'ask');
+	eq('a long flag with a path asks', bash('ls --directory=/etc'), 'ask');
+}
+
+console.log('N10. The broker: an allow never reaches the transcript, and the CLI still hears it');
+{
+	// The wiring, not the callee. Three reversions in earlier phases deleted a real call site and
+	// broke nothing, because the checks drove the callee directly — so this drives the whole bridge:
+	// the real broker, the real server process, a real socket, with this harness playing the CLI.
+	const bridge = await startBridge();
+	bridge.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+	await bridge.rpc.next();
+
+	const allowed = { file_path: join(POLICY_VAULT.root, 'notes', 'todo.md') };
+	bridge.send({
+		jsonrpc: '2.0',
+		id: 41,
+		method: 'tools/call',
+		params: { name: 'permission_prompt', arguments: { tool_name: 'Read', input: allowed, tool_use_id: 'toolu_auto' } },
+	});
+	const response = await bridge.rpc.next();
+	check('the CLI got an answer at all', response !== TIMED_OUT, JSON.stringify(response));
+	eq('...on the right JSON-RPC id', response.id, 41);
+	const verdict = verdictOf(response);
+	eq('...and the answer is allow', verdict?.behavior, 'allow');
+	eq('...carrying the original input back as updatedInput', JSON.stringify(verdict?.updatedInput), JSON.stringify(allowed));
+
+	// The half that has no other witness: nothing was added to the transcript. Polled, because a
+	// card arriving late would be just as wrong as one arriving now.
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	eq('no permission card was ever added', bridge.state.items.filter((i) => i.kind === 'permission').length, 0);
+	eq('...and the broker has nothing pending', bridge.broker.hasPending, false);
+
+	// The same bridge, a request the policy asks about: the Phase 5a path still works.
+	bridge.send({
+		jsonrpc: '2.0',
+		id: 42,
+		method: 'tools/call',
+		params: { name: 'permission_prompt', arguments: { tool_name: 'Write', input: { file_path: '/etc/hosts', content: 'x' }, tool_use_id: 'toolu_ask' } },
+	});
+	let card: PermissionItem | undefined;
+	for (let i = 0; i < 200 && !card; i += 1) {
+		card = bridge.state.items.find((item) => item.kind === 'permission') as PermissionItem | undefined;
+		if (!card) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+	check('a call outside the vault still produces a card', card !== undefined);
+	eq('...and it is the right one', card?.toolUseId, 'toolu_ask');
+	bridge.broker.decide(card?.requestId ?? '', 'deny', 'no');
+	await bridge.rpc.next();
+
+	bridge.stop();
+
+	// The other half of the wiring, one layer up: `SessionManager` is what knows the vault root, and
+	// nothing else in this file constructs the broker the way production does. If that argument is
+	// ever dropped or emptied the policy still runs — it just judges every path against the wrong
+	// boundary, and the panel fills with cards instead of failing.
+	const wired = new SessionManager(app);
+	eq(
+		'SessionManager hands its own vault path to the broker',
+		(wired as unknown as { broker: { vaultRoot: string } }).broker.vaultRoot,
+		FALLBACK_VAULT_PATH,
+	);
+	wired.dispose();
+}
+
+console.log('N11. The broker fails closed when it has no filesystem to judge against');
+{
+	// `policyPaths` is null until `start()` finishes, and a request that arrives without it cannot
+	// be judged. The guard is invisible from the outside — the only way it goes wrong is by
+	// answering `allow` — so it is reached here directly and asserted.
+	const bridge = await startBridge();
+	bridge.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+	await bridge.rpc.next();
+
+	(bridge.broker as unknown as { policyPaths: unknown }).policyPaths = null;
+	bridge.send({
+		jsonrpc: '2.0',
+		id: 51,
+		method: 'tools/call',
+		// A call that would otherwise be auto-allowed twice over: read-only, inside the vault.
+		params: { name: 'permission_prompt', arguments: { tool_name: 'Read', input: { file_path: join(POLICY_VAULT.root, 'notes', 'todo.md') }, tool_use_id: 'toolu_noroot' } },
+	});
+
+	let card: PermissionItem | undefined;
+	for (let i = 0; i < 200 && !card; i += 1) {
+		card = bridge.state.items.find((item) => item.kind === 'permission') as PermissionItem | undefined;
+		if (!card) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+	check('with no resolver, even a Read inside the vault produces a card', card !== undefined);
+	bridge.broker.decide(card?.requestId ?? '', 'deny', 'no');
+	await bridge.rpc.next();
+	bridge.stop();
+}
+
+console.log('N12. The approval card tells the truth about what a Write destroys');
+{
+	// F4, and the most serious finding of Emre's acceptance run. Step 9 asked GuKi to empty a note
+	// holding `merhaba\ndünya`. The policy correctly asked — and the card rendered
+	// `Before: (empty)`, telling the reader nothing was being lost while the whole file was about
+	// to go. `oldText` was never populated for a `Write`, because the tool input does not carry it
+	// and nothing read the file.
+	//
+	// Three states, and the third is the point: `(empty)` must mean "verifiably empty", never "we
+	// did not look". Driven through the real broker rather than through `diffFromToolInput` alone,
+	// because the half that was missing was *the read*, not the formatting.
+	const bridge = await startBridge();
+	bridge.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+	await bridge.rpc.next();
+
+	async function cardFor(id: number, input: unknown): Promise<PermissionItem | undefined> {
+		const before = bridge.state.items.filter((i) => i.kind === 'permission').length;
+		bridge.send({
+			jsonrpc: '2.0',
+			id,
+			method: 'tools/call',
+			params: { name: 'permission_prompt', arguments: { tool_name: 'Write', input, tool_use_id: `toolu_${String(id)}` } },
+		});
+		for (let i = 0; i < 200; i += 1) {
+			const cards = bridge.state.items.filter((item) => item.kind === 'permission') as PermissionItem[];
+			if (cards.length > before) {
+				return cards[cards.length - 1];
+			}
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		return undefined;
+	}
+
+	// (1) content — the acceptance-run case, byte for byte.
+	const note = join(POLICY_VAULT.root, 'notes', 'perm-b-test.md');
+	writeFileSync(note, 'merhaba\ndünya\n');
+	const emptying = await cardFor(61, { file_path: note, content: '' });
+	check('emptying a note produces a card', emptying !== undefined);
+	eq('the broker read the file before the card existed', emptying?.priorContent?.kind, 'content');
+	eq(
+		'...and it read the real content',
+		emptying?.priorContent?.kind === 'content' ? emptying.priorContent.text : '',
+		'merhaba\ndünya\n',
+	);
+	const emptyingDiff = diffFromToolInput('Write', emptying?.input, emptying?.priorContent);
+	eq('the Before pane holds what is about to be destroyed', emptyingDiff?.oldText, 'merhaba\ndünya\n');
+	eq('...and it is not flagged unknown', emptyingDiff?.oldUnknown, undefined);
+	eq('...so the card counts both lines as removed', emptyingDiff ? diffStats(emptyingDiff).removed : -1, 2);
+	// The exact defect, phrased as the reader saw it: the pane has lines to show, so the `(empty)`
+	// placeholder is not what renders.
+	check('the Before pane is no longer the empty placeholder', (emptyingDiff?.oldText ?? '') !== '');
+	// ...and the same thing through the card's own accessor, which is the line that carries
+	// `priorContent` from the item into the parser. Asserted separately because a reversion of that
+	// wiring is invisible from `diffFromToolInput` alone.
+	eq(
+		'the permission card reads the prior content off the item',
+		emptying === undefined ? '' : (permissionDiff(emptying)?.oldText ?? ''),
+		'merhaba\ndünya\n',
+	);
+	bridge.broker.decide(emptying?.requestId ?? '', 'deny', 'no');
+	await bridge.rpc.next();
+
+	// (2) absent — a create. `(empty)` is the truth here, and steps 2 and 4 must keep rendering it.
+	const fresh = join(POLICY_VAULT.outside, 'brand-new.md');
+	const creating = await cardFor(62, { file_path: fresh, content: 'hello\n' });
+	check('writing a new file outside the vault produces a card', creating !== undefined);
+	eq('the reader is told the file does not exist yet', creating?.priorContent?.kind, 'absent');
+	const creatingDiff = diffFromToolInput('Write', creating?.input, creating?.priorContent);
+	eq('...which renders as a verified empty Before', creatingDiff === null ? '' : emptyPaneText(creatingDiff, 'before'), '(empty)');
+	eq('...and nothing is reported as removed', creatingDiff ? diffStats(creatingDiff).removed : -1, 0);
+	bridge.broker.decide(creating?.requestId ?? '', 'deny', 'no');
+	await bridge.rpc.next();
+
+	// (3) unknown — a target that cannot be read. A directory is the deterministic case.
+	const unreadable = await cardFor(63, { file_path: POLICY_VAULT.outside, content: 'x\n' });
+	check('writing over an unreadable target produces a card', unreadable !== undefined);
+	eq('a target that could not be read is not called empty', unreadable?.priorContent?.kind, 'unknown');
+	const unknownDiff = diffFromToolInput('Write', unreadable?.input, unreadable?.priorContent);
+	eq('...it renders as not read', unknownDiff === null ? '' : emptyPaneText(unknownDiff, 'before'), '(not read)');
+	eq(
+		'...through the card accessor too',
+		unreadable === undefined ? '' : emptyPaneText(permissionDiff(unreadable) ?? { newText: '' }, 'before'),
+		'(not read)',
+	);
+	eq('...and it must not claim an empty oldText', unknownDiff?.oldText, undefined);
+	bridge.broker.decide(unreadable?.requestId ?? '', 'deny', 'no');
+	await bridge.rpc.next();
+
+	// The two states must not render alike — the whole finding in one line.
+	check(
+		'(empty) and (not read) are different strings',
+		emptyPaneText({ newText: 'x', oldText: '' }, 'before') !== emptyPaneText({ newText: 'x', oldUnknown: true }, 'before'),
+	);
+	// The After pane never claims to have been read; only Before can be unknown.
+	eq('the After pane is unaffected', emptyPaneText({ newText: '', oldUnknown: true }, 'after'), '(empty)');
+
+	// The tool card is deliberately untouched: it renders a call that already happened, it never
+	// reads a file, and `src/ui/tool-card.ts` is the NUL-byte file (trap 27) that nothing here goes
+	// near. Its default stays exactly what it was before this fix.
+	eq('with no prior content supplied, the parse is unchanged', diffFromToolInput('Write', { file_path: '/x.md', content: 'a\n' })?.oldText, undefined);
+
+	bridge.stop();
+}
+
+console.log('N13. A policy that throws produces a card, not a hung CLI');
+{
+	// F3. There is no reachable throw today — the input is `JSON.parse` output and every read of it
+	// is guarded — so this is insurance, and insurance still has to be shown to work. The failure it
+	// prevents is the one this project has been bitten by three times: an exception inside the
+	// socket's `data` handler means no answer is ever sent, and the CLI waits on a JSON-RPC id
+	// forever. A check that dies by crashing is indistinguishable from one that never ran.
+	// The throw this section induces happens inside the socket's `data` handler, not inside any
+	// assertion's call stack — so without the guard under test it is an **uncaught exception**, and
+	// an uncaught exception takes the whole harness down. That is the failure mode this project has
+	// been bitten by three times: `grep FAIL` finds nothing and the reversion reads as a pass.
+	// Installing a listener converts the crash into a reported failure, which is what a reversion
+	// sweep needs to see. Removed again at the end of the section so it masks nothing else.
+	const onUncaught = (error: Error): void => {
+		failures += 1;
+		console.log(`  FAIL the policy threw all the way out of the socket handler — ${String(error.message)}`);
+	};
+	process.on('uncaughtException', onUncaught);
+
+	const bridge = await startBridge();
+	bridge.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+	await bridge.rpc.next();
+
+	(bridge.broker as unknown as { policyPaths: unknown }).policyPaths = {
+		root: POLICY_VAULT.root,
+		resolve: () => {
+			throw new Error('boom');
+		},
+		isInside: () => {
+			throw new Error('boom');
+		},
+	};
+
+	bridge.send({
+		jsonrpc: '2.0',
+		id: 71,
+		method: 'tools/call',
+		// Would otherwise be auto-allowed: read-only, inside the vault.
+		params: { name: 'permission_prompt', arguments: { tool_name: 'Read', input: { file_path: join(POLICY_VAULT.root, 'notes', 'todo.md') }, tool_use_id: 'toolu_throw' } },
+	});
+
+	let card: PermissionItem | undefined;
+	for (let i = 0; i < 200 && !card; i += 1) {
+		card = bridge.state.items.find((item) => item.kind === 'permission') as PermissionItem | undefined;
+		if (!card) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+	check('a throwing policy still produces a card', card !== undefined);
+	bridge.broker.decide(card?.requestId ?? '', 'deny', 'no');
+	const answered = await bridge.rpc.next();
+	// The half that matters: the CLI was answered at all.
+	check('...and the CLI is answered rather than left waiting', answered !== TIMED_OUT, JSON.stringify(answered));
+	eq('...on the right id', answered.id, 71);
+	bridge.stop();
+	process.removeListener('uncaughtException', onUncaught);
+}
+
+rmSync(POLICY_VAULT.base, { recursive: true, force: true });
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;

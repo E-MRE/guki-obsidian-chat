@@ -17,9 +17,10 @@
  * - killing the server on the way out, which needs a pid rather than a handle, because we never
  *   spawned it (PHASE5A-STATE D3).
  *
- * **Phase 5a's policy is deliberately trivial: ask for everything.** PLAN §2b's table and the Bash
- * whitelist are Phase 5b. The seam is intentional — the bridge and the policy engine are verified
- * separately, and the policy is the half that must not be written in a hurry.
+ * **The policy is not here.** PLAN §2b's table lives in `permission-policy.ts`, pure and with no
+ * `obsidian` or Node import, and this class only asks it and acts on the answer: an `allow` is
+ * answered on the socket immediately and logged, an `ask` becomes a card. The seam is Phase 5's,
+ * and it is deliberate — the bridge and the decision engine were verified separately.
  */
 import type { App } from 'obsidian';
 import { normalizePath } from 'obsidian';
@@ -34,7 +35,10 @@ import {
 	type NodeSocketServer,
 } from '../cli/node-api';
 import { MCP_SERVER_NAME, PERMISSION_PROMPT_TOOL, PERMISSION_SERVER_FILE, PLUGIN_ID } from '../constants';
-import type { ChatState, PermissionItem } from './chat-state';
+import type { ChatState, PermissionItem, PriorContent } from './chat-state';
+import { permissionVerdict, type VaultPaths } from './permission-policy';
+import { toolSummary } from './tool-policy';
+import { createPriorContentReader, createVaultPaths } from './vault-path-resolver';
 
 /** What the server sends us, and what we send back. NDJSON, one message per line. */
 interface HelloMessage {
@@ -85,6 +89,19 @@ export class PermissionBroker {
 	private readonly serverPids = new Set<number>();
 	private readonly pending = new Map<string, PendingRequest>();
 
+	/**
+	 * The policy's view of the filesystem, built in `start()`. Null until then — and a null one is
+	 * `ask`, never `allow`: a request that arrives before the resolver exists is a request we cannot
+	 * judge, and this phase's whole failure mode is a decision that quietly went the permissive way.
+	 */
+	private policyPaths: VaultPaths | null = null;
+
+	/**
+	 * Reads the target of a `Write` so the approval card's Before pane is not a guess. Built in
+	 * `start()` next to the resolver; null before that, which reads as "could not look".
+	 */
+	private readPriorContent: ((absolutePath: string) => PriorContent) | null = null;
+
 	private tempDir: string | null = null;
 	private socketPath: string | null = null;
 	private configPath: string | null = null;
@@ -107,6 +124,14 @@ export class PermissionBroker {
 	constructor(
 		private readonly app: App,
 		private readonly state: ChatState,
+		/**
+		 * The vault root — the security boundary the whole policy is expressed against.
+		 *
+		 * Passed in rather than re-derived from `app` here, for two reasons: it is already
+		 * `SessionManager`'s `vaultPath`, the same string the CLI is spawned with as its cwd, and
+		 * deriving it twice would let the two drift apart silently. `createVaultPaths` resolves it.
+		 */
+		private readonly vaultRoot: string,
 		/**
 		 * `PluginManifest.dir` — the vault-relative path to this plugin's folder. Optional in the
 		 * API, so it is optional here; `readServerSource` falls back to rebuilding it.
@@ -139,6 +164,11 @@ export class PermissionBroker {
 		// Resolved first, because a missing node is the one failure worth reporting before any
 		// files are written. It throws BinaryNotFoundError, which the caller renders.
 		const node = await resolveNodeBinary();
+
+		// Before the socket is listening, so no request can arrive while the policy has no
+		// filesystem to consult.
+		this.policyPaths = await createVaultPaths(this.vaultRoot);
+		this.readPriorContent = await createPriorContentReader();
 
 		// A private directory under the OS temp dir, not under the vault: the vault is synced and
 		// watched, and a socket file appearing in it would show up in Obsidian's own file explorer.
@@ -294,25 +324,96 @@ export class PermissionBroker {
 	}
 
 	/**
-	 * Phase 5a's whole policy: **ask for everything**. Every request becomes a card.
+	 * PLAN §2b, applied. `allow` is answered here and never reaches the transcript; `ask` becomes a
+	 * card, which is what Phase 5a built.
 	 *
-	 * Phase 5b replaces this one line with PLAN §2b's table — an `allow` verdict answers here
-	 * without a card and is logged, and only an `ask` verdict reaches `addPermissionRequest`.
+	 * The asymmetry is the thing to keep in mind when changing anything below: the `ask` branch is
+	 * visible — a broken one shows up as a missing or malformed card the first time it is hit — and
+	 * the `allow` branch is not. It produces no card, no notice and no difference the reader can
+	 * see, so it is only ever checked by `docs/offline-checks.ts` §N.
 	 */
 	private handleRequest(socket: NodeSocket, message: RequestMessage): void {
 		const id = message.id;
 		if (typeof id !== 'string' || id.length === 0) {
 			return;
 		}
+
+		const verdict = this.verdictFor(message);
+		if (verdict === 'allow') {
+			// PLAN Phase 5 task 6: every auto-allow is logged, because it is the one decision that
+			// leaves no trace on any surface the reader can see.
+			//
+			// `warn` rather than `info` or `log`: `obsidianmd/no-console` rejects both of those, and
+			// the linter is authority over the plan here (NEXT.md, from Phase 1). The level is not a
+			// misuse either — this is a security decision taken without asking anyone.
+			// Summarised, never dumped: `message.input` for a `Write` is the whole file.
+			console.warn(`GuKi Chat: auto-allowed ${String(message.tool_name)} ${toolSummary(message.tool_name, message.input)}`);
+			this.send(socket, { type: 'decision', id, behavior: 'allow', updatedInput: message.input });
+			return;
+		}
+
 		const item = this.state.addPermissionRequest({
 			requestId: id,
 			toolName: typeof message.tool_name === 'string' ? message.tool_name : 'Unknown tool',
 			input: message.input,
 			toolUseId: typeof message.tool_use_id === 'string' ? message.tool_use_id : undefined,
+			// Read **now**, before the item exists, so the card is never on screen showing a Before
+			// pane the reader could act on and that a later read would contradict.
+			priorContent: this.priorContentFor(message),
 		});
 		this.pending.set(id, { socket, item });
 		if (item.toolUseId !== undefined) {
 			this.onRequested?.(item.toolUseId);
+		}
+	}
+
+	/**
+	 * The policy, called defensively.
+	 *
+	 * A null `policyPaths` means `start()` has not finished, so there is nothing to judge a path
+	 * against. A *throw* has no visible path today — the input is `JSON.parse` output and every read
+	 * of it is guarded — but this runs inside the socket's `data` handler, where an exception means
+	 * no answer is ever sent and the CLI waits forever on a JSON-RPC id. That is the failure mode
+	 * this project has already been bitten by three times: a check that dies by crashing is
+	 * indistinguishable from one that never ran. Both roads lead to a card.
+	 */
+	private verdictFor(message: RequestMessage): 'allow' | 'ask' {
+		if (this.policyPaths === null) {
+			return 'ask';
+		}
+		try {
+			return permissionVerdict(message.tool_name, message.input, this.policyPaths);
+		} catch (error) {
+			console.warn('GuKi Chat: the permission policy threw; asking instead', error);
+			return 'ask';
+		}
+	}
+
+	/**
+	 * What the target file holds right now, for the one tool whose input does not say: `Write`.
+	 *
+	 * `Edit` and `MultiEdit` carry their own `old_string`, which is real content — nothing to look
+	 * up. Everything else has no diff at all.
+	 */
+	private priorContentFor(message: RequestMessage): PriorContent {
+		if (message.tool_name !== 'Write' || this.readPriorContent === null) {
+			return { kind: 'unknown' };
+		}
+		const input = message.input;
+		if (typeof input !== 'object' || input === null) {
+			return { kind: 'unknown' };
+		}
+		const filePath = (input as Record<string, unknown>).file_path;
+		if (typeof filePath !== 'string' || filePath.length === 0) {
+			return { kind: 'unknown' };
+		}
+		try {
+			return this.readPriorContent(filePath);
+		} catch (error) {
+			// Same reasoning as `verdictFor`: this is display, and it runs on the socket's data
+			// handler. It must never be the reason a request goes unanswered.
+			console.warn('GuKi Chat: could not read the target of a Write', error);
+			return { kind: 'unknown' };
 		}
 	}
 
