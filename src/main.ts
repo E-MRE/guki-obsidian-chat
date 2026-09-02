@@ -8,7 +8,9 @@ export default class GukiChatPlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		// The session outlives any single view; the view only subscribes to its state.
-		const session = new SessionManager(this.app);
+		// `manifest.dir` is how the permission server's own source is located at runtime; it is
+		// optional in the API, and the broker falls back to rebuilding the path when it is absent.
+		const session = new SessionManager(this.app, this.manifest.dir);
 		this.session = session;
 
 		this.registerView(VIEW_TYPE_GUKI_CHAT, (leaf) => new ChatView(leaf, session));

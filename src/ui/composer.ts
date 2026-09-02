@@ -13,10 +13,14 @@ export interface ComposerOptions {
 	onStop(): void;
 }
 
+const DEFAULT_PLACEHOLDER = 'Message GuKi… (Enter to send, Shift+Enter for a new line)';
+
 export class Composer {
 	private readonly inputEl: HTMLTextAreaElement;
 	private readonly actionEl: HTMLButtonElement;
 	private busy = false;
+	/** Non-null when the panel is refusing input; the text is shown in place of the placeholder. */
+	private blocked: string | null = null;
 
 	constructor(
 		containerEl: HTMLElement,
@@ -30,7 +34,7 @@ export class Composer {
 			cls: 'guki-composer-input',
 			attr: {
 				rows: '3',
-				placeholder: 'Message GuKi… (Enter to send, Shift+Enter for a new line)',
+				placeholder: DEFAULT_PLACEHOLDER,
 			},
 		});
 
@@ -70,9 +74,29 @@ export class Composer {
 		this.actionEl.setAttr('aria-label', busy ? 'Stop the current reply' : 'Send the message');
 	}
 
+	/**
+	 * Refuses input, with the reason in place of the placeholder (PLAN Phase 5 task 9).
+	 *
+	 * Only one thing sets this: the approval gate is not running. Leaving the composer usable would
+	 * mean typing into a CLI with no permission bridge, which is the state that must never be
+	 * reachable quietly — so the control is genuinely disabled, not merely styled as such.
+	 * Idempotent; called on every state change.
+	 */
+	setBlocked(reason: string | null): void {
+		if (reason === this.blocked) {
+			return;
+		}
+		this.blocked = reason;
+		const isBlocked = reason !== null;
+		this.inputEl.disabled = isBlocked;
+		this.actionEl.disabled = isBlocked;
+		this.inputEl.placeholder = reason ?? DEFAULT_PLACEHOLDER;
+		this.actionEl.toggleClass('guki-composer-blocked', isBlocked);
+	}
+
 	private submit(): void {
 		const text = this.inputEl.value.trim();
-		if (text.length === 0) {
+		if (text.length === 0 || this.blocked !== null) {
 			return;
 		}
 		if (this.options.onSubmit(text)) {

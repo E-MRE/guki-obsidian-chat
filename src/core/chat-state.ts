@@ -46,6 +46,24 @@ export interface MessageBlock {
 	 */
 	toolIsError?: boolean;
 	/**
+	 * True once the permission bridge has put an approval card on screen for this call.
+	 *
+	 * The card carries the diff and the full target path, so the tool card stops repeating them —
+	 * two identical Before/After panes, one passive and one actionable, is noise rather than
+	 * information (Emre's Phase 5a acceptance run, finding 2).
+	 */
+	toolPermissionRequested?: boolean;
+	/**
+	 * The reader denied this call, or the turn ended before they answered it.
+	 *
+	 * **Distinct from `toolIsError`, and it has to be.** The CLI reports a denial as a
+	 * `tool_result` with `is_error: true`, exactly as it reports a tool that genuinely failed, so
+	 * the wire cannot separate them — only our own broker knows which ids it declined. A denial is
+	 * a normal outcome and the turn continues (RESEARCH B5, trap 6), so it gets no error colour and
+	 * no failure badge.
+	 */
+	toolDenied?: boolean;
+	/**
 	 * An `Agent` block with subagent events arriving under its id. v1 hides the content and shows
 	 * one live line instead (PLAN Phase 4.5): silence reads as a frozen plugin.
 	 */
@@ -92,7 +110,39 @@ export interface NoticeItem {
 	detail?: string;
 }
 
-export type ChatItem = UserItem | AssistantItem | NoticeItem;
+/**
+ * `pending` until the reader answers. `cancelled` is **not** a decision they made — it means the
+ * turn ended (Stop, or the server went away) while the card was still open, and the request was
+ * answered on their behalf so the CLI is not left waiting (PHASE5A-STATE D5).
+ *
+ * `denied` is a normal outcome, not a failure: a denied tool leaves `result.subtype === 'success'`
+ * and `is_error === false`, and the turn carries on (RESEARCH B5, trap 6).
+ */
+export type PermissionStatus = 'pending' | 'allowed' | 'denied' | 'cancelled';
+
+/**
+ * A permission request from the CLI, awaiting an Allow / Deny (PLAN Phase 5.4).
+ *
+ * It is a top-level item rather than a field on the `tool_use` block it belongs to. `tool_use_id`
+ * does tie the two together and is carried here for it — but the ordering between the `assistant`
+ * event that opens the block and the bridge call is not a contract we control, and a card that
+ * fails to render is a turn that hangs with no way out. A standalone item always renders, and the
+ * sticky-bottom scroll brings it into view for free (PHASE5A-STATE D4).
+ */
+export interface PermissionItem {
+	kind: 'permission';
+	id: string;
+	/** The broker's own id for the request. What `PermissionBroker.decide` is called with. */
+	requestId: string;
+	toolName: string;
+	/** The tool's arguments, straight off the wire. `unknown`: every read of it is guarded. */
+	input: unknown;
+	/** Matches the `tool_use` block in the `assistant` event (RESEARCH B5). Unused in 5a. */
+	toolUseId?: string;
+	status: PermissionStatus;
+}
+
+export type ChatItem = UserItem | AssistantItem | NoticeItem | PermissionItem;
 
 let nextId = 0;
 function newId(prefix: string): string {
@@ -132,6 +182,26 @@ export class ChatState {
 			kind: 'assistant',
 			id: newId('assistant'),
 			blocks: new Map(),
+			status: 'pending',
+		};
+		this.itemList.push(item);
+		this.emitChange();
+		return item;
+	}
+
+	addPermissionRequest(request: {
+		requestId: string;
+		toolName: string;
+		input: unknown;
+		toolUseId?: string;
+	}): PermissionItem {
+		const item: PermissionItem = {
+			kind: 'permission',
+			id: newId('permission'),
+			requestId: request.requestId,
+			toolName: request.toolName,
+			input: request.input,
+			toolUseId: request.toolUseId,
 			status: 'pending',
 		};
 		this.itemList.push(item);

@@ -1,0 +1,14 @@
+{
+  "_note": "system/init from the REAL claude CLI, spawned with the Phase 5a bridge attached. Taken 2026-09-02 with docs/capture-phase5a-probe.mjs, which exits the moment init arrives — so this cost no model call. It is the input the startup self-check reads (PLAN Phase 5 task 9), and the evidence for two acceptance criteria that nothing offline can prove: that our server registers at all, and that Emre's own MCP servers survive the absence of --strict-mcp-config.",
+  "mcp_servers": [
+    { "name": "plugin:mem0:mem0", "status": "connected" },
+    { "name": "codebase-memory-mcp", "status": "connected" },
+    { "name": "headroom", "status": "connected" },
+    { "name": "guki-perm", "status": "connected" },
+    { "name": "claude.ai Microsoft 365", "status": "needs-auth" },
+    { "name": "claude.ai Focus MCP", "status": "needs-auth" }
+  ],
+  "permissionMode": "default",
+  "_guki_perm_tools": ["mcp__guki-perm__permission_prompt"],
+  "_socket_hello": { "type": "hello", "token": "probe-token", "pid": 78231 }
+}

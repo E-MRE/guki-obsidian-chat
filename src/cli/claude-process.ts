@@ -47,6 +47,12 @@ export interface ClaudeProcessCallbacks {
 export interface ClaudeProcessOptions {
 	binaryPath: string;
 	cwd: string;
+	/**
+	 * Flags appended to the mandatory set. Phase 5 puts the permission bridge here —
+	 * `--mcp-config`, `--permission-prompt-tool` — so this class keeps owning only the flags that
+	 * are true of every run.
+	 */
+	extraArgs?: string[];
 	callbacks: ClaudeProcessCallbacks;
 }
 
@@ -70,6 +76,11 @@ export class ClaudeProcess {
 	 *
 	 * `--include-partial-messages` is what adds the `stream_event` type — without it the reply
 	 * arrives in one burst when each block completes (RESEARCH B3).
+	 *
+	 * There is deliberately **no `--permission-mode`**: default mode is what routes every tool call
+	 * to the permission bridge, and `acceptEdits` auto-approves `Bash` while still prompting for
+	 * `Read` (RESEARCH B5b). And no `--strict-mcp-config`, which would drop the user's own MCP
+	 * servers. Both are absences, so both are recorded here rather than nowhere.
 	 */
 	private buildArgs(): string[] {
 		return [
@@ -80,6 +91,7 @@ export class ClaudeProcess {
 			'stream-json',
 			'--verbose',
 			'--include-partial-messages',
+			...(this.options.extraArgs ?? []),
 		];
 	}
 

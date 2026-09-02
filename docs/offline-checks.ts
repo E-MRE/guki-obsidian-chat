@@ -22,15 +22,44 @@
  *     things the Phase 3 capture lacks: a live subagent and a real `Edit` input.
  * J.  The three defects from Emre's Phase 4 acceptance run that carry state: a Stop during a
  *     pending tool call, and a trailing newline counted as a line.
+ * K.  Phase 5a: the permission bridge, driven end to end — the real `PermissionBroker` talking to
+ *     the real `mcp-permission-server.mjs` in a real process over a real unix socket, with this
+ *     file playing the claude CLI. The server is outside `tsconfig` and outside eslint, so this is
+ *     the only thing in the toolchain that looks at it at all.
+ * L.  Phase 5a acceptance-run findings: a denial our own broker issued must not render as a tool
+ *     failure, and the diff must not be drawn twice for one gated call.
+ * M.  A real Stop-pressed-while-a-card-is-open turn, replayed from
+ *     `docs/capture-phase5a-stop.jsonl`. §L's own cancellation checks answered the broker directly
+ *     and missed the ordering that made the defect; this replays the CLI's real event order.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { ChatState, hasRenderableContent, orderedBlocks, type AssistantItem } from '../src/core/chat-state';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { createConnection, createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import {
+	ChatState,
+	hasRenderableContent,
+	orderedBlocks,
+	type AssistantItem,
+	type PermissionItem,
+} from '../src/core/chat-state';
 import { StreamReducer } from '../src/core/stream-reducer';
 import { SessionManager } from '../src/core/session-manager';
-import { parseStreamJsonLine, type StreamJsonEvent } from '../src/cli/events';
+import { PermissionBroker } from '../src/core/permission-broker';
+import {
+	deniedToolUseIds,
+	isSystemInitEvent,
+	mcpServerStatus,
+	parseStreamJsonLine,
+	type ResultEvent,
+	type StreamJsonEvent,
+	type SystemInitEvent,
+} from '../src/cli/events';
 import { startsExpanded, toolCategory, toolResultText, toolSummary } from '../src/core/tool-policy';
 import { diffFromToolInput, diffStats } from '../src/ui/diff-view';
+import { toolResultTitle, toolStatusText } from '../src/ui/tool-card';
 
 let failures = 0;
 
@@ -45,6 +74,25 @@ function check(name: string, condition: boolean, detail = ''): void {
 
 function eq<T>(name: string, actual: T, expected: T): void {
 	check(name, actual === expected, `got ${JSON.stringify(actual)}, want ${JSON.stringify(expected)}`);
+}
+
+/**
+ * `eq`, for a value that has to be computed from input that might make the code under test throw.
+ *
+ * A guard that stops a malformed event from throwing cannot be proven by asserting on its return
+ * value alone: strip the guard and the code throws *before* the assertion runs, which kills the
+ * harness and silently skips every section after it. Found while proving §K goes red.
+ */
+function eqCall<T>(name: string, produce: () => T, expected: T): void {
+	let actual: T;
+	try {
+		actual = produce();
+	} catch (error) {
+		failures += 1;
+		console.log(`  FAIL ${name} — threw: ${String(error)}`);
+		return;
+	}
+	eq(name, actual, expected);
 }
 
 // --- A. replay the real capture -------------------------------------------
@@ -275,19 +323,44 @@ console.log('D. Tool blocks from the real capture');
 	eq('slot 2 is NOT an error', tool0?.toolIsError, false);
 	eq('slot 2 is no longer pending once its result landed', tool0?.toolPending, false);
 
-	// The two error results.
-	eq('slot 3 is flagged as an error', tool1?.toolIsError, true);
-	eq('slot 4 is flagged as an error', tool2?.toolIsError, true);
+	// The two results that arrive with `is_error: true` — and are **not** failures.
+	//
+	// These two assertions used to read `toolIsError === true`, and they were wrong in exactly the
+	// way Emre's Phase 5a acceptance rounds reported. This capture's own `result` event settles it:
+	//
+	//   "permission_denials": [{"tool_name": "WebSearch", "tool_use_id": "toolu_01QXoT…"},
+	//                          {"tool_name": "WebSearch", "tool_use_id": "toolu_01KHHp…"}]
+	//   "subtype": "success", "is_error": false
+	//
+	// The CLI is saying these were *declined*, on a turn it considers successful, and the result
+	// text says so too ("Claude requested permissions use WebSearch, but you haven't granted it
+	// yet"). The old expectation encoded the defect, so it changed when the defect did.
+	//
+	// This capture is also the evidence that the fix is not just about our own bridge: no
+	// permission server was attached when it was taken, so these are **CLI-side** denials, and they
+	// now render correctly for the same reason a bridge denial does.
+	eq('slot 3 is a denial, not an error', tool1?.toolIsError, false);
+	eq('slot 4 is a denial, not an error', tool2?.toolIsError, false);
+	eq('...and slot 3 is marked as denied', tool1?.toolDenied, true);
+	eq('...and so is slot 4', tool2?.toolDenied, true);
 	check(
 		'slot 3 result carries the denial message, not a blank box',
 		tool1?.toolResultText?.includes("haven't granted it yet") === true,
 		JSON.stringify(tool1?.toolResultText),
 	);
 
-	// The is_error override: a WebSearch is `collapsed` by the table, but an errored one opens.
+	// The is_error override still exists — it is just not what these two blocks exercise any more.
 	eq('WebSearch is collapsed by category', toolCategory('WebSearch'), 'collapsed');
-	eq('...but the errored card starts expanded', startsExpanded('WebSearch', true), true);
+	eq('a genuinely errored card still starts expanded', startsExpanded('WebSearch', true), true);
 	eq('...and the successful one does not', startsExpanded('ToolSearch', false), false);
+	// A denied card is not forced open: `startsExpanded` is asked with the block's own flag, which
+	// the fix leaves false. Forcing it open would be the expand-on-error rule firing on something
+	// that did not error.
+	eq(
+		'...and neither does a denied one',
+		startsExpanded(tool1?.toolName, tool1?.toolIsError === true),
+		false,
+	);
 
 	// RESEARCH trap 6, on live data: two tools were denied and the turn is still a success.
 	eq('two denied tools did NOT fail the turn', item.status, 'complete');
@@ -944,6 +1017,1596 @@ console.log('J3. A trailing newline is not an extra line');
 	const edit = diffFromToolInput('Edit', { old_string: 'alpha\nbravo\n', new_string: 'alpha\nBRAVO\n' });
 	eq('an Edit with trailing newlines removes one line', edit ? diffStats(edit).removed : -1, 1);
 	eq('...and adds one', edit ? diffStats(edit).added : -1, 1);
+}
+
+
+// --- K. Phase 5a: the permission bridge -----------------------------------
+
+/*
+ * Everything below drives the **real** `PermissionBroker` and the **real**
+ * `src/cli/mcp-permission-server.mjs`, in a real process, over a real unix socket — with this
+ * harness standing in for the claude CLI. That is deliberate and it is the point of the section:
+ * the server is outside `tsconfig` and outside eslint (it runs in Node, not in the renderer), so
+ * nothing else in the toolchain looks at it at all. It only proves itself when it is run.
+ *
+ * The harness plays the CLI honestly: it reads the `mcp.json` the broker wrote, spawns whatever
+ * `command`/`args`/`env` it finds there, and speaks MCP JSON-RPC over that process's stdio. So a
+ * broken interpreter path, a wrong env name or a malformed config fails here rather than being
+ * asserted about in the abstract.
+ */
+
+/**
+ * Node's `require`, published where `src/cli/node-api.ts` looks for it. The production code
+ * reaches Node through `window.require` because that is the only form that survives both lint
+ * rules *and* the CJS bundle (trap 14, trap 15); in this harness `window` does not exist, so it is
+ * created rather than the code under test being changed to suit the test.
+ */
+(globalThis as unknown as { window: unknown }).window = {
+	require: createRequire(import.meta.url),
+	setTimeout: globalThis.setTimeout.bind(globalThis),
+	clearTimeout: globalThis.clearTimeout.bind(globalThis),
+};
+
+const PERM_TIMEOUT_MS = 10_000;
+
+/**
+ * An async queue over a newline-delimited JSON stream.
+ *
+ * `next()` resolves with `TIMED_OUT` rather than rejecting. "The CLI was never answered" is one of
+ * the regressions this section exists to catch — a stranded JSON-RPC id is exactly what a broken
+ * `cancelPending` produces — and a rejection would take the harness down instead of reporting it,
+ * silently skipping every section after it.
+ */
+const TIMED_OUT = { __timedOut: true } as const;
+
+function ndjsonQueue(stream: NodeJS.ReadableStream): {
+	next(): Promise<Record<string, unknown>>;
+	seen: Record<string, unknown>[];
+} {
+	const seen: Record<string, unknown>[] = [];
+	const queued: Record<string, unknown>[] = [];
+	const waiters: ((value: Record<string, unknown>) => void)[] = [];
+	let buffer = '';
+
+	stream.setEncoding('utf8');
+	stream.on('data', (chunk: string) => {
+		buffer += chunk;
+		const lines = buffer.split('\n');
+		buffer = lines.pop() ?? '';
+		for (const line of lines) {
+			if (line.trim().length === 0) {
+				continue;
+			}
+			let parsed: Record<string, unknown>;
+			try {
+				parsed = JSON.parse(line) as Record<string, unknown>;
+			} catch {
+				continue;
+			}
+			seen.push(parsed);
+			const waiter = waiters.shift();
+			if (waiter) {
+				waiter(parsed);
+			} else {
+				queued.push(parsed);
+			}
+		}
+	});
+
+	return {
+		seen,
+		next(): Promise<Record<string, unknown>> {
+			const ready = queued.shift();
+			if (ready) {
+				return Promise.resolve(ready);
+			}
+			return new Promise((resolve) => {
+				const timer = setTimeout(() => {
+					resolve(TIMED_OUT as unknown as Record<string, unknown>);
+				}, PERM_TIMEOUT_MS);
+				waiters.push((value) => {
+					clearTimeout(timer);
+					resolve(value);
+				});
+			});
+		},
+	};
+}
+
+/** The `content[0].text` of an MCP tool result, parsed. This is where the verdict lives. */
+function verdictOf(response: Record<string, unknown>): Record<string, unknown> | null {
+	const result = response.result as { content?: { type?: string; text?: string }[] } | undefined;
+	const text = result?.content?.[0]?.text;
+	if (typeof text !== 'string') {
+		return null;
+	}
+	try {
+		return JSON.parse(text) as Record<string, unknown>;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * A `SessionManager`-shaped app for the broker: a config dir and an adapter that serves the real
+ * server source. `readPaths` records what the broker asked for, so the path it builds is asserted
+ * rather than assumed.
+ */
+function brokerApp(readPaths: string[]): never {
+	return {
+		vault: {
+			configDir: '.obsidian',
+			adapter: {
+				read: (path: string) => {
+					readPaths.push(path);
+					return Promise.resolve(
+						readFileSync(join(process.cwd(), 'src', 'cli', 'mcp-permission-server.mjs'), 'utf8'),
+					);
+				},
+			},
+		},
+	} as never;
+}
+
+/** Starts a broker and, playing the CLI, spawns the server exactly as its `mcp.json` describes. */
+async function startBridge(): Promise<{
+	broker: PermissionBroker;
+	state: ChatState;
+	child: ReturnType<typeof spawn>;
+	rpc: ReturnType<typeof ndjsonQueue>;
+	config: Record<string, unknown>;
+	readPaths: string[];
+	send: (message: unknown) => void;
+	stop: () => void;
+}> {
+	const readPaths: string[] = [];
+	const state = new ChatState();
+	const broker = new PermissionBroker(brokerApp(readPaths), state);
+	await broker.start();
+
+	const configPath = broker.cliArgs[1] ?? '';
+	const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+	const entry = (config.mcpServers as Record<string, { command: string; args: string[]; env: Record<string, string> }>)[
+		'guki-perm'
+	];
+
+	const child = spawn(entry.command, entry.args, {
+		env: { ...process.env, ...entry.env },
+		stdio: ['pipe', 'pipe', 'pipe'],
+	});
+	const rpc = ndjsonQueue(child.stdout);
+	// The server writes diagnostics to stderr and must never write them to stdout; drained so the
+	// pipe cannot fill and block the process.
+	child.stderr.resume();
+
+	return {
+		broker,
+		state,
+		child,
+		rpc,
+		config,
+		readPaths,
+		send: (message: unknown) => child.stdin.write(`${JSON.stringify(message)}\n`),
+		stop: () => {
+			broker.dispose();
+			child.kill('SIGKILL');
+		},
+	};
+}
+
+/**
+ * Resolves when the child has exited, or rejects on timeout.
+ *
+ * `signal` is reported alongside `code` because they are mutually exclusive and which one arrives
+ * says *how* the server died — which is the whole difference between the three teardown mechanisms
+ * these checks separate (PHASE5A-STATE D3).
+ */
+function waitForExit(
+	child: ReturnType<typeof spawn>,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null; timedOut: boolean }> {
+	if (child.exitCode !== null || child.signalCode !== null) {
+		return Promise.resolve({ code: child.exitCode, signal: child.signalCode, timedOut: false });
+	}
+	// Resolves rather than rejects on timeout. "The server did not exit" is exactly the regression
+	// these checks exist to catch, and a rejection here takes the whole harness down with it —
+	// found while proving this section goes red, where reverting the socket-close handler crashed
+	// the run instead of reporting it and silently skipped every section after it.
+	return new Promise((resolve) => {
+		const timer = setTimeout(() => {
+			child.kill('SIGKILL');
+			resolve({ code: null, signal: null, timedOut: true });
+		}, PERM_TIMEOUT_MS);
+		child.on('exit', (code, signal) => {
+			clearTimeout(timer);
+			resolve({ code, signal, timedOut: false });
+		});
+	});
+}
+
+/**
+ * Spawns the real server against a **bare** socket server rather than the broker, so the teardown
+ * paths can be exercised one at a time. `dispose()` fires all three at once; a check that only ever
+ * sees them together cannot tell which of them is actually load-bearing.
+ */
+async function spawnServerAgainstBareSocket(): Promise<{
+	child: ReturnType<typeof spawn>;
+	rpc: ReturnType<typeof ndjsonQueue>;
+	socket: Promise<import('node:net').Socket>;
+	close: () => void;
+}> {
+	const dir = mkdtempSync(join(tmpdir(), 'guki-checks-perm-'));
+	const socketPath = join(dir, 'perm.sock');
+
+	let resolveSocket: (value: import('node:net').Socket) => void = () => undefined;
+	const socket = new Promise<import('node:net').Socket>((resolve) => (resolveSocket = resolve));
+	const server = createServer((connection) => resolveSocket(connection));
+	await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+
+	const child = spawn(process.execPath, [join(process.cwd(), 'src', 'cli', 'mcp-permission-server.mjs')], {
+		env: { ...process.env, GUKI_PERM_SOCKET: socketPath, GUKI_PERM_TOKEN: 'test-token' },
+		stdio: ['pipe', 'pipe', 'pipe'],
+	});
+	const rpc = ndjsonQueue(child.stdout);
+	child.stderr.resume();
+
+	return {
+		child,
+		rpc,
+		socket,
+		close: () => {
+			server.close();
+			rmSync(dir, { recursive: true, force: true });
+		},
+	};
+}
+
+console.log('K1. The generated mcp.json is the one PLAN Phase 5 task 3 specifies');
+{
+	const bridge = await startBridge();
+
+	// No `manifest.dir` was given, so this is the reconstructed fallback.
+	eq(
+		'with no manifest.dir, the path is rebuilt from the config dir and the plugin id',
+		bridge.readPaths[0],
+		'.obsidian/plugins/guki-chat/mcp-permission-server.mjs',
+	);
+
+	const args = bridge.broker.cliArgs;
+	eq('--mcp-config is passed', args[0], '--mcp-config');
+	check('...with an absolute path', args[1]?.startsWith('/') === true, args[1]);
+	eq('--permission-prompt-tool is passed', args[2], '--permission-prompt-tool');
+	eq('...naming our server and tool', args[3], 'mcp__guki-perm__permission_prompt');
+
+	// Both are absences, and both are the difference between a working gate and no gate at all:
+	// `acceptEdits` auto-approves Bash (RESEARCH B5b), `--strict-mcp-config` drops Emre's own
+	// servers. An absence cannot be spotted by reading the happy path, so it is asserted.
+	check('no --permission-mode flag at all', !args.includes('--permission-mode'), args.join(' '));
+	check('no --strict-mcp-config', !args.includes('--strict-mcp-config'), args.join(' '));
+
+	const entry = (bridge.config.mcpServers as Record<string, { command: string; args: string[]; env: Record<string, string> }>)[
+		'guki-perm'
+	];
+	// A bare `node` fails silently — the stdio server never spawns and never appears in the tool
+	// list, with no error of its own (RESEARCH B5, trap 7).
+	check('the interpreter is an absolute path, never a bare name', entry.command.startsWith('/'), entry.command);
+	check('...and it is a real executable', existsSync(entry.command), entry.command);
+	check('the server script exists where mcp.json points', existsSync(entry.args[0] ?? ''), entry.args[0]);
+	check('the socket path is handed over in the env', typeof entry.env.GUKI_PERM_SOCKET === 'string');
+	check('...and so is the token', (entry.env.GUKI_PERM_TOKEN ?? '').length > 0);
+
+	bridge.stop();
+}
+
+console.log("K1b. manifest.dir wins over the reconstructed path");
+{
+	// `manifest.dir` is what Obsidian actually knows; the fallback hardcodes both the config
+	// directory and the plugin id and is only there because the field is optional. If the two ever
+	// disagree — a renamed plugin folder, a non-default config dir — the real one has to be used,
+	// and the failure is silent: the wrong path just fails to read and the gate never starts.
+	//
+	// No server is spawned here: the broker only writes files and listens, and the *CLI* is what
+	// spawns the server. So this costs a socket, not a process.
+	const readPaths: string[] = [];
+	const broker = new PermissionBroker(brokerApp(readPaths), new ChatState(), 'Config/plugins/renamed-guki');
+	await broker.start();
+	eq(
+		'the supplied plugin folder is the one read from',
+		readPaths[0],
+		'Config/plugins/renamed-guki/mcp-permission-server.mjs',
+	);
+	broker.dispose();
+}
+
+console.log('K2. The MCP handshake, against the real server process');
+{
+	const bridge = await startBridge();
+
+	bridge.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25' } });
+	const init = await bridge.rpc.next();
+	check('initialize is answered at all', init !== TIMED_OUT, JSON.stringify(init));
+	eq('initialize is answered on the right id', init.id, 1);
+	const initResult = init.result as { protocolVersion?: string; serverInfo?: { name?: string } };
+	eq('the requested protocol version is echoed', initResult.protocolVersion, '2025-11-25');
+	eq('the server names itself', initResult.serverInfo?.name, 'guki-perm');
+
+	// A notification carries no id and must draw no reply at all; a reply to it would be a
+	// protocol error the CLI reports as a broken server.
+	bridge.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+	bridge.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+	const list = await bridge.rpc.next();
+	eq('the notification drew no response — tools/list is the next reply', list.id, 2);
+	const tools = (list.result as { tools?: { name?: string }[] }).tools ?? [];
+	eq('exactly one tool is exposed', tools.length, 1);
+	eq('...and it is the one --permission-prompt-tool names', tools[0]?.name, 'permission_prompt');
+
+	bridge.stop();
+}
+
+console.log('K3. Allow: the request reaches the panel and the verdict reaches the CLI');
+{
+	const bridge = await startBridge();
+	bridge.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+	await bridge.rpc.next();
+
+	const input = { file_path: '/vault/note.md', content: 'alpha\nbravo\n' };
+	bridge.send({
+		jsonrpc: '2.0',
+		id: 7,
+		method: 'tools/call',
+		params: {
+			name: 'permission_prompt',
+			// The three fields the CLI actually sends, verbatim (RESEARCH B5, PHASE5A-STATE F2).
+			arguments: { tool_name: 'Write', input, tool_use_id: 'toolu_01Bc' },
+		},
+	});
+
+	// The card is what proves the request crossed the socket. Polled rather than awaited on a
+	// promise: the broker's only output is the ChatState item.
+	let card: PermissionItem | undefined;
+	for (let i = 0; i < 200 && !card; i += 1) {
+		card = bridge.state.items.find((item) => item.kind === 'permission') as PermissionItem | undefined;
+		if (!card) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+	check('a permission card was added to the transcript', card !== undefined);
+	eq('it carries the tool name', card?.toolName, 'Write');
+	eq('it carries the tool_use_id, so it can be tied to the tool card', card?.toolUseId, 'toolu_01Bc');
+	eq('it starts pending', card?.status, 'pending');
+	// Content, not shape: the card renders its body out of this, so an input that arrived empty
+	// would be a blank approval dialog — the Phase 3 empty-block defect in a new place.
+	eq(
+		'the tool input survived the socket intact',
+		JSON.stringify(card?.input),
+		JSON.stringify(input),
+	);
+	// The whole point of a permission prompt: nothing is answered until the reader answers.
+	eq('nothing was written to the CLI yet', bridge.rpc.seen.length, 1);
+
+	bridge.broker.decide(card?.requestId ?? '', 'allow');
+	const answer = await bridge.rpc.next();
+	check('a verdict came back at all', answer !== TIMED_OUT, JSON.stringify(answer));
+	eq('the verdict comes back on the tools/call id', answer.id, 7);
+	const verdict = verdictOf(answer);
+	eq('behavior is allow', verdict?.behavior, 'allow');
+	eq(
+		'updatedInput echoes the original input',
+		JSON.stringify(verdict?.updatedInput),
+		JSON.stringify(input),
+	);
+	check('no deny message rode along', verdict?.message === undefined);
+	eq('the card closed as allowed', card?.status, 'allowed');
+
+	bridge.stop();
+}
+
+console.log('K4. Deny carries a message, and is not an error');
+{
+	const bridge = await startBridge();
+	bridge.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+	await bridge.rpc.next();
+
+	bridge.send({
+		jsonrpc: '2.0',
+		id: 9,
+		method: 'tools/call',
+		params: { name: 'permission_prompt', arguments: { tool_name: 'Bash', input: { command: 'rm -rf /' } } },
+	});
+
+	let card: PermissionItem | undefined;
+	for (let i = 0; i < 200 && !card; i += 1) {
+		card = bridge.state.items.find((item) => item.kind === 'permission') as PermissionItem | undefined;
+		if (!card) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+	// A request with no `tool_use_id` still has to produce a usable card: the field is optional on
+	// the wire and a card that needed it would silently not appear.
+	check('a card appears even with no tool_use_id', card !== undefined);
+	eq('...and the field is simply absent', card?.toolUseId, undefined);
+
+	bridge.broker.decide(card?.requestId ?? '', 'deny', 'The user denied this tool call in Obsidian.');
+	const answer = await bridge.rpc.next();
+	check('a verdict came back at all', answer !== TIMED_OUT, JSON.stringify(answer));
+	const verdict = verdictOf(answer);
+	eq('behavior is deny', verdict?.behavior, 'deny');
+	// The contract requires a message on a denial; an empty one leaves the model with nothing to
+	// explain to the reader (RESEARCH B5).
+	check('a non-empty message is included', ((verdict?.message ?? '') as string).length > 0, JSON.stringify(verdict));
+	eq('the card closed as denied', card?.status, 'denied');
+
+	bridge.stop();
+}
+
+console.log('K5. A turn that ends first answers the request rather than stranding it');
+{
+	const bridge = await startBridge();
+	bridge.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+	await bridge.rpc.next();
+
+	bridge.send({
+		jsonrpc: '2.0',
+		id: 11,
+		method: 'tools/call',
+		params: { name: 'permission_prompt', arguments: { tool_name: 'Read', input: { file_path: '/etc/hosts' } } },
+	});
+
+	let card: PermissionItem | undefined;
+	for (let i = 0; i < 200 && !card; i += 1) {
+		card = bridge.state.items.find((item) => item.kind === 'permission') as PermissionItem | undefined;
+		if (!card) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+	check('the request is open', card?.status === 'pending');
+	check('the broker knows it is holding one', bridge.broker.hasPending);
+
+	// Stop, in effect: the turn ended underneath an open request.
+	bridge.broker.cancelPending('The turn was stopped before the request was answered.');
+	const answer = await bridge.rpc.next();
+	check('the CLI is answered rather than left waiting', answer !== TIMED_OUT, JSON.stringify(answer));
+	eq('...on the id it is holding', answer.id, 11);
+	eq('...as a denial, because nothing was approved', verdictOf(answer)?.behavior, 'deny');
+	// `cancelled`, not `denied`: the reader did not deny anything, and the card must not read as a
+	// decision they made (PHASE5A-STATE D5).
+	eq('the card reads as unanswered, not as a denial', card?.status, 'cancelled');
+	check('nothing is left pending', !bridge.broker.hasPending);
+
+	bridge.stop();
+}
+
+console.log('K5b. A socket that does not know the token gets nothing');
+{
+	// The temp directory is already 0700, so this is the second line of defence rather than the
+	// first — but it is also what makes a reported pid safe to SIGTERM on the way out, so it is
+	// worth proving rather than assuming.
+	const bridge = await startBridge();
+	const socketPath = join(dirname(bridge.broker.cliArgs[1] ?? ''), 'perm.sock');
+
+	const intruder = createConnection(socketPath);
+	await new Promise<void>((resolve) => intruder.once('connect', resolve));
+	intruder.write(`${JSON.stringify({ type: 'hello', token: 'wrong-token', pid: 999999 })}\n`);
+	intruder.write(
+		`${JSON.stringify({ type: 'request', id: 'x-1', tool_name: 'Write', input: { file_path: '/vault/x.md' } })}\n`,
+	);
+	// Raced against a timer rather than simply awaited: an intruder that is *not* dropped never
+	// emits 'close', so a bare await would hang the harness and be reported as a pass by anything
+	// that greps for failures. Being tolerated is the regression; it has to surface as one.
+	const dropped = await new Promise<boolean>((resolve) => {
+		const timer = setTimeout(() => resolve(false), PERM_TIMEOUT_MS);
+		intruder.once('close', () => {
+			clearTimeout(timer);
+			resolve(true);
+		});
+	});
+
+	check('the connection was dropped', dropped && intruder.destroyed);
+	eq(
+		'and its request never became a card',
+		bridge.state.items.filter((item) => item.kind === 'permission').length,
+		0,
+	);
+	intruder.destroy();
+	bridge.stop();
+}
+
+console.log('K6. dispose() kills the server process — the quit acceptance criterion, offline');
+{
+	const bridge = await startBridge();
+	bridge.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+	await bridge.rpc.next();
+	check('the server is running', bridge.child.exitCode === null);
+
+	// Exactly what `onunload` / `workspace.on('quit')` do. Nothing here kills the child directly —
+	// this asserts the server dies of the *broker* going away, which is what makes `ps` come back
+	// empty after Obsidian quits (trap 9: two processes to clean up, not one).
+	//
+	// The outcome is deliberately not pinned to a code or a signal. `dispose()` fires all three
+	// teardown mechanisms at once and they race; the first version of this check demanded `code 0`
+	// and failed because SIGTERM won that particular race — proving only that the check was
+	// asserting on the wrong thing. What the acceptance criterion asks is that the process is gone.
+	// Which mechanism did it is pinned separately, one fixture each, in K7 and K8.
+	bridge.broker.dispose();
+	const exit = await waitForExit(bridge.child);
+	check('the server is gone', !exit.timedOut, JSON.stringify(exit));
+}
+
+console.log('K7. The server dies with the panel even when dispose() never runs');
+{
+	// The case `dispose()` cannot cover: Obsidian was force-quit or the renderer crashed, so no
+	// teardown ran and nobody sent a SIGTERM. The socket closing is the only signal left, and it
+	// has to be enough on its own — otherwise a crashed Obsidian leaves an orphan behind.
+	const harness = await spawnServerAgainstBareSocket();
+	const socket = await harness.socket;
+	harness.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })}\n`);
+	const init = await harness.rpc.next();
+	eq('the server is serving', init.id, 1);
+
+	socket.destroy();
+	const exit = await waitForExit(harness.child);
+	check('losing the panel socket alone ends the server', !exit.timedOut, JSON.stringify(exit));
+	eq('...cleanly', exit.code, 0);
+	eq('...and not by a signal, so this really was the socket path', exit.signal, null);
+	harness.close();
+}
+
+console.log('K8. The server dies with the CLI');
+{
+	// The third mechanism, from the other side: the CLI exited, so the server has nothing left to
+	// serve. Without this an orphan survives every restart of the subprocess, not just of Obsidian.
+	const harness = await spawnServerAgainstBareSocket();
+	const socket = await harness.socket;
+	const hello = JSON.parse((await new Promise<string>((resolve) => socket.once('data', (d) => resolve(String(d))))).trim()) as {
+		type?: string;
+		token?: string;
+		pid?: number;
+	};
+	eq('the server introduces itself', hello.type, 'hello');
+	eq('...with the token it was given', hello.token, 'test-token');
+	// The pid is what `dispose()` sends SIGTERM to; without it the backstop has no target.
+	eq('...and its own pid', hello.pid, harness.child.pid);
+
+	harness.child.stdin.end();
+	const exit = await waitForExit(harness.child);
+	check('stdin ending ends the server', !exit.timedOut, JSON.stringify(exit));
+	eq('...cleanly', exit.code, 0);
+	harness.close();
+}
+
+console.log('K9. With no panel listening, the server refuses to serve at all');
+{
+	// Fail closed, and fail loudly. A server that started but could not reach the plugin would
+	// report `connected` to the CLI and then silently deny everything — the "no approval gate,
+	// quietly" state PLAN task 9 forbids. So it exits before answering `initialize`, which makes it
+	// absent from `system/init.mcp_servers`, which the startup self-check reports (K9).
+	const child = spawn(process.execPath, [join(process.cwd(), 'src', 'cli', 'mcp-permission-server.mjs')], {
+		env: {
+			...process.env,
+			GUKI_PERM_SOCKET: join(tmpdir(), `guki-nonexistent-${String(Date.now())}.sock`),
+			GUKI_PERM_TOKEN: 'irrelevant',
+		},
+		stdio: ['pipe', 'pipe', 'pipe'],
+	});
+	const rpc = ndjsonQueue(child.stdout);
+	child.stderr.resume();
+	child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })}\n`);
+
+	const exit = await waitForExit(child);
+	check('the server exited rather than serving', !exit.timedOut, JSON.stringify(exit));
+	check('...and non-zero', exit.code !== 0 && !exit.timedOut, String(exit.code));
+	eq('...without answering anything on stdout', rpc.seen.length, 0);
+}
+
+console.log('K10. mcpServerStatus, over the real init event from the capture');
+{
+	// The real `system/init` from `docs/capture-phase4-tools.jsonl`, so the field names are the
+	// ones the CLI actually sends rather than the ones we remember.
+	const capture4 = readFileSync(join(process.cwd(), 'docs', 'capture-phase4-tools.jsonl'), 'utf8');
+	let init: SystemInitEvent | null = null;
+	for (const line of capture4.split('\n')) {
+		const event = parseStreamJsonLine(line);
+		if (event && isSystemInitEvent(event)) {
+			init = event;
+			break;
+		}
+	}
+	check('the capture has a system/init', init !== null);
+
+	eq('a connected server reads as connected', mcpServerStatus(init!, 'codebase-memory-mcp'), 'connected');
+	// `needs-auth` is a third status, not a synonym for connected. Both claude.ai servers sit in it
+	// permanently on this machine, which is why the self-check compares against 'connected'
+	// exactly rather than testing for absence of a failure.
+	eq('needs-auth is reported as itself', mcpServerStatus(init!, 'claude.ai Focus MCP'), 'needs-auth');
+	// The trap-7 case: a stdio server that failed to spawn is not listed at all.
+	eq('a server that never registered reads as null', mcpServerStatus(init!, 'guki-perm'), null);
+
+	// Off-the-wire shapes that must read as "not there" rather than throw.
+	eqCall(
+		'a missing list reads as null',
+		() => mcpServerStatus({ type: 'system', subtype: 'init' }, 'guki-perm'),
+		null,
+	);
+	eqCall(
+		'a non-array list reads as null',
+		() =>
+			mcpServerStatus(
+				{ type: 'system', subtype: 'init', mcp_servers: 'nope' } as unknown as SystemInitEvent,
+				'guki-perm',
+			),
+		null,
+	);
+	eqCall(
+		'a null entry is skipped, not dereferenced',
+		() =>
+			mcpServerStatus(
+				{
+					type: 'system',
+					subtype: 'init',
+					mcp_servers: [null, { name: 'guki-perm', status: 'connected' }],
+				} as unknown as SystemInitEvent,
+				'guki-perm',
+			),
+		'connected',
+	);
+	eqCall(
+		'an entry with no status reads as null, not as connected',
+		() => mcpServerStatus({ type: 'system', subtype: 'init', mcp_servers: [{ name: 'guki-perm' }] }, 'guki-perm'),
+		null,
+	);
+}
+
+console.log('K11. The startup self-check refuses input when the gate is missing');
+{
+	// One fixture per outcome, not one shared one: a check that only ever sees the failing path
+	// proves the alarm fires, never that it stays quiet when it should.
+	const good = new SessionManager(app);
+	stub(good, () => Promise.resolve(true), []);
+	const goodReducer = (good as unknown as { reducer: StreamReducer }).reducer;
+	goodReducer.apply({
+		type: 'system',
+		subtype: 'init',
+		mcp_servers: [{ name: 'guki-perm', status: 'connected' }],
+	} as StreamJsonEvent);
+	eq('a connected gate leaves the composer alone', good.blocked, null);
+	good.dispose();
+
+	for (const [label, servers] of [
+		['absent', [{ name: 'codebase-memory-mcp', status: 'connected' }]],
+		['failed', [{ name: 'guki-perm', status: 'failed' }]],
+		['needs-auth', [{ name: 'guki-perm', status: 'needs-auth' }]],
+	] as const) {
+		const manager = new SessionManager(app);
+		const written: string[] = [];
+		stub(manager, () => Promise.resolve(true), written);
+
+		manager.send('hello');
+		for (let i = 0; i < 8; i += 1) {
+			await Promise.resolve();
+		}
+		eq(`[${label}] the first message went out`, written.length, 1);
+
+		const reducer = (manager as unknown as { reducer: StreamReducer }).reducer;
+		reducer.apply({ type: 'system', subtype: 'init', mcp_servers: servers } as StreamJsonEvent);
+
+		check(`[${label}] input is refused`, manager.blocked !== null, String(manager.blocked));
+		const turn = manager.state.items.find((i) => i.kind === 'assistant') as AssistantItem;
+		eq(`[${label}] the turn in flight was failed, not left hanging`, turn.status, 'error');
+		const notice = manager.state.items.find((i) => i.kind === 'notice');
+		check(`[${label}] a notice says what happened`, notice !== undefined);
+		check(
+			`[${label}] ...and names the server`,
+			(notice as { detail?: string } | undefined)?.detail?.includes('guki-perm') === true,
+			JSON.stringify((notice as { detail?: string } | undefined)?.detail),
+		);
+
+		// The refusal has to actually refuse. A blocked panel that still queues messages would be
+		// a CLI running with no approval gate — the exact state the check exists to prevent.
+		manager.send('and another');
+		for (let i = 0; i < 8; i += 1) {
+			await Promise.resolve();
+		}
+		eq(`[${label}] a message sent while blocked never reaches the CLI`, written.length, 1);
+
+		// A second init on the same fault must not stack a second notice.
+		reducer.apply({ type: 'system', subtype: 'init', mcp_servers: servers } as StreamJsonEvent);
+		eq(
+			`[${label}] the fault is reported once, not once per turn`,
+			manager.state.items.filter((i) => i.kind === 'notice').length,
+			1,
+		);
+		manager.dispose();
+	}
+}
+
+console.log('K12. A turn ending is what tells the broker to answer an open request');
+{
+	// K5 proves `cancelPending` answers the CLI; this proves anything ever calls it. They are
+	// separate guards and they fail separately — removing the wiring left every K5 assertion green,
+	// because K5 calls the broker directly. In Obsidian this is the whole of the Stop path: the CLI
+	// cannot emit a `result` while it is blocked on the bridge, so a turn that ends with a card
+	// still open ended because the user pressed Stop.
+	const manager = new SessionManager(app);
+	const reasons: string[] = [];
+	(manager as unknown as { broker: { cancelPending(reason: string): void; dispose(): void } }).broker = {
+		cancelPending: (reason: string) => reasons.push(reason),
+		dispose: () => undefined,
+	};
+	stub(manager, () => Promise.resolve(true), []);
+
+	manager.send('write me a note');
+	for (let i = 0; i < 8; i += 1) {
+		await Promise.resolve();
+	}
+	eq('nothing was cancelled while the turn was running', reasons.length, 0);
+
+	const reducer = (manager as unknown as { reducer: StreamReducer }).reducer;
+	reducer.noteInterruptSent();
+	reducer.apply({ type: 'result', subtype: 'success', is_error: false } as StreamJsonEvent);
+
+	eq('the turn ending reached the broker', reasons.length, 1);
+	check('...with a reason the model can be told', (reasons[0] ?? '').length > 0, JSON.stringify(reasons[0]));
+	manager.dispose();
+}
+
+// --- L. Phase 5a acceptance-run findings ----------------------------------
+
+console.log('L1. A denial our own broker issued is not a tool failure');
+{
+	// Emre's acceptance run, step 3. The CLI reports a call the reader declined as a `tool_result`
+	// with `is_error: true` — byte for byte what a tool that genuinely failed produces. Reading the
+	// flag alone painted the red "Error" badge on the Write card while the approval card, one row
+	// below, correctly said "Denied. The turn continues." Trap 6, applied at the turn level
+	// (`applyResult`) but not at the card level.
+	const s = new ChatState();
+	const r = new StreamReducer(s);
+	const turn = s.addAssistantMessage();
+	r.beginTurn(turn);
+
+	r.apply({ type: 'stream_event', event: { type: 'message_start' } } as StreamJsonEvent);
+	r.apply({
+		type: 'assistant',
+		message: {
+			content: [
+				{
+					type: 'tool_use',
+					id: 'toolu_denied',
+					name: 'Write',
+					input: { file_path: '/vault/n.md', content: 'alpha\n' },
+				},
+			],
+		},
+	} as StreamJsonEvent);
+
+	// The bridge asked, and the reader said no.
+	r.notePermissionRequested('toolu_denied');
+	r.notePermissionDenied('toolu_denied');
+
+	r.apply({
+		type: 'user',
+		message: {
+			content: [
+				{
+					type: 'tool_result',
+					tool_use_id: 'toolu_denied',
+					is_error: true,
+					content: 'The user doesn\'t want to take this action right now.',
+				},
+			],
+		},
+	} as StreamJsonEvent);
+
+	const block = orderedBlocks(turn)[0];
+	eq('the block is the Write call', block?.toolName, 'Write');
+	// The assertion the defect broke. `is_error` on the wire is `true`; the card must not be red.
+	eq('is_error: true from our own denial does NOT set the error flag', block?.toolIsError, false);
+	eq('...it is recorded as a denial instead', block?.toolDenied, true);
+	// The result text still has to arrive — suppressing the badge must not suppress the message
+	// that explains what happened.
+	check(
+		'the explanation is still shown',
+		(block?.toolResultText?.length ?? 0) > 0,
+		JSON.stringify(block?.toolResultText),
+	);
+	eq('and the tool is no longer pending', block?.toolPending, false);
+
+	// A denied tool is not a failed turn either — the half that already worked, asserted so a fix
+	// on one side cannot quietly regress the other.
+	r.apply({ type: 'result', subtype: 'success', is_error: false, total_cost_usd: 0.1 } as StreamJsonEvent);
+	eq('the turn completes normally', turn.status, 'complete');
+	eq('with no error text', turn.errorText, undefined);
+}
+
+console.log('L2. A tool that really failed is still an error');
+{
+	// The other half, and the reason this is not a blanket "ignore is_error on tool results".
+	// A genuine failure has to keep its badge; the only thing that separates the two is whether we
+	// denied it, which is not on the wire at all.
+	const s = new ChatState();
+	const r = new StreamReducer(s);
+	const turn = s.addAssistantMessage();
+	r.beginTurn(turn);
+	r.apply({ type: 'stream_event', event: { type: 'message_start' } } as StreamJsonEvent);
+	r.apply({
+		type: 'assistant',
+		message: {
+			content: [{ type: 'tool_use', id: 'toolu_broke', name: 'Read', input: { file_path: '/nope' } }],
+		},
+	} as StreamJsonEvent);
+	r.apply({
+		type: 'user',
+		message: {
+			content: [
+				{ type: 'tool_result', tool_use_id: 'toolu_broke', is_error: true, content: 'ENOENT' },
+			],
+		},
+	} as StreamJsonEvent);
+
+	const block = orderedBlocks(turn)[0];
+	eq('an undenied failure keeps its error flag', block?.toolIsError, true);
+	eq('...and is not marked as denied', block?.toolDenied, false);
+	// The error override still forces the card open (PLAN §2), which is what `startsExpanded` is
+	// asked here rather than asserted about the DOM.
+	eq('the card still opens itself on a real error', startsExpanded('Read', true), true);
+}
+
+console.log('L3. A denial for one call does not touch another');
+{
+	// Matched by `tool_use_id`, never by ordering — the same rule the tool results already follow.
+	// Two Writes in one turn, one denied and one allowed, is the shape that catches a set used as
+	// a per-turn boolean.
+	const s = new ChatState();
+	const r = new StreamReducer(s);
+	const turn = s.addAssistantMessage();
+	r.beginTurn(turn);
+	r.apply({ type: 'stream_event', event: { type: 'message_start' } } as StreamJsonEvent);
+	for (const id of ['toolu_a', 'toolu_b']) {
+		r.apply({
+			type: 'assistant',
+			message: { content: [{ type: 'tool_use', id, name: 'Write', input: { file_path: `/vault/${id}.md`, content: 'x\n' } }] },
+		} as StreamJsonEvent);
+	}
+	r.notePermissionRequested('toolu_a');
+	r.notePermissionRequested('toolu_b');
+	r.notePermissionDenied('toolu_b');
+
+	r.apply({
+		type: 'user',
+		message: {
+			content: [
+				{ type: 'tool_result', tool_use_id: 'toolu_b', is_error: true, content: 'declined' },
+				{ type: 'tool_result', tool_use_id: 'toolu_a', content: 'File created successfully.' },
+			],
+		},
+	} as StreamJsonEvent);
+
+	const blocks = orderedBlocks(turn);
+	const allowed = blocks.find((b) => b.toolUseId === 'toolu_a');
+	const denied = blocks.find((b) => b.toolUseId === 'toolu_b');
+	eq('the allowed call is not denied', allowed?.toolDenied, false);
+	eq('...and not an error', allowed?.toolIsError, false);
+	eq('the denied call is denied', denied?.toolDenied, true);
+	eq('...and still not an error', denied?.toolIsError, false);
+}
+
+console.log('L4. The flags survive the block being replaced, in either order');
+{
+	// `applyAssistant` replaces the whole block, and the ordering between the bridge call and that
+	// event is not something we control — Phase 0 saw the `assistant` event first, but "usually
+	// first" is not a contract. Both orders are driven here because only one of them exercises the
+	// carry-over and only the other exercises the stamp-on-create.
+	for (const bridgeFirst of [true, false]) {
+		const label = bridgeFirst ? 'bridge first' : 'assistant first';
+		const s = new ChatState();
+		const r = new StreamReducer(s);
+		const turn = s.addAssistantMessage();
+		r.beginTurn(turn);
+		r.apply({ type: 'stream_event', event: { type: 'message_start' } } as StreamJsonEvent);
+		// The streamed opening, which is what registers the id before any authoritative event.
+		r.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'tool_use', id: 'toolu_x', name: 'Write' },
+			},
+		} as StreamJsonEvent);
+
+		const assistant = () =>
+			r.apply({
+				type: 'assistant',
+				message: {
+					content: [
+						{ type: 'tool_use', id: 'toolu_x', name: 'Write', input: { file_path: '/vault/x.md', content: 'x\n' } },
+					],
+				},
+			} as StreamJsonEvent);
+
+		if (bridgeFirst) {
+			r.notePermissionRequested('toolu_x');
+			r.notePermissionDenied('toolu_x');
+			assistant();
+		} else {
+			assistant();
+			r.notePermissionRequested('toolu_x');
+			r.notePermissionDenied('toolu_x');
+		}
+
+		const block = orderedBlocks(turn)[0];
+		eq(`[${label}] the request flag survived`, block?.toolPermissionRequested, true);
+		eq(`[${label}] the denial survived`, block?.toolDenied, true);
+
+		r.apply({
+			type: 'user',
+			message: {
+				content: [{ type: 'tool_result', tool_use_id: 'toolu_x', is_error: true, content: 'declined' }],
+			},
+		} as StreamJsonEvent);
+		eq(`[${label}] and the result is not an error`, block?.toolIsError, false);
+	}
+}
+
+console.log('L5. The flags do not leak into the next turn');
+{
+	// Both sets are per-turn. A denial in turn 1 silencing a genuine failure in turn 2 would be the
+	// worst possible version of this fix: the badge exists to be believed.
+	const s = new ChatState();
+	const r = new StreamReducer(s);
+	const first = s.addAssistantMessage();
+	r.beginTurn(first);
+	r.apply({ type: 'stream_event', event: { type: 'message_start' } } as StreamJsonEvent);
+	r.apply({
+		type: 'assistant',
+		message: { content: [{ type: 'tool_use', id: 'toolu_same', name: 'Write', input: {} }] },
+	} as StreamJsonEvent);
+	r.notePermissionDenied('toolu_same');
+	r.apply({ type: 'result', subtype: 'success', is_error: false } as StreamJsonEvent);
+
+	const second = s.addAssistantMessage();
+	r.beginTurn(second);
+	r.apply({ type: 'stream_event', event: { type: 'message_start' } } as StreamJsonEvent);
+	r.apply({
+		type: 'assistant',
+		message: { content: [{ type: 'tool_use', id: 'toolu_same', name: 'Write', input: {} }] },
+	} as StreamJsonEvent);
+	r.apply({
+		type: 'user',
+		message: {
+			content: [{ type: 'tool_result', tool_use_id: 'toolu_same', is_error: true, content: 'disk full' }],
+		},
+	} as StreamJsonEvent);
+
+	const block = orderedBlocks(second)[0];
+	eq('a real failure in the next turn is still an error', block?.toolIsError, true);
+	eq('...and is not marked as denied', block?.toolDenied, false);
+}
+
+console.log('L6. Stop with a card open reaches the tool card, not just the permission card');
+{
+	// The end-to-end version of step 6, through the real broker and the real server: the reader
+	// never answered, the broker denies on their behalf, and the tool card must show that as an
+	// outcome rather than as a failure.
+	const bridge = await startBridge();
+	bridge.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+	await bridge.rpc.next();
+
+	const denials: string[] = [];
+	bridge.broker.onDenied = (toolUseId: string) => denials.push(toolUseId);
+
+	bridge.send({
+		jsonrpc: '2.0',
+		id: 21,
+		method: 'tools/call',
+		params: {
+			name: 'permission_prompt',
+			arguments: { tool_name: 'Write', input: { file_path: '/vault/n.md', content: 'x\n' }, tool_use_id: 'toolu_stop' },
+		},
+	});
+
+	let card: PermissionItem | undefined;
+	for (let i = 0; i < 200 && !card; i += 1) {
+		card = bridge.state.items.find((item) => item.kind === 'permission') as PermissionItem | undefined;
+		if (!card) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+	check('the card is open', card?.status === 'pending');
+
+	bridge.broker.cancelPending('The turn was stopped before the request was answered.');
+	const answer = await bridge.rpc.next();
+	check('the CLI was answered', answer !== TIMED_OUT, JSON.stringify(answer));
+	eq('the card reads as unanswered', card?.status, 'cancelled');
+	// The bit the defect was missing: the same event has to reach the tool card too.
+	eq('the tool_use_id was handed on for the tool card', denials.join(','), 'toolu_stop');
+
+	bridge.stop();
+}
+
+console.log('L6b. Deny and Allow are told apart on the way to the tool card');
+{
+	// The commonest path of all, and the one Emre's step 3 exercises: the reader presses Deny.
+	// L6 covers the Stop path and they are separate branches in the broker — removing this one left
+	// every other L check green.
+	const bridge = await startBridge();
+	bridge.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+	await bridge.rpc.next();
+
+	const denied: string[] = [];
+	const requested: string[] = [];
+	bridge.broker.onDenied = (toolUseId: string) => denied.push(toolUseId);
+	bridge.broker.onRequested = (toolUseId: string) => requested.push(toolUseId);
+
+	const ask = (id: number, toolUseId: string) =>
+		bridge.send({
+			jsonrpc: '2.0',
+			id,
+			method: 'tools/call',
+			params: {
+				name: 'permission_prompt',
+				arguments: { tool_name: 'Write', input: { file_path: `/vault/${toolUseId}.md`, content: 'x\n' }, tool_use_id: toolUseId },
+			},
+		});
+
+	const cardFor = async (index: number): Promise<PermissionItem | undefined> => {
+		for (let i = 0; i < 200; i += 1) {
+			const cards = bridge.state.items.filter((item) => item.kind === 'permission') as PermissionItem[];
+			if (cards.length > index) {
+				return cards[index];
+			}
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		return undefined;
+	};
+
+	ask(41, 'toolu_yes');
+	const first = await cardFor(0);
+	bridge.broker.decide(first?.requestId ?? '', 'allow');
+	await bridge.rpc.next();
+	// An allowed call is going to succeed; marking it denied would put a "Denied" badge on a file
+	// that really was written.
+	eq('Allow hands nothing to the denial path', denied.length, 0);
+
+	ask(42, 'toolu_no');
+	const second = await cardFor(1);
+	bridge.broker.decide(second?.requestId ?? '', 'deny', 'declined');
+	await bridge.rpc.next();
+	eq('Deny hands the id on, so the tool card can stop reading it as a failure', denied.join(','), 'toolu_no');
+
+	// Both calls were announced when their cards appeared — that is what suppresses the duplicate
+	// diff, and it happens regardless of the verdict.
+	eq('both requests were announced', requested.join(','), 'toolu_yes,toolu_no');
+
+	bridge.stop();
+}
+
+console.log('L7. A request with no tool_use_id cannot mark a tool card');
+{
+	// Nothing to join to. Guessing a block would put a "Denied" badge on an unrelated tool, which
+	// is worse than the missing badge — so the callbacks stay silent and the card falls back to the
+	// pre-fix behaviour for that one call.
+	const bridge = await startBridge();
+	bridge.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+	await bridge.rpc.next();
+
+	const seen: string[] = [];
+	bridge.broker.onRequested = (toolUseId: string) => seen.push(toolUseId);
+	bridge.broker.onDenied = (toolUseId: string) => seen.push(toolUseId);
+
+	bridge.send({
+		jsonrpc: '2.0',
+		id: 31,
+		method: 'tools/call',
+		params: { name: 'permission_prompt', arguments: { tool_name: 'Bash', input: { command: 'ls' } } },
+	});
+
+	let card: PermissionItem | undefined;
+	for (let i = 0; i < 200 && !card; i += 1) {
+		card = bridge.state.items.find((item) => item.kind === 'permission') as PermissionItem | undefined;
+		if (!card) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+	check('the card still appears', card !== undefined);
+	bridge.broker.decide(card?.requestId ?? '', 'deny', 'no');
+	await bridge.rpc.next();
+
+	eq('no id was ever handed on', seen.length, 0);
+	eq('...and the card itself still resolved', card?.status, 'denied');
+	bridge.stop();
+}
+
+console.log('L8. The permission card owns the diff; the tool card stops repeating it');
+{
+	// Finding 2. Both surfaces derive their body from the same `diffFromToolInput`, so before the
+	// fix a permission-gated Write drew the identical Before/After twice — one passive above, one
+	// actionable below. Asserted on the parse, not on the DOM: the duplicate *is* the second parse.
+	const input = { file_path: '/vault/n.md', content: 'alpha\nbravo\n' };
+	const diff = diffFromToolInput('Write', input);
+	check('the approval card still has a diff to show', diff !== null);
+	// The path is the half the tool card never rendered and the permission card must.
+	eq('...including the target path', diff?.path, '/vault/n.md');
+	eq('...and the content', diff ? diffStats(diff).added : -1, 2);
+
+	// `renderBody` asks for the diff only when the call was *not* bridged. The condition itself is
+	// one line in the card, so what is asserted here is the parse it guards: a bridged call must
+	// still have a diff available (the approval card needs it) while the tool card declines to draw
+	// a second one. `toolCardDiffFor` mirrors the card's own expression — see the note below.
+	const bridgedDiff = (block: { toolPermissionRequested?: boolean }) =>
+		block.toolPermissionRequested === true ? null : diffFromToolInput('Write', input);
+	eq('a bridged call yields no second diff', bridgedDiff({ toolPermissionRequested: true }), null);
+	check('an unbridged call still gets its diff', bridgedDiff({}) !== null);
+}
+
+console.log('L9. The words the reader actually sees, from the shipped card code');
+{
+	// `toolStatusText` and `toolResultTitle` are where "a denial is not a failure" stops being a
+	// flag and becomes something on screen. They are pure functions of a block, so they are driven
+	// directly — restating the condition in the harness would keep passing against a card that had
+	// been changed back, which is the trap L8's first draft fell into.
+	const base = { index: 0, kind: 'tool_use', text: '', final: true, toolName: 'Write' } as const;
+
+	eq(
+		'a bridged call waiting on the reader says so, instead of "Running…"',
+		toolStatusText({ ...base, toolPending: true, toolPermissionRequested: true }),
+		'Waiting for approval…',
+	);
+	eq(
+		'an ordinary call in flight still says "Running…"',
+		toolStatusText({ ...base, toolPending: true }),
+		'Running…',
+	);
+	// The acceptance bar from Emre's step 3, in the one place it is rendered.
+	eq(
+		'a denied call reads "Denied", never "Error"',
+		toolStatusText({ ...base, toolDenied: true }),
+		'Denied',
+	);
+	eq(
+		'a call that really failed still reads "Error"',
+		toolStatusText({ ...base, toolIsError: true }),
+		'Error',
+	);
+	// Belt and braces: if the reducer ever let both flags be set, the reader's own decision wins.
+	eq(
+		'denial wins over a stray error flag',
+		toolStatusText({ ...base, toolDenied: true, toolIsError: true }),
+		'Denied',
+	);
+	eq('a plain success says nothing', toolStatusText({ ...base }), '');
+
+	eq('the result block is headed "Denied"', toolResultTitle({ ...base, toolDenied: true }), 'Denied');
+	eq('...or "Error" for a real failure', toolResultTitle({ ...base, toolIsError: true }), 'Error');
+	eq('...or "Result" otherwise', toolResultTitle({ ...base }), 'Result');
+}
+
+console.log('L10. SessionManager is what joins the broker to the reducer');
+{
+	// L6b proves the broker fires; L1 proves the reducer acts on it. Neither proves anything
+	// connects the two — every L check that touches the broker installs its own callbacks, which
+	// overwrite the ones `SessionManager` set. Deleting the wiring left all of them green.
+	//
+	// The same shape as K12, and for the same reason: a callback nobody assigns is a silent no-op.
+	const manager = new SessionManager(app);
+	const broker = (manager as unknown as { broker: PermissionBroker }).broker;
+	const reducer = (manager as unknown as { reducer: StreamReducer }).reducer;
+
+	check('the manager installed a request callback', broker.onRequested !== null);
+	check('the manager installed a denial callback', broker.onDenied !== null);
+
+	const turn = manager.state.addAssistantMessage();
+	reducer.beginTurn(turn);
+	reducer.apply({ type: 'stream_event', event: { type: 'message_start' } } as StreamJsonEvent);
+	reducer.apply({
+		type: 'assistant',
+		message: {
+			content: [
+				{ type: 'tool_use', id: 'toolu_join', name: 'Write', input: { file_path: '/vault/j.md', content: 'x\n' } },
+			],
+		},
+	} as StreamJsonEvent);
+
+	// Called exactly as the broker calls them.
+	broker.onRequested?.('toolu_join');
+	broker.onDenied?.('toolu_join');
+
+	const block = orderedBlocks(turn)[0];
+	eq('a request reaches the block', block?.toolPermissionRequested, true);
+	eq('a denial reaches the block', block?.toolDenied, true);
+
+	reducer.apply({
+		type: 'user',
+		message: {
+			content: [{ type: 'tool_result', tool_use_id: 'toolu_join', is_error: true, content: 'declined' }],
+		},
+	} as StreamJsonEvent);
+	eq('so the card is not painted red', block?.toolIsError, false);
+	manager.dispose();
+}
+
+// --- M. Replay of a real Stop-during-pending-permission turn --------------
+
+/*
+ * `docs/capture-phase5a-stop.jsonl`, replayed event by event in the order the CLI produced it,
+ * with this harness performing the plugin's own actions at the points it really performed them.
+ *
+ * This section exists because §L did not catch the defect it was written for. Its `cancelPending`
+ * checks answered the broker directly, with the turn still open — which is not what happens. In a
+ * real Stop the CLI emits its synthetic `tool_result` and then `result` **within 1 ms**, and the
+ * plugin's `cancelPending` runs from `onTurnEnd`, i.e. after `applyResult` has already nulled the
+ * active turn. Answering the broker by hand skipped that entire ordering.
+ *
+ * So the fixture is the raw capture, and the replay drives the real `StreamReducer` over it. The
+ * `_guki` records in the file are the plugin's side of the conversation, kept inline so the
+ * interleaving survives: `socket-in` is the bridge asking, `stdin` is Stop going out, `socket-out`
+ * is the deny going back.
+ */
+
+console.log('M. Real Stop-during-pending-permission turn, replayed from the capture');
+{
+	const raw = readFileSync(join(process.cwd(), 'docs', 'capture-phase5a-stop.jsonl'), 'utf8');
+	const records: Record<string, unknown>[] = [];
+	for (const line of raw.split('\n')) {
+		if (line.trim().length === 0) {
+			continue;
+		}
+		records.push(JSON.parse(line) as Record<string, unknown>);
+	}
+	check('the capture has records', records.length > 0, String(records.length));
+
+	const s = new ChatState();
+	const r = new StreamReducer(s);
+	let turnEnds = 0;
+	const turn = s.addAssistantMessage();
+	r.beginTurn(turn);
+
+	// The plugin's own timeline, replayed at the points the capture recorded it.
+	let requestedAt = -1;
+	let deniedAt = -1;
+	let toolUseId = '';
+	let cliToolResultAt = -1;
+	let resultAt = -1;
+	let index = 0;
+
+	r.onTurnEnd = () => {
+		turnEnds += 1;
+	};
+
+	for (const record of records) {
+		index += 1;
+		const marker = record._guki;
+
+		if (marker === 'socket-in') {
+			// The bridge asked: `PermissionBroker.handleRequest` adds the card and announces the id.
+			const msg = record.msg as { type?: string; tool_use_id?: string } | undefined;
+			if (msg?.type === 'request' && typeof msg.tool_use_id === 'string') {
+				toolUseId = msg.tool_use_id;
+				requestedAt = index;
+				r.notePermissionRequested(toolUseId);
+			}
+			continue;
+		}
+
+		if (marker === 'socket-out') {
+			// The deny going back — `cancelPending`, at the moment it really fired.
+			const payload = record.payload as { behavior?: string } | undefined;
+			if (payload?.behavior === 'deny' && toolUseId.length > 0) {
+				deniedAt = index;
+				r.notePermissionDenied(toolUseId);
+			}
+			continue;
+		}
+
+		if (typeof marker === 'string') {
+			// `stdin`, `stderr`, `exit` — the plugin's other side, nothing for the reducer.
+			continue;
+		}
+
+		if (record.type === 'user') {
+			const content = (record as { message?: { content?: { type?: string }[] } }).message?.content;
+			if (Array.isArray(content) && content.some((b) => b.type === 'tool_result')) {
+				cliToolResultAt = index;
+			}
+		}
+		if (record.type === 'result') {
+			resultAt = index;
+		}
+		r.apply(record as unknown as StreamJsonEvent);
+	}
+
+	// --- the ordering that makes this hard, asserted from the file itself ---
+	check('the bridge asked before Stop', requestedAt > 0, String(requestedAt));
+	check('the CLI sent its own tool_result', cliToolResultAt > 0, String(cliToolResultAt));
+	check('...before the result event', cliToolResultAt < resultAt, `${cliToolResultAt} vs ${resultAt}`);
+	// The heart of it: the plugin's deny is the *last* thing to happen. Anything that depended on
+	// it arriving in time was always going to be wrong.
+	check('...and the plugin denied only after the result', deniedAt > resultAt, `${deniedAt} vs ${resultAt}`);
+
+	// --- what the reader sees ---
+	const blocks = orderedBlocks(turn);
+	const tool = blocks.find((b) => b.kind === 'tool_use');
+	eq('the turn produced a Write card', tool?.toolName, 'Write');
+	eq('...matched to the id the bridge asked about', tool?.toolUseId, toolUseId);
+
+	// The defect, in one assertion. The CLI's synthetic result carries `is_error: true`; the card
+	// must not read it as a failure.
+	eq('the cancelled call is NOT an error', tool?.toolIsError, false);
+	eq('...it is a denial', tool?.toolDenied, true);
+	eq('...and it is not left claiming to be running', tool?.toolPending, false);
+
+	// The words on screen, from the shipped card code rather than from a restatement.
+	eq('the header badge reads "Denied"', toolStatusText(tool ?? ({} as never)), 'Denied');
+	eq('the result block is headed "Denied"', toolResultTitle(tool ?? ({} as never)), 'Denied');
+	// The CLI's generic cancellation text is still shown — suppressing the badge must not suppress
+	// the explanation.
+	check(
+		"the CLI's own message survives",
+		tool?.toolResultText?.includes("doesn't want to proceed") === true,
+		JSON.stringify(tool?.toolResultText?.slice(0, 90)),
+	);
+
+	// --- and the turn itself ---
+	// Every field on this result event says "failure" except `terminal_reason`: subtype is
+	// `error_during_execution`, `is_error` is true, `stop_reason` is `tool_use`. Without the
+	// interrupt flag the turn would render red; this replay never called `noteInterruptSent`, so
+	// what is being asserted here is that `aborted_tools` alone is enough.
+	eq('the turn reads as stopped, not failed', turn.status, 'stopped');
+	eq('...with no error text', turn.errorText, undefined);
+	eq('onTurnEnd fired once', turnEnds, 1);
+}
+
+console.log('M2. The interrupt flag is not the only thing holding this up');
+{
+	// The other half of the same event, isolated: `aborted_tools` was not a value the reducer knew
+	// before this capture — it only had `aborted_streaming` from RESEARCH B4. The `interruptSent`
+	// flag covers the real Stop path, so a missing value here would have stayed invisible until a
+	// cancellation arrived that we had not asked for.
+	const s = new ChatState();
+	const r = new StreamReducer(s);
+	const turn = s.addAssistantMessage();
+	r.beginTurn(turn);
+	r.apply({ type: 'stream_event', event: { type: 'message_start' } } as StreamJsonEvent);
+	r.apply({
+		type: 'result',
+		subtype: 'error_during_execution',
+		is_error: true,
+		terminal_reason: 'aborted_tools',
+		stop_reason: 'tool_use',
+	} as StreamJsonEvent);
+	eq('aborted_tools alone reads as stopped', turn.status, 'stopped');
+
+	// And the original value still does.
+	const s2 = new ChatState();
+	const r2 = new StreamReducer(s2);
+	const turn2 = s2.addAssistantMessage();
+	r2.beginTurn(turn2);
+	r2.apply({ type: 'result', subtype: 'success', terminal_reason: 'aborted_streaming' } as StreamJsonEvent);
+	eq('aborted_streaming still reads as stopped', turn2.status, 'stopped');
+
+	// A real failure with no cancellation marker is still a failure — the set must not swallow one.
+	const s3 = new ChatState();
+	const r3 = new StreamReducer(s3);
+	const turn3 = s3.addAssistantMessage();
+	r3.beginTurn(turn3);
+	r3.apply({ type: 'result', subtype: 'error_during_execution', is_error: true } as StreamJsonEvent);
+	eq('an uncancelled failure is still an error', turn3.status, 'error');
+}
+
+console.log('M3. permission_denials alone is enough, with no help from the broker');
+{
+	// The reducer must not depend on `notePermissionDenied` having been called: a denial the CLI
+	// made on its own never touches our bridge at all. The Phase 3 capture is real evidence of that
+	// case (§D, the two WebSearch calls), and this is the same thing stated narrowly.
+	const s = new ChatState();
+	const r = new StreamReducer(s);
+	const turn = s.addAssistantMessage();
+	r.beginTurn(turn);
+	r.apply({ type: 'stream_event', event: { type: 'message_start' } } as StreamJsonEvent);
+	r.apply({
+		type: 'assistant',
+		message: { content: [{ type: 'tool_use', id: 'toolu_cli', name: 'WebSearch', input: { query: 'x' } }] },
+	} as StreamJsonEvent);
+	r.apply({
+		type: 'user',
+		message: {
+			content: [{ type: 'tool_result', tool_use_id: 'toolu_cli', is_error: true, content: 'not granted' }],
+		},
+	} as StreamJsonEvent);
+
+	const block = orderedBlocks(turn)[0];
+	// Before the result event there is nothing that says this was a denial, so the error flag is
+	// the honest reading — this asserts the transition, not just the end state.
+	eq('mid-turn it looks like an error, because nothing says otherwise yet', block?.toolIsError, true);
+
+	r.apply({
+		type: 'result',
+		subtype: 'success',
+		is_error: false,
+		permission_denials: [{ tool_name: 'WebSearch', tool_use_id: 'toolu_cli' }],
+	} as StreamJsonEvent);
+
+	eq('the result event corrects it', block?.toolIsError, false);
+	eq('...to a denial', block?.toolDenied, true);
+	eq('and the turn is a success', turn.status, 'complete');
+
+	// Malformed lists must yield nothing rather than throw — this is off-the-wire data driving a
+	// rendering decision, so the guards matter as much as the happy path.
+	eqCall(
+		'a missing list denies nothing',
+		() => deniedToolUseIds({ type: 'result', subtype: 'success' }).join(','),
+		'',
+	);
+	eqCall(
+		'a non-array list denies nothing',
+		() =>
+			deniedToolUseIds({
+				type: 'result',
+				subtype: 'success',
+				permission_denials: 'nope',
+			} as unknown as ResultEvent).join(','),
+		'',
+	);
+	eqCall(
+		'a null entry is skipped, not dereferenced',
+		() =>
+			deniedToolUseIds({
+				type: 'result',
+				subtype: 'success',
+				permission_denials: [null, { tool_use_id: 'toolu_ok' }],
+			} as unknown as ResultEvent).join(','),
+		'toolu_ok',
+	);
+	eqCall(
+		'an entry with no id is skipped',
+		() => deniedToolUseIds({ type: 'result', subtype: 'success', permission_denials: [{ tool_name: 'X' }] }).join(','),
+		'',
+	);
+}
+
+console.log('M4. A broker denial that lands after the turn ended still reaches the block');
+{
+	// The one case `result.permission_denials[]` cannot cover: our broker answered, but the CLI did
+	// not record a denial — it had already abandoned the call, or the permission server died and
+	// the socket-close path settled the card on its own.
+	//
+	// This is what makes `stampPermissionState` look the block up against the *turn* rather than
+	// against `active`. `applyResult` nulls `active` before firing `onTurnEnd`, and `cancelPending`
+	// runs from inside that callback, so the lookup that used `active` found nothing and the stamp
+	// was discarded in silence — no throw, no log, just a card that stayed red.
+	const s = new ChatState();
+	const r = new StreamReducer(s);
+	const turn = s.addAssistantMessage();
+	r.beginTurn(turn);
+	r.apply({ type: 'stream_event', event: { type: 'message_start' } } as StreamJsonEvent);
+	r.apply({
+		type: 'assistant',
+		message: {
+			content: [{ type: 'tool_use', id: 'toolu_late', name: 'Write', input: { file_path: '/vault/l.md', content: 'x\n' } }],
+		},
+	} as StreamJsonEvent);
+	r.notePermissionRequested('toolu_late');
+	r.apply({
+		type: 'user',
+		message: {
+			content: [{ type: 'tool_result', tool_use_id: 'toolu_late', is_error: true, content: 'rejected' }],
+		},
+	} as StreamJsonEvent);
+
+	// The turn ends with **no** `permission_denials` — guard A has nothing to work with here.
+	let endedWhileActive: boolean | null = null;
+	r.onTurnEnd = () => {
+		// Exactly where `SessionManager` calls `broker.cancelPending`, and the reason this is hard:
+		// by now the reducer no longer has an active turn.
+		endedWhileActive = r.hasActiveTurn();
+		r.notePermissionDenied('toolu_late');
+	};
+	r.apply({ type: 'result', subtype: 'success', is_error: false } as StreamJsonEvent);
+
+	eq('the callback really does run after the turn closed', endedWhileActive, false);
+
+	const block = orderedBlocks(turn)[0];
+	eq('the late denial still landed on the block', block?.toolDenied, true);
+	eq('...and cleared the error flag the tool_result had set', block?.toolIsError, false);
+	eq('so the badge reads "Denied"', toolStatusText(block ?? ({} as never)), 'Denied');
+}
+
+console.log('M5. Stop settles the request immediately, so the card never flashes red');
+{
+	// Guard A corrects the card when the `result` event arrives, which is enough to make every
+	// end-state assertion pass — and that is exactly why this check looks at the states *in
+	// between* instead. The CLI's synthetic `tool_result` lands ~1 ms before `result`, so with
+	// correction alone the block really is `toolIsError: true` for one render, and the panel
+	// re-renders on every `emitChange`. A red badge that appears and disappears is still a red
+	// badge appearing.
+	//
+	// `SessionManager.interrupt()` answers the open request before any of that, so the id is
+	// already known to be denied when `applyToolResult` runs and the flag is never set at all.
+	const manager = new SessionManager(app);
+	const written: string[] = [];
+	stub(manager, () => Promise.resolve(true), written);
+
+	const internals = manager as unknown as {
+		broker: { cancelPending(reason: string): void; dispose(): void; onDenied: ((id: string) => void) | null };
+		reducer: StreamReducer;
+	};
+	// Keep the callbacks the manager wired up, then stand in for the broker: `cancelPending` does
+	// what the real one does for a card that is still open — answer it as denied.
+	const onDenied = internals.broker.onDenied;
+	let cancelCalls = 0;
+	let stillOpen = true;
+	internals.broker = {
+		onDenied,
+		cancelPending: () => {
+			cancelCalls += 1;
+			if (stillOpen) {
+				stillOpen = false;
+				onDenied?.('toolu_flash');
+			}
+		},
+		dispose: () => undefined,
+	};
+
+	manager.send('write a note');
+	for (let i = 0; i < 8; i += 1) {
+		await Promise.resolve();
+	}
+
+	const reducer = internals.reducer;
+	reducer.apply({ type: 'stream_event', event: { type: 'message_start' } } as StreamJsonEvent);
+	reducer.apply({
+		type: 'assistant',
+		message: {
+			content: [{ type: 'tool_use', id: 'toolu_flash', name: 'Write', input: { file_path: '/vault/f.md', content: 'x\n' } }],
+		},
+	} as StreamJsonEvent);
+	reducer.notePermissionRequested('toolu_flash');
+
+	// Every state the UI would have rendered, sampled where the UI samples it.
+	const seenError: boolean[] = [];
+	const turnItem = manager.state.items.find((i) => i.kind === 'assistant') as AssistantItem;
+	manager.state.subscribe(() => {
+		for (const block of turnItem.blocks.values()) {
+			if (block.kind === 'tool_use') {
+				seenError.push(block.toolIsError === true);
+			}
+		}
+	});
+
+	manager.interrupt();
+	eq('Stop asked the broker to settle the open request', cancelCalls, 1);
+
+	// Now the CLI's own sequence, in the order the capture recorded it.
+	reducer.apply({
+		type: 'user',
+		message: {
+			content: [
+				{
+					type: 'tool_result',
+					tool_use_id: 'toolu_flash',
+					is_error: true,
+					content: "The user doesn't want to proceed with this tool use.",
+				},
+			],
+		},
+	} as StreamJsonEvent);
+	reducer.apply({
+		type: 'result',
+		subtype: 'error_during_execution',
+		is_error: true,
+		terminal_reason: 'aborted_tools',
+		permission_denials: [{ tool_name: 'Write', tool_use_id: 'toolu_flash' }],
+	} as StreamJsonEvent);
+
+	check('the UI was re-rendered along the way', seenError.length > 0, String(seenError.length));
+	// The assertion this section exists for: not just the final state, but every state.
+	eq(
+		'the card was never once flagged as an error',
+		seenError.filter((wasError) => wasError).length,
+		0,
+	);
+
+	const block = [...turnItem.blocks.values()].find((b) => b.kind === 'tool_use');
+	eq('and it ends as a denial', block?.toolDenied, true);
+	eq('the turn reads as stopped', turnItem.status, 'stopped');
+	manager.dispose();
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);

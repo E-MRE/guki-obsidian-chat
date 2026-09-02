@@ -22,6 +22,7 @@ import {
 	isTaskEvent,
 	isThinkingTokensEvent,
 	isUserEvent,
+	deniedToolUseIds,
 	type AssistantEvent,
 	type ContentBlock,
 	type ResultEvent,
@@ -30,6 +31,7 @@ import {
 	type SseContentBlockStop,
 	type StreamJsonEvent,
 	type StreamPartialEvent,
+	type SystemInitEvent,
 	type SystemTaskEvent,
 	type SystemThinkingTokensEvent,
 	type ToolResultBlock,
@@ -38,13 +40,32 @@ import {
 import { toolResultText } from './tool-policy';
 import type { AssistantItem, BlockKind, ChatState, MessageBlock } from './chat-state';
 
-/** `terminal_reason` for a turn the user interrupted — "stopped", not an error (RESEARCH B4). */
-const ABORTED_STREAMING = 'aborted_streaming';
+/**
+ * `terminal_reason` values that mean the user interrupted — "stopped", not an error.
+ *
+ * Two, not one. `aborted_streaming` came from RESEARCH B4, where the Stop landed mid-text.
+ * `aborted_tools` is what a Stop pressed **while a tool call is in flight** produces, captured
+ * in `docs/capture-phase5a-stop.jsonl` — on the same event as `subtype:
+ * 'error_during_execution'` and `is_error: true`, so every other field on it says "failure".
+ * The `interruptSent` flag already catches this case and stays the primary signal; recognising
+ * the value too costs nothing and stops the constant from quietly describing half the reality.
+ */
+const ABORTED_TERMINAL_REASONS = new Set(['aborted_streaming', 'aborted_tools']);
 
 export class StreamReducer {
 	private sessionId: string | null = null;
 	private turnCount = 0;
 	private active: AssistantItem | null = null;
+	/**
+	 * The turn's item, kept until the **next** `beginTurn` rather than cleared when the turn ends.
+	 *
+	 * `active` means "a turn is in flight" and `applyResult` nulls it before firing `onTurnEnd` —
+	 * so anything reached from that callback looked the block up against `null` and silently did
+	 * nothing. That is exactly how a Stop-cancelled permission kept its red "Error" badge: the
+	 * broker's `cancelPending` runs from `onTurnEnd`, and the stamp it triggered was dropped on
+	 * the floor (Emre's Phase 5a acceptance round 2, finding 3).
+	 */
+	private turnItem: AssistantItem | null = null;
 
 	/** Slot bookkeeping for the turn in flight. All three are reset in `beginTurn`. */
 	private blockBase = 0;
@@ -60,6 +81,24 @@ export class StreamReducer {
 	 * and put the output under the wrong tool on the next one, silently.
 	 */
 	private toolSlots = new Map<string, number>();
+
+	/**
+	 * `tool_use_id`s that the permission bridge has shown a card for, and the subset of those the
+	 * reader did not allow. Both are per-turn and both are cleared by `beginTurn`.
+	 *
+	 * They exist because **the wire cannot tell these two cases apart.** A tool call the reader
+	 * denied comes back as a `tool_result` with `is_error: true`, exactly like a tool that genuinely
+	 * failed — so `applyToolResult` reading `is_error` alone painted a red "Error" badge on a card
+	 * for something the reader had deliberately declined (Emre's Phase 5a acceptance run, step 3).
+	 * That is trap 6 applied at the turn level but not at the card level: `applyResult` already
+	 * knows a denied tool is not a failed turn.
+	 *
+	 * The distinction is not recoverable from the event. Matching the result text would be guessing
+	 * at a message we have never captured. What *is* certain is what our own broker answered, so
+	 * that is what is recorded — by id, never by ordering.
+	 */
+	private permissionRequestedTools = new Set<string>();
+	private permissionDeniedTools = new Set<string>();
 
 	/**
 	 * Set when the user pressed Stop and the interrupt control request actually went out for the
@@ -84,6 +123,14 @@ export class StreamReducer {
 	 */
 	onTurnEnd: (() => void) | null = null;
 
+	/**
+	 * Called for **every** `system/init`, not just the first — it arrives at the start of every
+	 * turn (RESEARCH B1). Phase 5's startup self-check reads `mcp_servers` off it to confirm the
+	 * permission server registered; running that on every turn costs nothing and catches a server
+	 * that dies mid-session. The reducer itself does nothing with the field.
+	 */
+	onInit: ((event: SystemInitEvent) => void) | null = null;
+
 	constructor(private readonly state: ChatState) {}
 
 	/** The session id from the first `system/init`. Phase 2 only logs it; v2 resumes with it. */
@@ -99,10 +146,13 @@ export class StreamReducer {
 	/** Called by the SessionManager when a message is handed to the CLI. */
 	beginTurn(item: AssistantItem): void {
 		this.active = item;
+		this.turnItem = item;
 		this.blockBase = 0;
 		this.nextFreeSlot = 0;
 		this.assistantSlot = 0;
 		this.toolSlots = new Map();
+		this.permissionRequestedTools = new Set();
+		this.permissionDeniedTools = new Set();
 		this.interruptSent = false;
 		item.status = 'pending';
 		this.state.emitChange();
@@ -123,9 +173,93 @@ export class StreamReducer {
 		}
 	}
 
+	/**
+	 * The permission bridge has put a card on screen for this tool call.
+	 *
+	 * What the card changes is the tool card's *body*: the approval card already shows the diff, in
+	 * full and with the file path spelled out, so repeating it one card above is duplication rather
+	 * than information (Emre's Phase 5a acceptance run, finding 2). The header still appears the
+	 * moment the block opens — that is the "something is happening" signal Phase 4 exists for.
+	 */
+	notePermissionRequested(toolUseId: string): void {
+		this.permissionRequestedTools.add(toolUseId);
+		this.stampPermissionState(toolUseId);
+	}
+
+	/**
+	 * The reader denied this tool call, or the turn ended before they answered it.
+	 *
+	 * Either way the failure is ours, not the tool's, and it must not render as one — see
+	 * `permissionDeniedTools`. Called by the SessionManager, which owns both the broker and this
+	 * reducer; the broker itself knows nothing about chat state beyond the card it created.
+	 */
+	notePermissionDenied(toolUseId: string): void {
+		this.permissionDeniedTools.add(toolUseId);
+		this.stampPermissionState(toolUseId);
+	}
+
+	/**
+	 * Copies both flags onto the block, if it exists yet.
+	 *
+	 * Called from every point that creates or replaces a `tool_use` block as well as from the two
+	 * `note*` methods, because the ordering between the bridge call and the `assistant` event that
+	 * carries the block is **not** something we control. Phase 0 saw the `assistant` event first,
+	 * but "usually first" is not a contract, and `applyAssistant` replaces the block wholesale — so
+	 * a flag set at the wrong moment would silently vanish.
+	 */
+	private stampPermissionState(toolUseId: string): void {
+		// `turnItem`, not `active`: this is reached from `onTurnEnd`, by which point the turn
+		// has already been closed and `active` is null.
+		const block = this.blockInTurn(this.turnItem, toolUseId);
+		if (!block) {
+			return;
+		}
+		const requested = this.permissionRequestedTools.has(toolUseId);
+		const denied = this.permissionDeniedTools.has(toolUseId);
+		if (
+			block.toolPermissionRequested === requested &&
+			block.toolDenied === denied &&
+			!(denied && block.toolIsError === true)
+		) {
+			return;
+		}
+		block.toolPermissionRequested = requested;
+		this.markDenied(block, denied);
+		this.state.emitChange();
+	}
+
+	/**
+	 * Marks a block as denied, **clearing `toolIsError`**.
+	 *
+	 * The order the CLI uses makes this necessary rather than tidy: the synthetic
+	 * `tool_result` carrying `is_error: true` arrives *before* the `result` event — 1 ms
+	 * before, in `docs/capture-phase5a-stop.jsonl` — so `applyToolResult` has already set the
+	 * error flag by the time anything knows the call was cancelled. Setting `toolDenied`
+	 * without clearing it leaves the card's red border and its expand-on-error rule in place,
+	 * even though the badge would read "Denied".
+	 */
+	private markDenied(block: MessageBlock, denied: boolean): void {
+		block.toolDenied = denied;
+		if (denied) {
+			block.toolIsError = false;
+		}
+	}
+
+	/** A turn's `tool_use` block by id. Never guesses a slot; returns null when unknown. */
+	private blockInTurn(item: AssistantItem | null, toolUseId: string): MessageBlock | null {
+		if (!item) {
+			return null;
+		}
+		const slot = this.toolSlots.get(toolUseId);
+		if (slot === undefined) {
+			return null;
+		}
+		return item.blocks.get(slot) ?? null;
+	}
+
 	apply(event: StreamJsonEvent): void {
 		if (isSystemInitEvent(event)) {
-			this.applyInit(event.session_id ?? null);
+			this.applyInit(event);
 			return;
 		}
 		if (isThinkingTokensEvent(event)) {
@@ -155,12 +289,13 @@ export class StreamReducer {
 		// system/status, hook_*, rate_limit_event, control_response: nothing to render yet.
 	}
 
-	private applyInit(sessionId: string | null): void {
+	private applyInit(event: SystemInitEvent): void {
 		this.turnCount += 1;
 		if (this.sessionId === null) {
 			// First init only: session setup. No UI reset here or on any later init.
-			this.sessionId = sessionId;
+			this.sessionId = event.session_id ?? null;
 		}
+		this.onInit?.(event);
 	}
 
 	// --- live streaming ----------------------------------------------------
@@ -229,6 +364,11 @@ export class StreamReducer {
 			this.toolSlots.set(opening.id, slot);
 		}
 		item.blocks.set(slot, block);
+		if (opening?.type === 'tool_use') {
+			// After the block is in the map, so `toolBlockFor` can find it: a permission request
+			// that arrived before this event has flags waiting to be applied.
+			this.stampPermissionState(opening.id);
+		}
 		this.markStreaming(item);
 	}
 
@@ -281,9 +421,19 @@ export class StreamReducer {
 		}
 
 		block.toolPending = false;
+		// A denial our own broker issued comes back carrying `is_error: true`, indistinguishable on
+		// the wire from a tool that genuinely failed. Reading `is_error` alone put a red "Error"
+		// badge on a call the reader had simply declined. What we know that the event does not is
+		// which ids we answered, so that wins over the flag.
 		// Strict `=== true`: the key is absent on a successful result, so `!== false` would mark
 		// every success as an error (PHASE4-STATE F4).
 		block.toolIsError = result.is_error === true;
+		// ...and this overrides it when the call was declined rather than failed, which the event
+		// itself cannot say. `markDenied` is the only place that decision is applied — guarding
+		// the line above as well would be a second copy of the same rule, and a reversion sweep
+		// showed it was already dead: this call undoes it on the very next statement, before
+		// anything emits.
+		this.markDenied(block, this.permissionDeniedTools.has(result.tool_use_id));
 		block.toolResultText = toolResultText(result.content);
 		// The parent `Task` call has returned, so its subagent is no longer running.
 		block.subagentActive = false;
@@ -345,15 +495,9 @@ export class StreamReducer {
 
 	/** The `tool_use` block a `tool_use_id` belongs to, or null. Never guesses a slot. */
 	private toolBlockFor(toolUseId: string): MessageBlock | null {
-		const item = this.active;
-		if (!item) {
-			return null;
-		}
-		const slot = this.toolSlots.get(toolUseId);
-		if (slot === undefined) {
-			return null;
-		}
-		return item.blocks.get(slot) ?? null;
+		// Deliberately still `active`: subagent and task events belong to the turn in flight,
+		// and letting them land on a turn that has already ended would revive a finished card.
+		return this.blockInTurn(this.active, toolUseId);
 	}
 
 	private appendDelta(item: AssistantItem, sse: SseContentBlockDelta): void {
@@ -468,6 +612,8 @@ export class StreamReducer {
 				mapped.subagentLabel = streamed?.subagentLabel;
 				mapped.subagentToolUses = streamed?.subagentToolUses;
 				mapped.toolPending = streamed?.toolResultText === undefined;
+				mapped.toolPermissionRequested = streamed?.toolPermissionRequested;
+				mapped.toolDenied = streamed?.toolDenied;
 				if (mapped.toolUseId !== undefined) {
 					// Also registered here, not only at `content_block_start`: without
 					// `--include-partial-messages` there is no opening event at all.
@@ -477,6 +623,11 @@ export class StreamReducer {
 
 			// Replace, not append: this event is authoritative for the block (RESEARCH B3).
 			item.blocks.set(slot, mapped);
+			if (mapped.toolUseId !== undefined) {
+				// The block was just rebuilt; re-apply from the authoritative sets rather than
+				// trusting what the streamed copy happened to be carrying.
+				this.stampPermissionState(mapped.toolUseId);
+			}
 		}
 
 		if (item.status === 'pending') {
@@ -500,10 +651,11 @@ export class StreamReducer {
 		// Whatever the outcome, no block is still streaming once the turn is over — otherwise a
 		// cancelled turn leaves a thinking header saying "Thinking…" forever.
 		closeOpenBlocks(item);
+		this.applyPermissionDenials(item, event);
 
 		// The interrupt flag is checked first and independently of the subtype: see its declaration
 		// for why `terminal_reason` alone misses a Stop pressed during a pending tool call.
-		if (this.interruptSent || event.terminal_reason === ABORTED_STREAMING) {
+		if (this.interruptSent || ABORTED_TERMINAL_REASONS.has(event.terminal_reason ?? '')) {
 			item.status = 'stopped';
 		} else if (event.is_error === true) {
 			item.status = 'error';
@@ -524,6 +676,32 @@ export class StreamReducer {
 
 		this.state.emitChange();
 		this.onTurnEnd?.();
+	}
+
+	/**
+	 * Marks every tool the **CLI itself** reports as denied, from `result.permission_denials[]`.
+	 *
+	 * This is the authoritative source and the one that fixes the ordering, so it runs here
+	 * rather than depending on the broker's own bookkeeping arriving in time. A Stop pressed
+	 * while a card is open produces, within 1 ms (`docs/capture-phase5a-stop.jsonl`):
+	 *
+	 *   `user`/`tool_result` — `is_error: true`, generic "the user doesn't want to proceed" text
+	 *   `result`            — `permission_denials: [{tool_name, tool_use_id, tool_input}]`
+	 *
+	 * The first sets the error flag; the second is the CLI saying it was a *denial*. Nothing
+	 * else on the result event does: `subtype` is `error_during_execution`, `is_error` is `true`
+	 * and `stop_reason` is `tool_use`, so on every other field a cancelled turn is a failure.
+	 *
+	 * `item` is the local from `applyResult`, not `this.active` — that is already null here.
+	 */
+	private applyPermissionDenials(item: AssistantItem, event: ResultEvent): void {
+		for (const toolUseId of deniedToolUseIds(event)) {
+			this.permissionDeniedTools.add(toolUseId);
+			const block = this.blockInTurn(item, toolUseId);
+			if (block) {
+				this.markDenied(block, true);
+			}
+		}
 	}
 
 	/**

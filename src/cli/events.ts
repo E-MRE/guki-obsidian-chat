@@ -53,6 +53,21 @@ export interface ToolResultBlock {
 
 export type ContentBlock = TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock;
 
+/**
+ * One entry of `system/init.mcp_servers`. Two fields only — verified identical in both real
+ * captures (PHASE5A-STATE F1):
+ * `{"name": "codebase-memory-mcp", "status": "connected"}`.
+ *
+ * Both are optional here even though both were always present, because this drives the Phase 5
+ * startup self-check: a malformed entry must read as "not connected" rather than throw.
+ * `status` is not a closed set — besides `connected`, the two `claude.ai` servers on this machine
+ * sit permanently at `needs-auth`.
+ */
+export interface McpServerInfo {
+	name?: string;
+	status?: string;
+}
+
 export interface SystemInitEvent {
 	type: 'system';
 	subtype: 'init';
@@ -60,7 +75,8 @@ export interface SystemInitEvent {
 	cwd?: string;
 	model?: string;
 	tools?: string[];
-	mcp_servers?: unknown[];
+	mcp_servers?: McpServerInfo[];
+	/** `"default"` when no `--permission-mode` flag was passed, which is the mode we require. */
 	permissionMode?: string;
 	claude_code_version?: string;
 	capabilities?: string[];
@@ -222,6 +238,25 @@ export interface SystemTaskEvent {
 	session_id?: string;
 }
 
+/**
+ * One entry of `result.permission_denials[]` — the CLI's own record that a tool call was declined
+ * rather than that it failed.
+ *
+ * Shape verified verbatim from `docs/capture-phase5a-stop.jsonl`, a real Stop-during-pending-
+ * permission turn:
+ * `{"tool_name":"Write","tool_use_id":"toolu_01Y7…","tool_input":{"file_path":"…","content":"…"}}`
+ *
+ * This is the **authoritative** denial signal. Our own broker knows what it answered, but only for
+ * requests that reached it; this list is what the CLI itself considers denied, it arrives on the
+ * event that ends the turn, and it is the only source that is correct no matter when the decision
+ * was made. Every field is optional here because it drives a rendering decision off the wire.
+ */
+export interface PermissionDenial {
+	tool_name?: string;
+	tool_use_id?: string;
+	tool_input?: unknown;
+}
+
 export interface ResultEvent {
 	type: 'result';
 	subtype: string;
@@ -235,9 +270,16 @@ export interface ResultEvent {
 	/** Intra-turn counter, not cumulative (RESEARCH B1). */
 	num_turns?: number;
 	usage?: unknown;
-	permission_denials?: unknown[];
+	permission_denials?: PermissionDenial[];
 	stop_reason?: string | null;
-	/** `'aborted_streaming'` means the user cancelled — show "stopped", not an error (RESEARCH B4). */
+	/**
+	 * `'aborted_streaming'` means the user cancelled — show "stopped", not an error (RESEARCH B4).
+	 *
+	 * **A second value exists:** `'aborted_tools'`, when the Stop lands while a tool call is in
+	 * flight. Captured in `docs/capture-phase5a-stop.jsonl`, alongside `subtype:
+	 * 'error_during_execution'`, `is_error: true` and `stop_reason: 'tool_use'` — so a turn the
+	 * user simply stopped arrives looking exactly like a failure on every field but this one.
+	 */
 	terminal_reason?: string;
 	ttft_ms?: number;
 }
@@ -281,6 +323,29 @@ export function isSystemInitEvent(ev: StreamJsonEvent): ev is SystemInitEvent {
 	return ev.type === 'system' && (ev as SystemOtherEvent).subtype === 'init';
 }
 
+/**
+ * The reported status of one MCP server on a `system/init`, or `null` when it is absent entirely.
+ *
+ * Absent is the case that matters: a stdio MCP server that fails to spawn produces no error of its
+ * own and simply never appears in this list (RESEARCH B5, trap 7). Every read is guarded because
+ * this is the input to a security check — a list of the wrong shape must read as "not there".
+ */
+export function mcpServerStatus(event: SystemInitEvent, name: string): string | null {
+	const servers = event.mcp_servers;
+	if (!Array.isArray(servers)) {
+		return null;
+	}
+	for (const entry of servers) {
+		if (typeof entry !== 'object' || entry === null) {
+			continue;
+		}
+		if (entry.name === name) {
+			return typeof entry.status === 'string' ? entry.status : null;
+		}
+	}
+	return null;
+}
+
 export function isAssistantEvent(ev: StreamJsonEvent): ev is AssistantEvent {
 	return ev.type === 'assistant';
 }
@@ -305,6 +370,30 @@ export function isStreamPartialEvent(ev: StreamJsonEvent): ev is StreamPartialEv
 
 export function isThinkingTokensEvent(ev: StreamJsonEvent): ev is SystemThinkingTokensEvent {
 	return ev.type === 'system' && (ev as SystemOtherEvent).subtype === 'thinking_tokens';
+}
+
+/**
+ * The `tool_use_id`s the CLI reports as denied on a `result` event.
+ *
+ * Guarded throughout: this drives whether a card renders as a decision or as a failure, so a list
+ * of the wrong shape must yield nothing rather than throw inside the reducer.
+ */
+export function deniedToolUseIds(event: ResultEvent): string[] {
+	const denials = event.permission_denials;
+	if (!Array.isArray(denials)) {
+		return [];
+	}
+	const ids: string[] = [];
+	for (const entry of denials) {
+		if (typeof entry !== 'object' || entry === null) {
+			continue;
+		}
+		const id = entry.tool_use_id;
+		if (typeof id === 'string' && id.length > 0) {
+			ids.push(id);
+		}
+	}
+	return ids;
 }
 
 /**

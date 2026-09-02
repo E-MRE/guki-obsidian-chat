@@ -9,10 +9,20 @@
 import { App, FileSystemAdapter } from 'obsidian';
 import { BinaryNotFoundError, resolveClaudeBinary } from '../cli/binary-resolver';
 import { ClaudeProcess, type ProcessExitInfo } from '../cli/claude-process';
-import { interruptRequestLine, userMessageLine, type StreamJsonEvent } from '../cli/events';
-import { CLAUDE_BINARY_OVERRIDE, FALLBACK_VAULT_PATH } from '../constants';
+import {
+	interruptRequestLine,
+	mcpServerStatus,
+	userMessageLine,
+	type StreamJsonEvent,
+	type SystemInitEvent,
+} from '../cli/events';
+import { CLAUDE_BINARY_OVERRIDE, FALLBACK_VAULT_PATH, MCP_SERVER_NAME } from '../constants';
 import { ChatState, type AssistantItem } from './chat-state';
+import { PermissionBroker, type PermissionBehavior } from './permission-broker';
 import { StreamReducer } from './stream-reducer';
+
+/** The one status that means the approval gate is really there (PHASE5A-STATE F1). */
+const MCP_CONNECTED = 'connected';
 
 interface QueuedTurn {
 	text: string;
@@ -24,19 +34,66 @@ interface QueuedTurn {
 export class SessionManager {
 	readonly state = new ChatState();
 	private readonly reducer = new StreamReducer(this.state);
+	private readonly broker: PermissionBroker;
 	private process: ClaudeProcess | null = null;
 	private startPromise: Promise<boolean> | null = null;
 	private readonly queue: QueuedTurn[] = [];
 	private disposed = false;
 	private interruptCount = 0;
 
-	constructor(private readonly app: App) {
+	/**
+	 * Set when the panel must stop accepting input, with the reason shown in the composer.
+	 *
+	 * There is exactly one thing that sets it: the startup self-check finding that the permission
+	 * server is not connected. A CLI running with no approval gate must never be usable, and the
+	 * refusal has to be visible rather than a silently degraded mode (PLAN Phase 5 task 9).
+	 */
+	private blockedReason: string | null = null;
+
+	constructor(
+		private readonly app: App,
+		/** `PluginManifest.dir`, passed straight through to the broker. Optional in the API. */
+		pluginDir?: string,
+	) {
+		this.broker = new PermissionBroker(app, this.state, pluginDir);
+		// The broker knows requests and verdicts; the reducer knows blocks. Joining them here is
+		// what keeps a denial from painting the tool card red — the wire reports our own denial as
+		// `is_error: true`, indistinguishable from a tool that really failed.
+		this.broker.onRequested = (toolUseId: string) => {
+			this.reducer.notePermissionRequested(toolUseId);
+		};
+		this.broker.onDenied = (toolUseId: string) => {
+			this.reducer.notePermissionDenied(toolUseId);
+		};
 		// Nothing drained the queue when a turn *ended* — `pump` was only ever reached from
 		// `send`, so a message typed while the previous one was still streaming stayed queued
 		// forever. Latent since Phase 2; Phase 3 makes overlapping turns easy to hit.
 		this.reducer.onTurnEnd = () => {
+			// Still here as the backstop, though `interrupt` now settles the common case earlier: a
+			// turn can also end under an open request without a Stop — the process dying, or the
+			// CLI abandoning the call itself. Whatever the route, the server must not be left
+			// holding a JSON-RPC id it can never reply to (PHASE5A-STATE D5). Idempotent.
+			this.broker.cancelPending('The turn ended before the request was answered.');
 			void this.pump();
 		};
+
+		this.reducer.onInit = (event: SystemInitEvent) => {
+			this.checkPermissionServer(event);
+		};
+	}
+
+	/** Non-null when input is refused. The composer shows it and disables itself. */
+	get blocked(): string | null {
+		return this.blockedReason;
+	}
+
+	/** Called by the permission card. `requestId` comes off the `PermissionItem`. */
+	decidePermission(requestId: string, behavior: PermissionBehavior): void {
+		this.broker.decide(
+			requestId,
+			behavior,
+			behavior === 'deny' ? 'The user denied this tool call in Obsidian.' : undefined,
+		);
 	}
 
 	/** True while a turn is in flight or waiting. Drives the composer's Send/Stop swap. */
@@ -59,7 +116,7 @@ export class SessionManager {
 	/** Enqueues a message. Returns immediately; the UI follows `ChatState`. */
 	send(text: string): void {
 		const trimmed = text.trim();
-		if (trimmed.length === 0 || this.disposed) {
+		if (trimmed.length === 0 || this.disposed || this.blockedReason !== null) {
 			return;
 		}
 
@@ -86,6 +143,12 @@ export class SessionManager {
 		if (this.disposed) {
 			return;
 		}
+		// Answered here, not only from `onTurnEnd`. Stop means "do not do that", so the request the
+		// reader is looking at is settled the moment they press it — and settling it *now* is also
+		// what puts the id in the reducer before the CLI's synthetic `tool_result` arrives. Left to
+		// `onTurnEnd`, that result lands first (1 ms earlier, in `docs/capture-phase5a-stop.jsonl`)
+		// and the card is already painted red by the time anyone knows the call was cancelled.
+		this.broker.cancelPending('The turn was stopped before the request was answered.');
 		if (!this.reducer.hasActiveTurn()) {
 			this.cancelQueuedTurns();
 			return;
@@ -141,7 +204,10 @@ export class SessionManager {
 			// ensureProcess already reported why; drop the queued turns instead of hanging.
 			this.queue.length = 0;
 			next.item.status = 'error';
-			next.item.errorText ??= 'The Claude Code CLI could not be started.';
+			// The blocked reason, when there is one, is the truthful message: `ensureProcess` also
+			// fails when the *permission server* could not be started, and saying the CLI was the
+			// problem would send the reader looking in the wrong place.
+			next.item.errorText ??= this.blockedReason ?? 'The Claude Code CLI could not be started.';
 			this.state.emitChange();
 			return;
 		}
@@ -189,9 +255,28 @@ export class SessionManager {
 			return false;
 		}
 
+		// Strictly before the spawn: the permission server connects to the broker's socket before
+		// it answers `initialize`, and a socket that is not listening yet means the server exits and
+		// never registers. Starting the CLI without the gate ready is the failure this ordering
+		// exists to prevent.
+		try {
+			await this.broker.start();
+		} catch (error) {
+			const detail =
+				error instanceof BinaryNotFoundError
+					? `Looked at: ${error.attempts.join(', ')}`
+					: error instanceof Error
+						? error.message
+						: String(error);
+			this.blockInput('The approval gate could not be started, so the chat is disabled.');
+			this.state.addNotice('error', 'The permission server could not be started.', detail);
+			return false;
+		}
+
 		const claude = new ClaudeProcess({
 			binaryPath,
 			cwd: this.vaultPath,
+			extraArgs: this.broker.cliArgs,
 			callbacks: {
 				onEvent: (event: StreamJsonEvent) => this.reducer.apply(event),
 				onUnparsedLine: (line: string) => {
@@ -249,11 +334,60 @@ export class SessionManager {
 		);
 	}
 
-	/** `onunload` and `workspace.on('quit')` both land here. Safe to call twice. */
+	/**
+	 * The startup self-check (PLAN Phase 5 task 9).
+	 *
+	 * A stdio MCP server that fails to spawn produces no error of its own — it simply never appears
+	 * in the list (RESEARCH B5, trap 7). So the only evidence that the approval gate exists is its
+	 * entry in `system/init.mcp_servers`, and its absence has to be treated as loudly as a crash:
+	 * a missing permission server means the CLI is running with no gate at all.
+	 *
+	 * Run on every init, not only the first, because init arrives at the start of every turn
+	 * (RESEARCH B1) and a server that dies mid-session is the same danger as one that never started.
+	 */
+	private checkPermissionServer(event: SystemInitEvent): void {
+		const status = mcpServerStatus(event, MCP_SERVER_NAME);
+		if (status === MCP_CONNECTED) {
+			return;
+		}
+		if (this.blockedReason !== null) {
+			// Already reported. Later turns must not stack another notice on the same fault.
+			return;
+		}
+
+		const detail =
+			status === null
+				? `'${MCP_SERVER_NAME}' is not in system/init.mcp_servers. A stdio MCP server that fails to start is never reported by the CLI.`
+				: `'${MCP_SERVER_NAME}' reported status '${status}', not '${MCP_CONNECTED}'.`;
+
+		this.blockInput('The approval gate is not running, so the chat is disabled.');
+		this.queue.length = 0;
+		this.reducer.failActiveTurn(
+			'The permission server is not connected, so this turn was stopped before any tool could run.',
+		);
+		this.state.addNotice(
+			'error',
+			'The permission server did not register. Reload the plugin, or restart Obsidian, before using the chat.',
+			detail,
+		);
+	}
+
+	private blockInput(reason: string): void {
+		this.blockedReason = reason;
+		this.state.emitChange();
+	}
+
+	/**
+	 * `onunload` and `workspace.on('quit')` both land here. Safe to call twice.
+	 *
+	 * **Two processes, not one** (trap 9): the CLI, and the MCP permission server the CLI spawned.
+	 * The broker owns the second one's teardown because we have no handle on it — see its `dispose`.
+	 */
 	dispose(): void {
 		this.disposed = true;
 		this.queue.length = 0;
 		this.process?.stop();
 		this.process = null;
+		this.broker.dispose();
 	}
 }

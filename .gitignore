@@ -1,5 +1,9 @@
 node_modules/
 main.js
+# The build copy of the MCP permission server. Root-anchored on purpose: the source lives at
+# src/cli/mcp-permission-server.mjs and must stay tracked, and an unanchored pattern matches at
+# every level — it silently untracked the source the first time it was written without the slash.
+/mcp-permission-server.mjs
 *.js.map
 data.json
 .DS_Store

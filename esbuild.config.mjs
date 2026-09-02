@@ -1,5 +1,6 @@
 import esbuild from 'esbuild';
 import process from 'process';
+import { copyFile } from 'node:fs/promises';
 import { builtinModules } from 'node:module';
 
 const banner = `/*
@@ -10,12 +11,31 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = process.argv[2] === 'production';
 
+/**
+ * The MCP permission server is **not** bundled (PLAN Phase 5 task 1). It is a standalone script the
+ * *claude CLI* spawns in its own Node process, so it must exist as a real file next to `main.js`;
+ * bundling it into `main.js` would leave nothing for the CLI to run. A copy rather than a second
+ * esbuild entry point, because it has no imports beyond Node built-ins — there is nothing to bundle.
+ *
+ * An esbuild plugin rather than a separate step, so `npm run dev`'s watch mode refreshes it too.
+ */
+const SERVER_FILE = 'mcp-permission-server.mjs';
+const copyPermissionServer = {
+	name: 'copy-permission-server',
+	setup(build) {
+		build.onEnd(async () => {
+			await copyFile(`src/cli/${SERVER_FILE}`, SERVER_FILE);
+		});
+	},
+};
+
 const context = await esbuild.context({
 	banner: {
 		js: banner,
 	},
 	entryPoints: ['src/main.ts'],
 	bundle: true,
+	plugins: [copyPermissionServer],
 	external: [
 		'obsidian',
 		'electron',

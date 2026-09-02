@@ -47,7 +47,13 @@ export class ChatView extends ItemView {
 		// A positioned wrapper, not the scroller itself: the jump-to-bottom button has to stay put
 		// while the content behind it scrolls, so it cannot live inside the scrolling element.
 		const messages = root.createDiv({ cls: 'guki-messages-wrap' });
-		this.messageList = new MessageList(this.app, messages, this);
+		this.messageList = new MessageList(this.app, messages, this, {
+			// The view never decides a permission itself; it hands the request id back to the
+			// session, which owns the broker holding the pending JSON-RPC call.
+			decide: (requestId, behavior) => {
+				this.session.decidePermission(requestId, behavior);
+			},
+		});
 
 		const footer = root.createDiv({ cls: 'guki-footer' });
 		// Kept as a field now: the Send/Stop swap is driven from the session state.
@@ -102,6 +108,7 @@ export class ChatView extends ItemView {
 	private syncMessages(): void {
 		this.messageList?.sync(this.session.state.items);
 		this.composer?.setBusy(this.session.busy);
+		this.composer?.setBlocked(this.session.blocked);
 	}
 
 	/**

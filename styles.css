@@ -348,6 +348,23 @@
 	color: var(--text-error);
 }
 
+/* Denied: the reader declined this call, or the turn ended before they answered. Muted, never the
+   error colour — a denial is a normal outcome and the turn carries on from it (RESEARCH B5, trap
+   6). The badge used to read a red "Error" here, because the CLI reports our own denial as a
+   `tool_result` with `is_error: true` (Emre's Phase 5a acceptance run, step 3). */
+.guki-tool-card.guki-tool-denied {
+	border-color: var(--background-modifier-border);
+	opacity: 0.8;
+}
+
+.guki-tool-card.guki-tool-denied .guki-tool-status {
+	color: var(--text-muted);
+}
+
+.guki-tool-card.guki-tool-denied .guki-tool-result-title {
+	color: var(--text-faint);
+}
+
 .guki-tool-body {
 	border-top: 1px solid var(--background-modifier-border);
 	padding: var(--size-4-2);
@@ -459,6 +476,200 @@
 .guki-diff-line.guki-diff-empty {
 	color: var(--text-faint);
 	font-style: italic;
+}
+
+/* --- permission card ----------------------------------------------------- */
+
+/* Full width, and not a bubble: this is a control the reader has to act on, not a message. The
+   .guki-message shell it lives in caps everything else at 85% and rounds it. */
+.guki-message-permission {
+	align-self: stretch;
+	align-items: stretch;
+	max-width: 100%;
+}
+
+.guki-message-permission .guki-message-body {
+	padding: 0;
+	background-color: transparent;
+}
+
+/* The accent border is the whole point: an open request must be the thing the eye lands on when
+   the panel is otherwise a wall of prose. */
+.guki-perm-card {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background-color: var(--background-primary-alt);
+	overflow: hidden;
+}
+
+.guki-perm-card.guki-perm-pending {
+	border-color: var(--interactive-accent);
+	box-shadow: var(--shadow-s);
+}
+
+/* A div, not a button — unlike .guki-tool-header, this one is not clickable, so it inherits none
+   of Obsidian's button defaults (trap 19) and needs neither an explicit height nor a
+   justify-content. It still wraps in the narrow layout; see the bottom of this file. */
+.guki-perm-header {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-3);
+	padding: var(--size-2-2) var(--size-4-2);
+	border-bottom: 1px solid var(--background-modifier-border);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.guki-perm-icon {
+	display: flex;
+	flex: 0 0 auto;
+	color: var(--text-accent);
+}
+
+/* Same reason as .guki-tool-icon: `IconName` is just `string`, so a name that stops existing adds
+   no SVG, and an empty holder would leave a hole in the row. */
+.guki-perm-icon:empty {
+	display: none;
+}
+
+.guki-perm-icon .svg-icon {
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
+.guki-perm-title {
+	flex: 0 0 auto;
+	font-weight: var(--font-medium);
+	color: var(--text-normal);
+}
+
+.guki-perm-summary {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--font-monospace);
+	font-size: var(--font-smallest);
+	color: var(--text-muted);
+}
+
+.guki-perm-body {
+	padding: var(--size-4-2);
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+}
+
+/* The file being written to. The tool card drops this line because its header already prints the
+   path; here the header ellipsises it and the reader is being asked to approve a write, so it is
+   spelled out in full and allowed to wrap. */
+.guki-perm-target {
+	display: flex;
+	align-items: baseline;
+	gap: var(--size-2-3);
+	font-size: var(--font-smallest);
+	min-width: 0;
+}
+
+.guki-perm-target-label {
+	flex: 0 0 auto;
+	color: var(--text-faint);
+}
+
+.guki-perm-target-path {
+	flex: 1 1 auto;
+	min-width: 0;
+	font-family: var(--font-monospace);
+	color: var(--text-normal);
+	/* Never ellipsised and never overflowing: an approval needs the whole path. */
+	overflow-wrap: anywhere;
+}
+
+.guki-perm-args {
+	margin: 0;
+	max-height: 30vh;
+	overflow: auto;
+	font-size: var(--font-smallest);
+	background-color: var(--background-primary);
+	border-radius: var(--radius-s);
+	padding: var(--size-4-1) var(--size-4-2);
+}
+
+.guki-perm-empty {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+}
+
+.guki-perm-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: var(--size-4-2);
+	padding: var(--size-4-2);
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+/* Deny is first in the DOM so a tab lands on the safer choice first; `order` puts Allow on the
+   left, where the eye reads it first. */
+.guki-perm-allow,
+.guki-perm-deny {
+	/* Explicit, because these are <button>s: Obsidian fixes their height, which slices the label
+	   once it wraps in a narrow pane (trap 19). */
+	height: auto;
+	min-height: 0;
+	flex: 0 0 auto;
+	border-radius: var(--radius-m);
+	padding: var(--size-4-1) var(--size-4-3);
+	font-weight: var(--font-medium);
+	box-shadow: none;
+	cursor: pointer;
+}
+
+.guki-perm-allow {
+	order: 1;
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.guki-perm-allow:hover {
+	background-color: var(--interactive-accent-hover);
+	color: var(--text-on-accent);
+}
+
+/* Deny is deliberately not the error red. Denying is a normal answer to a question, and the turn
+   carries on afterwards (RESEARCH B5, trap 6) — the same reasoning that keeps the Stop button
+   neutral. */
+.guki-perm-deny {
+	order: 2;
+	background-color: var(--background-modifier-border);
+	color: var(--text-normal);
+}
+
+.guki-perm-deny:hover {
+	background-color: var(--background-modifier-border-hover);
+	color: var(--text-normal);
+}
+
+.guki-perm-status {
+	padding: var(--size-2-2) var(--size-4-2);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+}
+
+.guki-perm-status:empty {
+	display: none;
+}
+
+/* Answered: the card recedes. No error colour on the denied one, and no failure badge — the whole
+   point is that a denial is a normal outcome the turn continues from. */
+.guki-perm-card.guki-perm-allowed,
+.guki-perm-card.guki-perm-denied,
+.guki-perm-card.guki-perm-cancelled {
+	opacity: 0.75;
+}
+
+.guki-perm-card.guki-perm-allowed .guki-perm-status {
+	color: var(--text-accent);
 }
 
 /* --- jump to bottom ------------------------------------------------------ */
@@ -651,4 +862,30 @@
 .guki-root.guki-narrow .guki-tool-summary {
 	flex-basis: 100%;
 	order: 3;
+}
+
+/* The permission header wraps for the same reason the tool header does: in a sidebar the file path
+   is most of what the card has to say, and ellipsising it to nothing defeats the card. */
+.guki-root.guki-narrow .guki-perm-header {
+	flex-wrap: wrap;
+}
+
+.guki-root.guki-narrow .guki-perm-summary {
+	flex-basis: 100%;
+	order: 3;
+}
+
+/* The two buttons take half the row each rather than shrinking to their labels: in a narrow pane a
+   right-aligned pair ends up as two small targets in the corner. `flex: 1 1 0` is safe here — this
+   container stays a row, so the basis is still measured horizontally (trap 20). */
+.guki-root.guki-narrow .guki-perm-actions {
+	padding: var(--size-4-1);
+	gap: var(--size-4-1);
+}
+
+.guki-root.guki-narrow .guki-perm-allow,
+.guki-root.guki-narrow .guki-perm-deny {
+	flex: 1 1 0;
+	min-width: 0;
+	padding: var(--size-4-1) var(--size-4-2);
 }

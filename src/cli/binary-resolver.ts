@@ -1,5 +1,6 @@
 /**
- * Finds the `claude` binary.
+ * Finds the binaries the plugin spawns: `claude`, and since Phase 5 a `node` for the MCP
+ * permission server.
  *
  * Two traps, both measured on this machine (RESEARCH C):
  * 1. Obsidian launched from the GUI does not read the shell profile, so `~/.local/bin` is not on
@@ -18,8 +19,12 @@ export interface BinaryResolution {
 }
 
 export class BinaryNotFoundError extends Error {
-	constructor(readonly attempts: string[]) {
-		super('Could not find the claude binary.');
+	constructor(
+		readonly attempts: string[],
+		/** Which binary was being looked for. Phase 5 added a second one. */
+		readonly binary = 'claude',
+	) {
+		super(`Could not find the ${binary} binary.`);
 		this.name = 'BinaryNotFoundError';
 	}
 }
@@ -82,7 +87,7 @@ async function newestVersionedBinary(versionsDir: string): Promise<string | null
  * Last resort: ask a **login** shell (`-l`), never an interactive one (`-i`), so the zsh function
  * definition in `.zshrc` stays out of the picture.
  */
-async function lookupViaLoginShell(): Promise<string | null> {
+async function lookupViaLoginShell(command: string): Promise<string | null> {
 	let childProcess;
 	try {
 		childProcess = await nodeChildProcess();
@@ -94,7 +99,7 @@ async function lookupViaLoginShell(): Promise<string | null> {
 		try {
 			child = childProcess.execFile(
 				'/bin/zsh',
-				['-lc', 'command -v claude'],
+				['-lc', `command -v ${command}`],
 				{ timeout: ZSH_LOOKUP_TIMEOUT_MS, encoding: 'utf8' },
 				(error, stdout) => {
 					if (error) {
@@ -155,10 +160,47 @@ export async function resolveClaudeBinary(override?: string): Promise<BinaryReso
 	}
 
 	attempts.push("zsh -lc 'command -v claude'");
-	const fromShell = await lookupViaLoginShell();
+	const fromShell = await lookupViaLoginShell('claude');
 	if (fromShell && (await isExecutableFile(fromShell))) {
 		return { path: fromShell, source: 'login shell lookup' };
 	}
 
 	throw new BinaryNotFoundError(attempts);
+}
+
+/** Where a `node` is likely to be, in the order it is worth trying. Homebrew first on this Mac. */
+const NODE_CANDIDATE_DIRS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'];
+
+/**
+ * Finds a **real** `node` for the MCP permission server (PLAN Phase 5 task 3: an absolute
+ * interpreter path, because a bare `node` fails silently — the server simply never appears).
+ *
+ * `process.execPath` is deliberately not used. Inside Obsidian's renderer that is the Electron
+ * binary, not node. `ELECTRON_RUN_AS_NODE=1` would make it behave as one, but Electron's
+ * `runAsNode` fuse can be disabled by the packager, and when it is, spawning the binary opens a
+ * second Obsidian window instead of failing — a worse failure than not starting at all.
+ *
+ * Throws `BinaryNotFoundError` when there is none. The caller turns that into a visible panel
+ * error and refuses input, exactly as it does for a missing permission server: running the CLI
+ * without an approval gate is the one outcome that is never acceptable (PLAN Phase 5 task 9).
+ */
+export async function resolveNodeBinary(): Promise<BinaryResolution> {
+	const path = await nodePath();
+	const attempts: string[] = [];
+
+	for (const dir of NODE_CANDIDATE_DIRS) {
+		const candidate = path.join(dir, 'node');
+		attempts.push(candidate);
+		if (await isExecutableFile(candidate)) {
+			return { path: candidate, source: dir };
+		}
+	}
+
+	attempts.push("zsh -lc 'command -v node'");
+	const fromShell = await lookupViaLoginShell('node');
+	if (fromShell && (await isExecutableFile(fromShell))) {
+		return { path: fromShell, source: 'login shell lookup' };
+	}
+
+	throw new BinaryNotFoundError(attempts, 'node');
 }

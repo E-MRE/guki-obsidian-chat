@@ -26,6 +26,7 @@ import { Platform } from 'obsidian';
 
 type ChildProcessModule = typeof import('child_process');
 type FsModule = typeof import('fs');
+type NetModule = typeof import('net');
 type OsModule = typeof import('os');
 type PathModule = typeof import('path');
 type ProcessModule = typeof import('process');
@@ -57,6 +58,18 @@ export function nodeFs(): Promise<FsModule> {
 		throw new Error(DESKTOP_ONLY);
 	}
 	return Promise.resolve(loadNodeModule('fs') as FsModule);
+}
+
+/**
+ * Unix domain sockets, for the permission bridge. The MCP permission server is spawned by the
+ * *CLI*, not by us, so its stdio is taken; this socket is the only channel back to the plugin
+ * (PHASE5A-STATE D1).
+ */
+export function nodeNet(): Promise<NetModule> {
+	if (!Platform.isDesktop) {
+		throw new Error(DESKTOP_ONLY);
+	}
+	return Promise.resolve(loadNodeModule('net') as NetModule);
 }
 
 export function nodeOs(): Promise<OsModule> {
@@ -92,3 +105,25 @@ export function nodeEnv(): Record<string, string | undefined> {
  * `import type ... from 'child_process'` statement — which `no-nodejs-modules` also rejects.
  */
 export type SpawnedProcess = import('child_process').ChildProcessWithoutNullStreams;
+export type NodeSocket = import('net').Socket;
+export type NodeSocketServer = import('net').Server;
+
+/**
+ * Sends a signal to a process we did **not** spawn, so there is no `ChildProcess` handle to call
+ * `.kill()` on. The MCP permission server is one of those: the CLI spawns it, we only learn its pid
+ * from the `hello` it sends over the socket (PHASE5A-STATE D3).
+ *
+ * Never throws: by the time this runs the process is usually already gone, and an ESRCH must not
+ * take the rest of a quit path down with it. Returns whether the signal was delivered.
+ */
+export function nodeKill(pid: number, signal: NodeJS.Signals): boolean {
+	if (!Platform.isDesktop) {
+		return false;
+	}
+	try {
+		(loadNodeModule('process') as ProcessModule).kill(pid, signal);
+		return true;
+	} catch {
+		return false;
+	}
+}

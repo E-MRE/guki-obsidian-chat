@@ -18,9 +18,16 @@ import {
 	type ChatItem,
 	type MessageBlock,
 	type NoticeItem,
+	type PermissionItem,
 	type UserItem,
 } from '../core/chat-state';
 import { renderChatMarkdown } from './markdown';
+import {
+	createPermissionCard,
+	updatePermissionCard,
+	type PermissionActions,
+	type RenderedPermissionCard,
+} from './permission-card';
 import { createToolCard, updateToolCard, type RenderedToolCard } from './tool-card';
 
 /** Treat the view as "at the bottom" within this many pixels, so new content keeps following. */
@@ -53,6 +60,8 @@ interface RenderedItem {
 	renderedText: string;
 	status: string;
 	blocks: Map<number, RenderedBlock>;
+	/** Permission items only. Holds the buttons, so it is updated in place, never rebuilt. */
+	permissionCard?: RenderedPermissionCard;
 }
 
 export class MessageList {
@@ -68,6 +77,8 @@ export class MessageList {
 		wrapperEl: HTMLElement,
 		/** The view. Passed to the markdown renderer as the owning component. */
 		private readonly component: Component,
+		/** Where Allow / Deny go. The list never decides a permission itself. */
+		private readonly permissionActions: PermissionActions,
 	) {
 		this.scrollEl = wrapperEl.createDiv({ cls: 'guki-messages' });
 
@@ -146,6 +157,8 @@ export class MessageList {
 				return this.updateAssistant(item, entry);
 			case 'notice':
 				return this.updateNotice(item, entry);
+			case 'permission':
+				return this.updatePermission(item, entry);
 		}
 	}
 
@@ -369,6 +382,23 @@ export class MessageList {
 		rendered.expanded = false;
 		rendered.el.removeClass('guki-thinking-open');
 		rendered.contentEl?.hide();
+	}
+
+	// --- permission requests -------------------------------------------------
+
+	/**
+	 * The card is created on first sight and only ever updated after that: rebuilding it would take
+	 * the buttons out from under the pointer, and `createPermissionCard` binds the click handlers to
+	 * the request id the card was created for.
+	 */
+	private updatePermission(item: PermissionItem, entry: RenderedItem): boolean {
+		entry.permissionCard ??= createPermissionCard(
+			entry.bodyEl,
+			this.component,
+			item,
+			this.permissionActions,
+		);
+		return updatePermissionCard(item, entry.permissionCard);
 	}
 
 	// --- notices ------------------------------------------------------------
