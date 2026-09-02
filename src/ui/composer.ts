@@ -1,13 +1,14 @@
 /**
- * The input row: attachment chips, a textarea and a send button.
+ * The input row: attachment chips, two attach controls, a textarea and a send button.
  *
  * Enter sends, Shift+Enter inserts a newline, and that is the only key behaviour there is — no
  * other shortcut, by closed decision #3. The chat is not a terminal.
  *
  * The composer stays presentational about attachments: it holds the chips and renders them, but it
- * never resolves a path or decides whether a file may be attached. It hands the drop and the
- * attach control to the view, which owns the vault-boundary check, and the view calls `attach`.
- * That keeps the security decision in `core/` and out of a DOM file.
+ * never resolves a path or decides whether a file may be attached. It hands the drop, the paste,
+ * the picked files and the attach control to the view, which owns the vault-boundary check, and the
+ * view calls `attach`. That keeps the security decision in `core/` and out of a DOM file — and it
+ * is why all four affordances arrive here as raw payloads and leave as one `Attachment`.
  */
 import { setIcon, type Component } from 'obsidian';
 import { addAttachment, hasSendableContent, type Attachment } from '../core/attachments';
@@ -25,8 +26,23 @@ export interface ComposerOptions {
 	 * `attach` for whatever survived the check; the composer does not inspect the payload.
 	 */
 	onDropped(dataTransfer: DataTransfer | null): void;
+	/**
+	 * Something was pasted. **Returns whether it was taken as an attachment**, and the composer
+	 * calls `preventDefault()` only then — so an ordinary text paste still reaches the textarea,
+	 * and a pasted clipboard *image* (a `File` with no path, PLAN Phase 6 task 3) is left entirely
+	 * alone rather than being swallowed by a handler that does nothing with it.
+	 *
+	 * The decision has to be synchronous, because `preventDefault()` is: the view answers from
+	 * whether any path came out of `clipboardData.files`, and resolves those paths afterwards.
+	 */
+	onPasted(clipboardData: DataTransfer | null): boolean;
 	/** The attach control was pressed. The view resolves the active note and calls `attach`. */
 	onAttachActiveNote(): void;
+	/**
+	 * Files were chosen in the picker. Same payload shape as a drop, and the view treats them
+	 * identically — the picker is a third affordance over one code path, not a third code path.
+	 */
+	onPickedFiles(files: FileList | null): void;
 }
 
 const DEFAULT_PLACEHOLDER = 'Message GuKi… (Enter to send, Shift+Enter for a new line)';
@@ -36,6 +52,8 @@ export class Composer {
 	private readonly inputEl: HTMLTextAreaElement;
 	private readonly actionEl: HTMLButtonElement;
 	private readonly attachEl: HTMLButtonElement;
+	private readonly pickEl: HTMLButtonElement;
+	private readonly fileInputEl: HTMLInputElement;
 	private busy = false;
 	/** Non-null when the panel is refusing input; the text is shown in place of the placeholder. */
 	private blocked: string | null = null;
@@ -59,7 +77,38 @@ export class Composer {
 		// than to the conversation above it.
 		this.chipsEl = form.createDiv({ cls: 'guki-composer-chips' });
 
+		/*
+		 * The picker's input, created once and reused.
+		 *
+		 * Obsidian's own `editor:attach-file` command builds a throwaway input on
+		 * `activeDocument.body` and then has to detach it again — including on a *cancelled* pick,
+		 * which fires no `change` event, so it watches the document for focus/click and removes the
+		 * element five seconds later (measured in `app.js`, 1.13.7, byte 3,854,690). None of that
+		 * is needed for one input that lives in the composer's own form and dies with the view:
+		 * `value` is cleared before each `click()` so re-picking the same file still fires `change`,
+		 * and a cancelled pick leaves nothing behind.
+		 */
+		this.fileInputEl = form.createEl('input', {
+			cls: 'guki-composer-file-input',
+			attr: { type: 'file', multiple: 'multiple', tabindex: '-1', 'aria-hidden': 'true' },
+		});
+
 		const row = form.createDiv({ cls: 'guki-composer-row' });
+
+		/*
+		 * Two attach controls, not one button behind a menu. They are two different actions —
+		 * "attach the note I am looking at" and "attach a file from disk" — and this panel's
+		 * product boundary is "better conversation" (PLAN §5 decision 12), so the common path does
+		 * not get to cost an extra click.
+		 *
+		 * The paperclip is Obsidian's own icon for attaching a file (`editor:attach-file` uses
+		 * `lucide-paperclip`), so the meaning is borrowed rather than invented.
+		 */
+		this.pickEl = row.createEl('button', {
+			cls: 'guki-composer-attach',
+			attr: { 'aria-label': 'Attach files from disk' },
+		});
+		setIcon(this.pickEl, 'paperclip');
 
 		this.attachEl = row.createEl('button', {
 			cls: 'guki-composer-attach',
@@ -104,6 +153,40 @@ export class Composer {
 				return;
 			}
 			this.options.onAttachActiveNote();
+		});
+
+		component.registerDomEvent(this.pickEl, 'click', () => {
+			if (this.blocked !== null) {
+				return;
+			}
+			// Cleared first: picking the same file twice in a row is not a `change` otherwise, and
+			// the second pick would silently do nothing.
+			this.fileInputEl.value = '';
+			this.fileInputEl.click();
+		});
+
+		component.registerDomEvent(this.fileInputEl, 'change', () => {
+			if (this.blocked !== null) {
+				return;
+			}
+			this.options.onPickedFiles(this.fileInputEl.files);
+		});
+
+		/*
+		 * Paste, on the textarea rather than the composer: this has to fire for a paste the reader
+		 * aimed at the text they are writing, and that is where the caret is.
+		 *
+		 * A file copied in Finder arrives as `clipboardData.files` (PLAN Phase 6 task 2), which is
+		 * the same payload a drop carries, so it takes the same route. The default is only
+		 * suppressed when the view says it took something — see `onPasted`.
+		 */
+		component.registerDomEvent(this.inputEl, 'paste', (event: ClipboardEvent) => {
+			if (this.blocked !== null) {
+				return;
+			}
+			if (this.options.onPasted(event.clipboardData)) {
+				event.preventDefault();
+			}
 		});
 
 		this.registerDropTarget(component, form);
@@ -239,10 +322,11 @@ export class Composer {
 		const isBlocked = reason !== null;
 		this.inputEl.disabled = isBlocked;
 		this.actionEl.disabled = isBlocked;
-		// Attaching is disabled with the rest of it. A chip is a path the CLI will read, so it is
-		// input like any other — collecting them while the gate is down would be the same mistake
-		// as letting text be typed.
+		// Attaching is disabled with the rest of it, both controls. A chip is a path the CLI will
+		// read, so it is input like any other — collecting them while the gate is down would be the
+		// same mistake as letting text be typed.
 		this.attachEl.disabled = isBlocked;
+		this.pickEl.disabled = isBlocked;
 		this.inputEl.placeholder = reason ?? DEFAULT_PLACEHOLDER;
 		this.actionEl.toggleClass('guki-composer-blocked', isBlocked);
 	}

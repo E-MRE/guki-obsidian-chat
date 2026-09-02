@@ -101,6 +101,62 @@ export function nodeEnv(): Record<string, string | undefined> {
 }
 
 /**
+ * As much of Electron's renderer module as one question needs. Declared rather than imported:
+ * `electron` is not a Node built-in and there are no types for it in this project, and the whole
+ * point of this file is that the reach for it happens in exactly one place.
+ */
+interface ElectronModule {
+	webUtils?: {
+		getPathForFile(file: File): string;
+	};
+}
+
+/**
+ * The absolute filesystem path behind a `File`, or `null` when it has none.
+ *
+ * **Feature detection, deliberately not a version check.** Electron removed `File.path` in 32 in
+ * favour of `webUtils.getPathForFile(file)`. This machine's Obsidian 1.13.7 bundles Electron 43.3.0
+ * (measured off the app's own Electron Framework binary, R11), so `File.path` is already gone here
+ * — but Obsidian's bundled Electron moves on its own schedule, and a hardcoded threshold would need
+ * re-verifying at every Obsidian update. Asking the object what it has needs verifying once.
+ *
+ * This is the shape Obsidian itself uses, read out of its renderer bundle (1.13.7, `app.js` byte
+ * 1,444,293): `var s = d.path || ""; if (isDesktopApp && electron.webUtils && (s =
+ * electron.webUtils.getPathForFile(d)), !s) { ...image/png → "Pasted image"... }`. Two things that
+ * copies deliberately — a falsy return, not a throw, is how "no path" arrives, and a `File` with
+ * no path is a pasted screenshot.
+ *
+ * **`null` is not an error to swallow.** It means this `File` has no path, which is the clipboard
+ * image — the single case that has to send bytes, and PLAN Phase 6 task 3. The callers pass it over
+ * in silence rather than reporting it, so task 3 can pick the event up cleanly.
+ */
+export function absolutePathForFile(file: File): string | null {
+	if (!Platform.isDesktop) {
+		// A mobile `File` has no filesystem path to give, so there is nothing to detect.
+		return null;
+	}
+	// Not on `File` in lib.dom — it was an Electron addition, and the point here is that it may
+	// legitimately be missing. Read as `unknown` so an older Electron handing back something odd
+	// falls through to `webUtils` rather than being trusted.
+	const legacy = (file as File & { path?: unknown }).path;
+	if (typeof legacy === 'string' && legacy.length > 0) {
+		return legacy;
+	}
+	try {
+		const webUtils = (loadNodeModule('electron') as ElectronModule).webUtils;
+		if (!webUtils) {
+			return null;
+		}
+		const resolved = webUtils.getPathForFile(file);
+		return typeof resolved === 'string' && resolved.length > 0 ? resolved : null;
+	} catch {
+		// No `electron` module at all: this is not Obsidian's renderer. `docs/offline-checks.ts`
+		// runs here, which is what makes the "no path" branch drivable offline.
+		return null;
+	}
+}
+
+/**
  * Node types re-exported through an `import(...)` type position, so consumers never need an
  * `import type ... from 'child_process'` statement — which `no-nodejs-modules` also rejects.
  */

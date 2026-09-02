@@ -860,6 +860,18 @@
 	cursor: default;
 }
 
+/* The picker's input. Never shown — it exists only to be `click()`ed — but it is still a real
+   element in the composer's form, so it is taken out of the layout and out of the tab order rather
+   than being made invisible in place. `display: none` would do as well in Chromium, and Obsidian's
+   own attach command uses `position: fixed; opacity: 0; z-index: -9999` instead (app.js 1.13.7);
+   that is the form kept here, since it is the one this Electron is known to open a dialog from. */
+.guki-composer-file-input {
+	position: fixed;
+	opacity: 0;
+	z-index: -9999;
+	pointer-events: none;
+}
+
 .guki-composer-input {
 	flex: 1 1 auto;
 	min-width: 0;
@@ -941,6 +953,13 @@
 
 .guki-root.guki-narrow .guki-composer-send {
 	padding: var(--size-4-2) var(--size-4-2);
+}
+
+/* Two icon buttons and a Send in a 300px sidebar leave the textarea very little: the buttons give
+   up their horizontal padding first, since their icon is the target and the text is what suffers
+   from being squeezed. The textarea already has `min-width: 0`, so it takes what is left. */
+.guki-root.guki-narrow .guki-composer-attach {
+	padding: var(--size-4-2) var(--size-4-1);
 }
 
 /* The diff goes vertical in the sidebar (PLAN Phase 4.3). Two panes side by side in a 400px pane

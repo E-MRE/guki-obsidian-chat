@@ -35,6 +35,9 @@
  *     and that nothing which failed the vault-boundary check can become one. The `@` form skips
  *     the permission system entirely, so this is the same class of invisible decision as §N's
  *     auto-allows: a wrong reference produces no error, just a model that never saw the file.
+ *     Task 2 adds the other direction: a file that arrived from *outside* Obsidian is placed by
+ *     where it resolves, so the same door produces an `@` for a vault file and a plain path for
+ *     anything else (§O5), and a `File` is turned into a path by feature detection (§O6).
  * N.  Phase 5b: the permission policy — PLAN §2b's table and the Bash gate, over a real temp vault
  *     with a real symlink out of it, plus the broker end to end. Longer than any other section
  *     because an auto-allow is invisible: it produces no card, so every `allow` branch needs an
@@ -82,7 +85,12 @@ import {
 	type Attachment,
 	type AttachmentLocation,
 } from '../src/core/attachments';
-import { resolveVaultFile } from '../src/core/attachment-resolver';
+import {
+	externalFilePaths,
+	resolveExternalFile,
+	resolveVaultFile,
+} from '../src/core/attachment-resolver';
+import { absolutePathForFile } from '../src/cli/node-api';
 import { FileSystemAdapter, TFile } from 'obsidian';
 
 let failures = 0;
@@ -3359,6 +3367,31 @@ console.log('O1. attachmentReference: the @-form, and when there must not be one
 			location: 'outside-vault',
 			want: '/etc/hosts',
 		},
+		{
+			// A space does not make an out-of-vault path quotable. The quoting exists to carry `@`
+			// parsing past whitespace; a plain path is prose the model reads and hands to `Read`,
+			// so quote characters here would end up inside the argument it copies. What keeps it
+			// unambiguous is `composeMessage` putting every reference on its own line.
+			name: 'a space does not make an out-of-vault path quoted',
+			path: '/Users/e/Library/Application Support/report.pdf',
+			location: 'outside-vault',
+			want: '/Users/e/Library/Application Support/report.pdf',
+		},
+		{
+			// The `["\n\r]` guard belongs to the `@` branch only, and this row is what says so: a
+			// quote in the name cannot break a plain path, so refusing one would drop the file out
+			// of the prompt for no reason. The location test comes first, deliberately.
+			name: 'a quote in the name still gets an out-of-vault plain path',
+			path: '/tmp/Emre\'s "quoted" file.txt',
+			location: 'outside-vault',
+			want: '/tmp/Emre\'s "quoted" file.txt',
+		},
+		{
+			name: 'an empty out-of-vault path is never a reference either',
+			path: '',
+			location: 'outside-vault',
+			want: null,
+		},
 	];
 
 	for (const c of cases) {
@@ -3540,6 +3573,211 @@ console.log('O4. the chip list');
 	eq('empty text with no chips is not sendable', hasSendableContent('   ', []), false);
 	eq('empty text with a chip is', hasSendableContent('   ', [chip('/vault/a.md')]), true);
 	eq('text with no chips is', hasSendableContent('hi', []), true);
+}
+
+console.log('O5. resolveExternalFile: the location comes from the path, never from the door');
+{
+	/*
+	 * Task 2's rule, and the one way to get it wrong.
+	 *
+	 * A file that arrives from outside Obsidian — Finder drag, paste, picker — is placed by where
+	 * it *resolves*, not by where it came from. Both answers are legal and both are asserted here,
+	 * because "it arrived from outside Obsidian, so treat it as outside the vault" is the
+	 * plausible-sounding half of the rule and it fails in the direction with no symptom: a vault
+	 * file would be sent as a plain path (harmless, just a card the reader did not need), while the
+	 * mirror mistake — trusting the raw path instead of the resolved one — hands the CLI an
+	 * out-of-vault file as an `@`, with no card and no denial.
+	 *
+	 * Fixtures are built by **string concatenation, never `path.join`** (trap 28): `join` collapses
+	 * `..` lexically, before any symlink is followed, which is exactly the normalisation the
+	 * resolver must not do.
+	 */
+	const outsideFile = `${POLICY_VAULT.outside}/task2-outside.txt`;
+	const outsideDir = `${POLICY_VAULT.outside}/task2-dir`;
+	const intoVault = `${POLICY_VAULT.outside}/task2-into-vault`;
+	writeFileSync(outsideFile, 'out\n');
+	mkdirSync(outsideDir, { recursive: true });
+	// A symlink living *outside* the vault that points *into* it. The mirror of `escape`.
+	symlinkSync(`${POLICY_VAULT.root}/notes`, intoVault);
+
+	const external = (absolutePath: string, displayName = 'x'): { absolutePath: string; displayName: string } => ({
+		absolutePath,
+		displayName,
+	});
+
+	// 1. The ordinary out-of-vault case: a chip, and a PLAIN path in the prompt.
+	const out = await resolveExternalFile(vaultPaths, external(outsideFile, 'task2-outside.txt'));
+	eq('a file outside the vault is attached', out.kind, 'attached');
+	if (out.kind === 'attached') {
+		eq('...marked outside-vault', out.attachment.location, 'outside-vault');
+		eq('...with the name off the File', out.attachment.displayName, 'task2-outside.txt');
+		eq('...and no @ in the prompt', composeMessage('read it', [out.attachment]), `${outsideFile}\n\nread it`);
+		check(
+			'...so the model has to call Read, which §2b turns into a card',
+			!composeMessage('', [out.attachment]).includes('@'),
+			composeMessage('', [out.attachment]),
+		);
+	}
+
+	/*
+	 * 2. **Emre's case from task 1's acceptance run.** A file dragged in from Finder that happens
+	 * to live inside the vault must become an `@`, exactly like one dragged from the file explorer.
+	 * Task 1 refused it, because it never touched the `File` API and so had no path to resolve.
+	 */
+	const insideViaFinder = await resolveExternalFile(
+		vaultPaths,
+		external(`${POLICY_VAULT.root}/notes/todo.md`, 'todo.md'),
+	);
+	eq('a vault file dragged in from Finder is attached', insideViaFinder.kind, 'attached');
+	if (insideViaFinder.kind === 'attached') {
+		eq('...marked IN-vault, from where it is and not where it came from', insideViaFinder.attachment.location, 'in-vault');
+		eq(
+			'...so it composes to an @-form',
+			composeMessage('', [insideViaFinder.attachment]),
+			`@"${POLICY_VAULT.root}/notes/todo.md"`,
+		);
+	}
+
+	// 3. And the same answer through a symlink that points into the vault from outside it. The
+	// path the user handed us is outside; the file is inside; the file is what counts.
+	const throughInLink = await resolveExternalFile(vaultPaths, external(`${intoVault}/todo.md`));
+	eq('a symlink from outside INTO the vault is in-vault', throughInLink.kind === 'attached' && throughInLink.attachment.location, 'in-vault');
+	eq(
+		'...at the resolved path, not the one dropped',
+		throughInLink.kind === 'attached' && throughInLink.attachment.absolutePath,
+		`${POLICY_VAULT.root}/notes/todo.md`,
+	);
+
+	/*
+	 * 4. The reverse, and the reversion target. `<vault>/escape` is a real symlink out of the
+	 * vault, so this path *looks* inside it and resolves outside. A string prefix match on the raw
+	 * path answers in-vault and `@`-references a file from outside the vault with no card at all.
+	 *
+	 * Note the deliberate asymmetry with §O3: through the in-vault door (a `TFile` from Obsidian's
+	 * own explorer) this same file is still **refused**, which is task 1's behaviour and is left
+	 * alone here. Through the external door it becomes a plain path, which is strictly better than
+	 * a refusal — it is attachable and it raises a card. Unifying the two doors is a change to
+	 * verified behaviour and is flagged for the orchestrator rather than made here.
+	 */
+	const escaped = await resolveExternalFile(vaultPaths, external(`${POLICY_VAULT.root}/escape/secret.txt`));
+	eq('a vault path that resolves OUT through a symlink is outside-vault', escaped.kind === 'attached' && escaped.attachment.location, 'outside-vault');
+	eq(
+		'...at the real path outside the vault',
+		escaped.kind === 'attached' && escaped.attachment.absolutePath,
+		`${POLICY_VAULT.outside}/secret.txt`,
+	);
+	check(
+		'...and never as an @',
+		escaped.kind === 'attached' && !(attachmentReference(escaped.attachment) ?? '@').startsWith('@'),
+	);
+
+	// 5. `..` applied after the symlink, arriving through the attachment door (trap 28 / §N2).
+	const dotdot = await resolveExternalFile(
+		vaultPaths,
+		external(`${POLICY_VAULT.root}/escape/../outside/secret.txt`),
+	);
+	eq('`..` after a symlink resolves outside the vault', dotdot.kind === 'attached' && dotdot.attachment.location, 'outside-vault');
+
+	// 6. Directories, refused on both sides of the boundary. `Read` on a directory errors, and the
+	// check is a real `stat` of the resolved path rather than an inspection of the `File`, whose
+	// `type` and `size` for a directory are platform trivia.
+	const droppedDir = await resolveExternalFile(vaultPaths, external(outsideDir, 'task2-dir'));
+	eq('a dropped folder is refused', droppedDir.kind, 'refused');
+	eq('...as a folder, so the notice can say so', droppedDir.kind === 'refused' && droppedDir.reason, 'directory');
+	eq('...naming it', droppedDir.kind === 'refused' && droppedDir.displayName, 'task2-dir');
+	const inVaultDir = await resolveExternalFile(vaultPaths, external(`${POLICY_VAULT.root}/notes`, 'notes'));
+	eq('a folder inside the vault is refused too', inVaultDir.kind === 'refused' && inVaultDir.reason, 'directory');
+	// A symlink to a directory is caught because the stat is of the resolved path.
+	const linkedDir = await resolveExternalFile(vaultPaths, external(intoVault, 'task2-into-vault'));
+	eq('a symlink to a folder is refused as a folder', linkedDir.kind === 'refused' && linkedDir.reason, 'directory');
+
+	/*
+	 * 7. A path that no longer exists. Unlike the in-vault door (§O3), existence *is* checked here
+	 * — and for a reason that is not about security: an external `File` names something that was
+	 * on disk a moment ago, so a missing one means it went away underneath us and there is nothing
+	 * to attach. The in-vault door keeps a `TFile` Obsidian is still holding.
+	 */
+	const gone = await resolveExternalFile(vaultPaths, external(`${POLICY_VAULT.outside}/task2-gone.txt`, 'task2-gone.txt'));
+	eq('a path that no longer exists is refused', gone.kind === 'refused' && gone.reason, 'unresolvable');
+	// `~` is expanded by a shell, and nothing here runs one — `VaultPaths.resolve` answers null
+	// rather than treating it as a directory name (which would place it inside the vault).
+	const tilde = await resolveExternalFile(vaultPaths, external('~/.ssh/id_rsa', 'id_rsa'));
+	eq('a ~ path is refused rather than resolved', tilde.kind === 'refused' && tilde.reason, 'unresolvable');
+
+	// 8. The whole external door, joined up: `File`s in, one message out. Two files, one on each
+	// side of the boundary, in one paste — which is what makes the per-file rule visible.
+	const files = externalFilePaths([
+		{ name: 'todo.md', path: `${POLICY_VAULT.root}/notes/todo.md` },
+		{ name: 'task2-outside.txt', path: outsideFile },
+	] as unknown as ArrayLike<File>);
+	eq('both files came through with paths', files.length, 2);
+	const attachments: Attachment[] = [];
+	for (const file of files) {
+		const resolution = await resolveExternalFile(vaultPaths, file);
+		if (resolution.kind === 'attached') {
+			attachments.push(resolution.attachment);
+		}
+	}
+	eq('both became chips', attachments.length, 2);
+	eq(
+		'the vault one is an @-form and the outside one is a plain path, in one message',
+		composeMessage('compare these', attachments),
+		`@"${POLICY_VAULT.root}/notes/todo.md"\n${outsideFile}\n\ncompare these`,
+	);
+}
+
+console.log('O6. absolutePathForFile: feature detection, and the no-path branch task 3 needs');
+{
+	/*
+	 * R11's rule, as an assertion. Electron removed `File.path` in 32 in favour of
+	 * `webUtils.getPathForFile`; this machine's Obsidian 1.13.7 bundles Electron 43.3.0, so
+	 * `File.path` is already gone here — but it is written as **feature detection, not a version
+	 * check**, because Obsidian's bundled Electron moves on its own schedule and a hardcoded
+	 * threshold would need re-verifying at every Obsidian update.
+	 *
+	 * Both outer branches are drivable offline. The middle one is not: there is no `electron`
+	 * module in this harness, so `window.require('electron')` throws and the function answers
+	 * null — which is the same answer a real path-less `File` produces, and it is the branch PLAN
+	 * Phase 6 task 3 (the clipboard image) is built on. That the *live* renderer reaches
+	 * `webUtils` is a manual step, not this.
+	 */
+	const asFile = (shape: Record<string, unknown>): File => shape as unknown as File;
+
+	eq(
+		'a File carrying a path (older Electron) is used as-is',
+		absolutePathForFile(asFile({ name: 'a.pdf', path: '/tmp/a.pdf' })),
+		'/tmp/a.pdf',
+	);
+	eq(
+		'a File with no path at all falls through to webUtils, and here to null',
+		absolutePathForFile(asFile({ name: 'shot.png' })),
+		null,
+	);
+	// Obsidian's own handler reads `d.path || ""` and then tests `!s`, so an empty string means
+	// "no path" and must not be returned as one (app.js 1.13.7, byte 1,444,293).
+	eq(
+		'an empty path is not a path',
+		absolutePathForFile(asFile({ name: 'shot.png', path: '' })),
+		null,
+	);
+	eq(
+		'a non-string path is not trusted either',
+		absolutePathForFile(asFile({ name: 'odd.bin', path: 42 })),
+		null,
+	);
+
+	// The list form the three affordances hand over. A path-less `File` is dropped in silence:
+	// that is the clipboard image, and a notice here would be one task 3 deletes.
+	const mixed = externalFilePaths([
+		{ name: 'a.pdf', path: '/tmp/a.pdf' },
+		{ name: 'shot.png' },
+		{ name: 'b.txt', path: '/tmp/b.txt' },
+	] as unknown as ArrayLike<File>);
+	eq('the path-less File is dropped', mixed.length, 2);
+	eq('...order is kept', mixed.map((f) => f.absolutePath).join(','), '/tmp/a.pdf,/tmp/b.txt');
+	eq('...and the display name comes off the File', mixed[0]?.displayName, 'a.pdf');
+	eq('no FileList at all is no files', externalFilePaths(null).length, 0);
+	eq('an empty FileList is no files', externalFilePaths([] as unknown as ArrayLike<File>).length, 0);
 }
 
 rmSync(POLICY_VAULT.base, { recursive: true, force: true });

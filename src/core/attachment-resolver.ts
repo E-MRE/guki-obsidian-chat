@@ -1,7 +1,8 @@
 /**
- * The impure half of attachments: turning something the user indicated — the active note, or a
- * file dragged out of Obsidian's own UI — into an `Attachment` whose path has been *verified*
- * inside the vault.
+ * The impure half of attachments: turning something the user indicated — the active note, a file
+ * dragged out of Obsidian's own UI, or a file that arrived from outside Obsidian entirely — into an
+ * `Attachment` whose path has been *resolved*, and whose side of the vault boundary was decided by
+ * that resolution.
  *
  * Split from `attachments.ts` for the reason `vault-path-resolver.ts` is split from
  * `permission-policy.ts`: the rule stays fixture-drivable, and the part that needs `App`, a vault
@@ -10,9 +11,12 @@
  * **Nothing here may return an `Attachment` it has not resolved through `VaultPaths`.** The `@`
  * form skips the permission system entirely (PLAN's Phase 6 syntax table), so "we got this from
  * Obsidian's file explorer, it must be in the vault" is not good enough — a vault file can be a
- * symlink pointing out, and that is exactly the case a name-based check misses.
+ * symlink pointing out, and that is exactly the case a name-based check misses. The mirror of it is
+ * just as important: **a file dragged in from Finder that happens to live inside the vault is
+ * in-vault and gets an `@`.** The question is always where the file *is*, never where it came from.
  */
 import { FileSystemAdapter, TFile, type App } from 'obsidian';
+import { absolutePathForFile, nodeFs } from '../cli/node-api';
 import type { Attachment } from './attachments';
 import { containsPath, type VaultPaths } from './permission-policy';
 
@@ -76,6 +80,124 @@ export function resolveVaultFile(app: App, paths: VaultPaths, file: TFile): Atta
 		absolutePath: resolved ?? fullPath,
 		displayName: file.name,
 		location: 'in-vault',
+	};
+}
+
+/**
+ * A file that arrived from outside Obsidian — a Finder drag, a paste, or the picker — after the
+ * `File` has been turned into a path and before anything has been decided about it.
+ */
+export interface ExternalFile {
+	/** Straight off the `File`, so the chip and any refusal name what the OS calls the file. */
+	displayName: string;
+	/** As `absolutePathForFile` gave it: absolute, but **not** yet resolved or checked. */
+	absolutePath: string;
+}
+
+/**
+ * What became of one external file. A refusal carries its reason because the two read differently
+ * to the person who just dropped something, and a Notice that cannot say which is which is a
+ * Notice that reads as "the panel is broken".
+ */
+export type ExternalResolution =
+	| { kind: 'attached'; attachment: Attachment }
+	| { kind: 'refused'; reason: 'directory' | 'unresolvable'; displayName: string };
+
+/**
+ * The paths behind a drop's, a paste's or a picker's `File`s, with the ones that have no path
+ * dropped.
+ *
+ * `ArrayLike<File>` rather than `FileList` so this is drivable from a fixture — a `FileList` cannot
+ * be constructed outside a browser, and the null-dropping is the part worth asserting.
+ *
+ * **A `File` with no path is passed over in silence.** That is the pasted clipboard image, the one
+ * case that has to send bytes, and it is PLAN Phase 6 task 3. Reporting it here would mean a
+ * "not supported" notice that task 3 immediately deletes, and worse, it would train the reader to
+ * ignore the notice.
+ */
+export function externalFilePaths(files: ArrayLike<File> | null | undefined): ExternalFile[] {
+	if (!files) {
+		return [];
+	}
+	const resolved: ExternalFile[] = [];
+	for (let index = 0; index < files.length; index += 1) {
+		const file = files[index];
+		if (!file) {
+			continue;
+		}
+		const absolutePath = absolutePathForFile(file);
+		if (absolutePath === null) {
+			continue;
+		}
+		resolved.push({ displayName: file.name, absolutePath });
+	}
+	return resolved;
+}
+
+/**
+ * The sibling of `resolveVaultFile`, for a path that came from outside Obsidian. **Both locations
+ * are legal outcomes here, and that is the whole point.**
+ *
+ * `location` is set from the *answer* `containsPath` gives about the resolved path, never from the
+ * fact that the file arrived through an external door. A file dragged in from Finder that lives in
+ * the vault becomes an `@` reference, exactly as if it had been dragged from the file explorer; a
+ * vault path that resolves through a symlink out of the vault becomes a plain path, and the model's
+ * `Read` of it raises a card. "It came from outside Obsidian, so treat it as outside the vault" is
+ * the wrong half of the rule, and it is the plausible-sounding one.
+ *
+ * Two refusals, and neither is about the vault boundary:
+ *
+ * - **`directory`** — `Read` on a directory errors, so a dropped folder must never become a chip.
+ *   The check is `statSync(...).isDirectory()` on the *resolved* path rather than an inspection of
+ *   the `File`, whose `type` and `size` for a directory are platform trivia. Resolving first also
+ *   means a symlink to a directory is caught.
+ * - **`unresolvable`** — the path did not resolve at all, or it resolved and then failed to stat.
+ *   An external `File` names something that existed a moment ago, so this is the file having gone
+ *   away underneath us. Nothing to attach, and it is *not* the same case as a missing in-vault file
+ *   (see §O3): there, the chip's source is a `TFile` Obsidian is still holding, and the boundary,
+ *   not existence, is the security question.
+ *
+ * There is deliberately **no extension filter**. Whatever `Read` opens works, and what it cannot
+ * open produces its own error — which is the honest place for it (PLAN Phase 6).
+ */
+export async function resolveExternalFile(
+	paths: VaultPaths,
+	file: ExternalFile,
+): Promise<ExternalResolution> {
+	const { absolutePath, displayName } = file;
+
+	// Resolved once and kept, for the reason `resolveVaultFile` resolves once and keeps: the string
+	// that goes in the message must be the one that was checked, or there is a check-to-use gap.
+	const resolved = paths.resolve(absolutePath);
+	// **This is the narrowing, not a second safety net, and the sweep says so.** Removing it does
+	// not turn the checks red (task 2's reversion row 5): `statSync(null)` throws, the `catch`
+	// below answers `unresolvable`, and the outcome is identical. It is kept because it is what
+	// lets the rest of the function be typed without a `!` — scattering one at each site would
+	// silence the compiler without saying why the value is there. Do not read it as a guard.
+	if (resolved === null) {
+		return { kind: 'refused', reason: 'unresolvable', displayName };
+	}
+
+	const fs = await nodeFs();
+	let stats;
+	try {
+		stats = fs.statSync(resolved);
+	} catch {
+		return { kind: 'refused', reason: 'unresolvable', displayName };
+	}
+	if (stats.isDirectory()) {
+		return { kind: 'refused', reason: 'directory', displayName };
+	}
+
+	return {
+		kind: 'attached',
+		attachment: {
+			absolutePath: resolved,
+			displayName,
+			// The one line this function exists for. `containsPath` answers about the resolved
+			// path, and its answer — not the door the file came through — picks the syntax.
+			location: containsPath(paths.root, resolved) ? 'in-vault' : 'outside-vault',
+		},
 	};
 }
 

@@ -8,7 +8,10 @@ import {
 import {
 	activeVaultFile,
 	droppedVaultFiles,
+	externalFilePaths,
+	resolveExternalFile,
 	resolveVaultFile,
+	type ExternalFile,
 } from '../core/attachment-resolver';
 import type { Attachment } from '../core/attachments';
 import type { SessionManager } from '../core/session-manager';
@@ -72,17 +75,41 @@ export class ChatView extends ItemView {
 				this.session.interrupt();
 			},
 			// `dataTransfer` is read here and now — it is only valid during the drop event, so
-			// the vault files come out synchronously and only the boundary check is deferred.
+			// both payloads come out synchronously and only the resolution is deferred.
 			onDropped: (dataTransfer: DataTransfer | null) => {
-				const files = droppedVaultFiles(this.app, dataTransfer);
-				if (files.length === 0) {
-					// Nothing in the drop was a vault file. A file dragged in from Finder lands
-					// here too, and that is task 2's — saying so is better than doing nothing,
-					// which reads as the panel being broken.
-					new Notice('Only files from this vault can be attached.');
+				const vaultFiles = droppedVaultFiles(this.app, dataTransfer);
+				if (vaultFiles.length > 0) {
+					void this.attachFiles(vaultFiles);
 					return;
 				}
-				void this.attachFiles(files);
+				// Obsidian's own drag carries no `File`, and a Finder drag carries no
+				// `dragManager.draggable` and no `obsidian://` URL, so these two never overlap.
+				const external = externalFilePaths(dataTransfer?.files);
+				if (external.length > 0) {
+					void this.attachExternalFiles(external);
+					return;
+				}
+				if ((dataTransfer?.files.length ?? 0) > 0) {
+					// There were files, but none had a path: a dragged clipboard image. That is
+					// PLAN Phase 6 task 3, so it is left alone rather than given a notice that
+					// task 3 would delete.
+					return;
+				}
+				// Dragging a tab header lands here, and so does dragged text or a link — there is
+				// no file in any of them. Saying so beats doing nothing, which reads as a bug.
+				new Notice('Nothing to attach — that drop contained no file.');
+			},
+			// Returns whether the paste was taken, which is what suppresses the textarea's own
+			// handling. A file copied in Finder arrives exactly as a dropped one does.
+			onPasted: (clipboardData: DataTransfer | null): boolean => {
+				const external = externalFilePaths(clipboardData?.files);
+				if (external.length === 0) {
+					// Ordinary text, or a clipboard image with no path (task 3). Either way this
+					// paste is not ours, and the textarea must still get it.
+					return false;
+				}
+				void this.attachExternalFiles(external);
+				return true;
 			},
 			onAttachActiveNote: () => {
 				const file = activeVaultFile(this.app);
@@ -91,6 +118,20 @@ export class ChatView extends ItemView {
 					return;
 				}
 				void this.attachFiles([file]);
+			},
+			onPickedFiles: (files: FileList | null) => {
+				const external = externalFilePaths(files);
+				if (external.length === 0) {
+					// Unlike the drop and the paste, silence here would be wrong. A file chosen
+					// from a file dialog is on disk by definition, so "no path" cannot be a
+					// clipboard image — it can only be the path resolution failing, and a button
+					// that does nothing is the failure mode this project keeps finding by hand.
+					if (files && files.length > 0) {
+						new Notice('Could not read a filesystem path for the chosen file.');
+					}
+					return;
+				}
+				void this.attachExternalFiles(external);
 			},
 		});
 
@@ -163,6 +204,46 @@ export class ChatView extends ItemView {
 			new Notice(
 				`Could not attach ${refused.join(', ')} — it does not resolve inside the vault.`,
 			);
+		}
+	}
+
+	/**
+	 * The same thing for files that arrived from outside Obsidian — a Finder drag, a paste, or the
+	 * picker. One method for all three, because they differ only in how the `File` was obtained.
+	 *
+	 * **The vault boundary is not a filter here, it is a question**: `resolveExternalFile` answers
+	 * `in-vault` or `outside-vault` from the resolved path, and both are chips. A file that happens
+	 * to live in the vault gets an `@` reference; anything else gets a plain path, which makes the
+	 * model call `Read` and puts it through §2b — a card per file, and cards are allowed to queue
+	 * (PLAN §5 decision 11).
+	 *
+	 * The two refusals are reported separately. A folder is a mistake the reader can correct by
+	 * dropping its contents instead, so the notice says which one it was; anything else went away
+	 * underneath us.
+	 */
+	private async attachExternalFiles(files: readonly ExternalFile[]): Promise<void> {
+		const paths = await this.session.vaultPaths();
+		const folders: string[] = [];
+		const lost: string[] = [];
+
+		for (const file of files) {
+			const resolution = await resolveExternalFile(paths, file);
+			if (resolution.kind === 'attached') {
+				// The composer may have gone away while this was resolving — the panel can be
+				// closed mid-drop, and `onClose` drops the reference.
+				this.composer?.attach(resolution.attachment);
+				continue;
+			}
+			(resolution.reason === 'directory' ? folders : lost).push(resolution.displayName);
+		}
+
+		if (folders.length > 0) {
+			new Notice(
+				`Cannot attach the folder ${folders.join(', ')} — attach the files inside it.`,
+			);
+		}
+		if (lost.length > 0) {
+			new Notice(`Could not attach ${lost.join(', ')} — that path no longer resolves.`);
 		}
 	}
 
