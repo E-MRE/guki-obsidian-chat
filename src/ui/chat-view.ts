@@ -69,7 +69,9 @@ export class ChatView extends ItemView {
 
 		const footer = root.createDiv({ cls: 'guki-footer' });
 		// Kept as a field now: the Send/Stop swap is driven from the session state.
-		this.composer = new Composer(footer, this, {
+		// `root`, not `footer`, as the second argument: a paste the reader aimed at the panel by
+		// clicking a bubble rather than the textarea still belongs to the composer.
+		this.composer = new Composer(footer, root, this, {
 			onSubmit: (text: string, attachments: readonly Attachment[]) => {
 				this.session.send(text, attachments);
 				return true;

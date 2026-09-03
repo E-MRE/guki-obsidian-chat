@@ -1,5 +1,5 @@
 /**
- * The input row: attachment chips, two attach controls, a textarea and a send button.
+ * The composer: attachment chips, a row of two attach controls, then the textarea and Send.
  *
  * Enter sends, Shift+Enter inserts a newline, and that is the only key behaviour there is — no
  * other shortcut, by closed decision #3. The chat is not a terminal.
@@ -54,6 +54,67 @@ export interface ComposerOptions {
 
 const DEFAULT_PLACEHOLDER = 'Message GuKi… (Enter to send, Shift+Enter for a new line)';
 
+/**
+ * Whether a `paste` dispatched anywhere in the document belongs to this composer.
+ *
+ * A pure function of its five inputs, and exported, for two reasons: it is the only part of the
+ * paste path a headless harness can assert (`docs/offline-checks.ts` §O11), and the version that
+ * lived inline shipped a defect that reached Emre's hands — the one branch 1 below exists to fix.
+ *
+ * **Two branches, and what separates them is how much the target tells you.**
+ *
+ * 1. **The target is anywhere inside the panel** — the textarea, an attach button, a chip, a card,
+ *    or a reply bubble's own `<li>`. Unambiguous: whatever Chromium dispatched this event to,
+ *    selection or focus, is *in our panel*, so nothing else can have wanted it. Claimed with **no**
+ *    further guard, deliberately: `pointerInPanel` and `panelShown` exist to disambiguate a target
+ *    that says nothing about where the reader is, and this target says everything.
+ *
+ *    This branch is the correction, and the measurement behind it is in
+ *    `docs/archive/PHASE6-TASK4-STATE.md` §M7. `paste` is **not** dispatched to the focused
+ *    element when a selection exists — it goes to the node holding the selection anchor. Our
+ *    transcript re-enables `user-select` (styles.css:76, `.guki-message`, because Obsidian's shell
+ *    turns selection off outside editor surfaces and a reply must be copyable), so clicking a
+ *    bubble *does* place a selection and the target is the `<li>` that was clicked. That node is
+ *    inside the panel but is neither inside the composer nor an ancestor of it, so branch 2 alone
+ *    missed the exact gesture it was written for: click a bubble, Cmd+V, nothing happened at all.
+ *
+ * 2. **The target is an ancestor of the composer** — `.guki-root`, `.view-content`,
+ *    `.workspace-leaf-content`, `body`. This is "nothing is focused and there is no selection
+ *    either", which is the case outside the transcript, where `user-select` is still off. Here the
+ *    target tells you nothing about the reader, so both guards apply, and §M5 is why they must:
+ *    Obsidian routes an unfocused paste to the active leaf (`activeLeaf.view.handlePaste`), so
+ *    claiming every unfocused paste while this panel is merely visible would take a note's paste
+ *    away from the note. `pointerInPanel` demands the reader's last click was in the panel;
+ *    `panelShown` closes the stale path where the panel was clicked and then hidden by a keyboard
+ *    tab switch rather than by another click.
+ *
+ * **The guard's semantics do not widen: a target outside the panel is never ours.** Branch 1 is a
+ * subtree test on `panelEl` and is false for every node outside it, guards or no guards. Branch 2
+ * cannot reach one either — a node that contains the composer is by definition on the composer's
+ * own ancestor chain, and every one of those either *is* the panel or contains it; a sibling
+ * subtree (another leaf's editor, a search field, a modal input) contains neither. So a paste aimed
+ * at another note's tab header or at its body still satisfies neither branch and is left entirely
+ * to Obsidian, which is the behaviour Emre confirmed by hand.
+ *
+ * One consequence, made deliberate rather than accidental: **selecting text in a reply bubble and
+ * then pasting is now ours**, and the pasted text lands in the textarea. In a read-only transcript
+ * there is nothing else it could sensibly do, and the alternative is the silent nothing above.
+ */
+export function pasteBelongsToComposer(
+	target: Node,
+	formEl: Node,
+	panelEl: Node,
+	pointerInPanel: boolean,
+	panelShown: boolean,
+): boolean {
+	// `contains` is true of a node itself, which is what makes the textarea and the panel's own
+	// root land in branch 1 rather than falling to branch 2.
+	if (panelEl.contains(target)) {
+		return true;
+	}
+	return target.contains(formEl) && pointerInPanel && panelShown;
+}
+
 export class Composer {
 	private readonly chipsEl: HTMLElement;
 	private readonly inputEl: HTMLTextAreaElement;
@@ -71,9 +132,19 @@ export class Composer {
 	 * composer. Counting them is the standard fix.
 	 */
 	private dragDepth = 0;
+	/**
+	 * Whether the reader's last click landed inside the panel. It is what says an unfocused paste
+	 * was aimed here — see `registerPasteTarget`.
+	 */
+	private pointerInPanel = false;
 
 	constructor(
 		containerEl: HTMLElement,
+		/**
+		 * The whole panel, which is wider than `containerEl` — the composer lives in the footer,
+		 * but a click anywhere in the panel is what makes an unfocused paste this composer's.
+		 */
+		private readonly panelEl: HTMLElement,
 		/** The view, so the key handler is detached with it. */
 		component: Component,
 		private readonly options: ComposerOptions,
@@ -100,7 +171,16 @@ export class Composer {
 			attr: { type: 'file', multiple: 'multiple', tabindex: '-1', 'aria-hidden': 'true' },
 		});
 
-		const row = form.createDiv({ cls: 'guki-composer-row' });
+		/*
+		 * The attach controls, on their own row *above* the textarea rather than beside it.
+		 *
+		 * Emre's preference from task 2's acceptance run, and it pays for itself in the sidebar:
+		 * the two buttons and Send used to share the input row with the textarea, and each button
+		 * is `--input-height` tall (30px) by Obsidian's own button rule and ~34px wide, so a 300px
+		 * panel left the textarea barely half its width. On their own row the textarea gets that
+		 * width back and the buttons cost one 30px row.
+		 */
+		const tools = form.createDiv({ cls: 'guki-composer-tools' });
 
 		/*
 		 * Two attach controls, not one button behind a menu. They are two different actions —
@@ -111,17 +191,19 @@ export class Composer {
 		 * The paperclip is Obsidian's own icon for attaching a file (`editor:attach-file` uses
 		 * `lucide-paperclip`), so the meaning is borrowed rather than invented.
 		 */
-		this.pickEl = row.createEl('button', {
+		this.pickEl = tools.createEl('button', {
 			cls: 'guki-composer-attach',
 			attr: { 'aria-label': 'Attach files from disk' },
 		});
 		setIcon(this.pickEl, 'paperclip');
 
-		this.attachEl = row.createEl('button', {
+		this.attachEl = tools.createEl('button', {
 			cls: 'guki-composer-attach',
 			attr: { 'aria-label': 'Attach the active note' },
 		});
 		setIcon(this.attachEl, 'file-plus');
+
+		const row = form.createDiv({ cls: 'guki-composer-row' });
 
 		this.inputEl = row.createEl('textarea', {
 			cls: 'guki-composer-input',
@@ -179,25 +261,130 @@ export class Composer {
 			this.options.onPickedFiles(this.fileInputEl.files);
 		});
 
-		/*
-		 * Paste, on the textarea rather than the composer: this has to fire for a paste the reader
-		 * aimed at the text they are writing, and that is where the caret is.
-		 *
-		 * A file copied in Finder arrives as `clipboardData.files` (PLAN Phase 6 task 2), which is
-		 * the same payload a drop carries, so it takes the same route. The default is only
-		 * suppressed when the view says it took something — see `onPasted`.
-		 */
-		component.registerDomEvent(this.inputEl, 'paste', (event: ClipboardEvent) => {
+		this.registerPasteTarget(component, form);
+		this.registerDropTarget(component, form);
+		this.renderChips();
+	}
+
+	/**
+	 * Paste handling for the whole panel, not just the textarea.
+	 *
+	 * **Why the document and not an element.** With the listener on the textarea, clicking anywhere
+	 * else in the panel and pressing Cmd+V did nothing at all, with no feedback (Emre, task 3
+	 * acceptance run, step 6). It bites hardest for a screenshot, because pasting a picture is a
+	 * "click the panel, then paste" gesture in a way that pasting a file path never was.
+	 *
+	 * **Where such a paste actually lands is not obvious, and getting it wrong is what §M7 caught.**
+	 * The ownership test and the whole of that reasoning live in `pasteBelongsToComposer` above,
+	 * because the harness asserts it there; this method is only the wiring — a `pointerdown`
+	 * listener that records the last click, and the paste listener that asks the predicate.
+	 *
+	 * (`View.handlePaste` is Obsidian's own hook for this and would be the tidier route, but it is
+	 * **not** in `obsidian.d.ts` — an internal API, so not one to build on. Our own listener sits on
+	 * the document, which bubbles before `window`, so a paste we take is `defaultPrevented` by the
+	 * time Obsidian's handler looks at it and the two can never both act.)
+	 *
+	 * **The decision itself is untouched.** `onPasted` still answers synchronously and still answers
+	 * `false` for an ordinary text paste, because that answer is what calls `preventDefault()` — the
+	 * regression Emre tested by hand in task 2 (step 7, pasting the word "fenerbahçe") and again in
+	 * task 3. What is new is only where an ordinary text paste *goes* when the textarea never had
+	 * focus: into the textarea, at its caret. Dropping it because the caret was elsewhere would be a
+	 * worse bug than the one this listener exists to fix.
+	 */
+	private registerPasteTarget(component: Component, form: HTMLElement): void {
+		// Capture, so a handler that stops propagation on the way up cannot hide the click from
+		// this. It only reads the event.
+		component.registerDomEvent(
+			form.ownerDocument,
+			'pointerdown',
+			(event: PointerEvent) => {
+				const target = event.target;
+				this.pointerInPanel = target instanceof Node && this.panelEl.contains(target);
+			},
+			{ capture: true },
+		);
+
+		component.registerDomEvent(form.ownerDocument, 'paste', (event: ClipboardEvent) => {
 			if (this.blocked !== null) {
 				return;
 			}
+			const target = event.target;
+			if (!(target instanceof Node)) {
+				return;
+			}
+			// `isShown()` (obsidian.d.ts:104) is only read by the ancestor branch; passing it in
+			// eagerly is what keeps the predicate pure, and it is a cheap class check on the element.
+			const ours = pasteBelongsToComposer(
+				target,
+				form,
+				this.panelEl,
+				this.pointerInPanel,
+				this.panelEl.isShown(),
+			);
+			if (!ours) {
+				return;
+			}
+
+			// A file copied in Finder arrives as `clipboardData.files` (PLAN Phase 6 task 2), which
+			// is the same payload a drop carries, so it takes the same route; a clipboard bitmap is
+			// task 3's byte path. Either way the view says whether it took anything.
 			if (this.options.onPasted(event.clipboardData)) {
 				event.preventDefault();
+				// The chips are in the composer now, and the next thing the reader does is type the
+				// question about them.
+				if (!this.inputEl.contains(target)) {
+					this.inputEl.focus();
+				}
+				return;
 			}
-		});
 
-		this.registerDropTarget(component, form);
-		this.renderChips();
+			if (this.inputEl.contains(target)) {
+				// Ordinary text aimed at the caret. The textarea's own default handling is the right
+				// one — native undo, native caret — so nothing is suppressed here.
+				return;
+			}
+
+			const text = event.clipboardData?.getData('text/plain') ?? '';
+			if (text.length === 0) {
+				// Nothing either door claimed and no text either: an image the browser exposes only
+				// as HTML, say. Left to whatever else may be listening.
+				return;
+			}
+			event.preventDefault();
+			this.insertAtCaret(text);
+		});
+	}
+
+	/**
+	 * Inserts text at the textarea's caret and focuses it.
+	 *
+	 * Only reached for a paste that did not originate in the textarea, so there is no native
+	 * insertion to defer to — but the insertion still has to *behave* like one.
+	 *
+	 * **`execCommand('insertText')` is deprecated, and used anyway — Emre's call.** His task 4 run
+	 * hit the reason within a minute: assigning `value` does not enter the textarea's native undo
+	 * stack, so Cmd+Z would not remove the pasted word. `execCommand` is the only API that
+	 * registers an undo entry, it is universally implemented in Chromium, and Obsidian is Electron,
+	 * so the deprecation cannot strand us. It also replaces the current selection the way a native
+	 * paste would, which is why the range maths below is now a fallback rather than the main path.
+	 * Recorded here so the next reader does not "clean it up".
+	 *
+	 * Focus comes **first**: `execCommand` acts on the focused editable element, so an unfocused
+	 * textarea would silently get nothing.
+	 *
+	 * The fallback costs exactly one thing — no undo entry, i.e. the behaviour this replaces — so a
+	 * runtime that has dropped the command degrades to a paste that cannot be undone rather than to
+	 * a paste that vanishes.
+	 */
+	private insertAtCaret(text: string): void {
+		this.inputEl.focus();
+		if (this.inputEl.ownerDocument.execCommand('insertText', false, text)) {
+			return;
+		}
+		const { value, selectionStart, selectionEnd } = this.inputEl;
+		this.inputEl.value = value.slice(0, selectionStart) + text + value.slice(selectionEnd);
+		const caret = selectionStart + text.length;
+		this.inputEl.setSelectionRange(caret, caret);
 	}
 
 	/**

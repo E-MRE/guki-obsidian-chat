@@ -44,6 +44,10 @@
  *     that is not a file. §O8 drives the real `SessionManager` to pin that an image with no typed
  *     text is not silently dropped. §O9 pins the base64 across a chunk boundary. §O10 is the
  *     media-type gate and `onPasted`'s decision table, including that plain text is **not** taken.
+ *     Task 4 adds §O11: **which** paste is the composer's at all, the decision that runs before
+ *     §O10's. It is asserted because the inline version of it shipped a defect — a paste aimed at
+ *     a reply bubble was claimed by neither branch and did nothing — and because the guard on its
+ *     other side is load-bearing: too wide and the panel steals a note's paste.
  * N.  Phase 5b: the permission policy — PLAN §2b's table and the Bash gate, over a real temp vault
  *     with a real symlink out of it, plus the broker end to end. Longer than any other section
  *     because an auto-allow is invisible: it produces no card, so every `allow` branch needs an
@@ -109,6 +113,7 @@ import {
 	triageImageFiles,
 } from '../src/core/attachment-resolver';
 import { absolutePathForFile } from '../src/cli/node-api';
+import { pasteBelongsToComposer } from '../src/ui/composer';
 import { FileSystemAdapter, TFile } from 'obsidian';
 
 let failures = 0;
@@ -4201,6 +4206,155 @@ console.log('O10. the media-type gate, and onPasted\'s decision table');
 	const plain: unknown = JSON.parse(userMessageLine('merhaba'));
 	eq('a text-only message is one text block', contentOf(plain).length, 1);
 	eq('...unchanged from RESEARCH B1', contentOf(plain)[0]?.text, 'merhaba');
+}
+
+console.log('O11. which paste is the composer\'s — the ownership predicate');
+{
+	/*
+	 * `pasteBelongsToComposer` decides, for a `paste` dispatched anywhere in the document, whether
+	 * this panel takes it. It runs *before* §O10's decision table: §O10 says what a claimed paste
+	 * turns into, this says whether it is claimed.
+	 *
+	 * **Why it is asserted, when §S of PHASE6-TASK4-STATE.md argued no assertion was owed.** That
+	 * argument was right about the CSS and wrong here. The inline version of this test had two
+	 * branches — target inside the composer, or target an ancestor of it — and a paste aimed at a
+	 * reply bubble's `<li>` satisfies neither, because a selection in the transcript makes the
+	 * `<li>` itself the event target (§M7, measured in Emre's console). Clicking a bubble and
+	 * pressing Cmd+V therefore did nothing at all: the exact gesture the change existed to fix.
+	 * Row 3 below is that defect. The rows either side of it are the opposite risk — a predicate
+	 * that claims a target outside the panel takes a note's paste away from the note, silently.
+	 *
+	 * **There is no DOM in this harness.** Node has no `document` (checked: `typeof document ===
+	 * 'undefined'`), the project has no jsdom, and `docs/obsidian-stub.mjs` is classes and two
+	 * functions — it has never had a DOM. So the tree below is built out of plain objects with a
+	 * real `contains`, walking real parent links, and cast to `Node` at the boundary. That is the
+	 * same idiom §O10 uses for its `File` stubs, and it is not a weakened test: `contains` is the
+	 * *only* DOM method the predicate calls, and this implementation obeys its actual contract,
+	 * including that a node contains itself. What it cannot prove is the wiring — that the listener
+	 * is on the document and that `event.target` is what is passed in — and that is what the manual
+	 * step 11 is for.
+	 */
+	interface FakeNode {
+		readonly tag: string;
+		parent: FakeNode | null;
+		contains(other: unknown): boolean;
+	}
+
+	const node = (tag: string, children: FakeNode[] = []): FakeNode => {
+		const self: FakeNode = {
+			tag,
+			parent: null,
+			contains(other: unknown): boolean {
+				for (let walk = other as FakeNode | null; walk; walk = walk.parent) {
+					if (walk === self) {
+						return true;
+					}
+				}
+				return false;
+			},
+		};
+		for (const child of children) {
+			child.parent = self;
+		}
+		return self;
+	};
+	const asNode = (fake: FakeNode): Node => fake as unknown as Node;
+
+	/*
+	 * The real shape, from `chat-view.ts:56-74`: `.guki-root` is `panelEl`, `.guki-composer` is the
+	 * form, and the transcript and the footer are siblings inside the panel. The note leaf is a
+	 * *sibling subtree* of the panel — that is the whole point of it being here.
+	 */
+	const textarea = node('textarea');
+	const attachButton = node('button.guki-composer-attach');
+	const tools = node('div.guki-composer-tools', [attachButton]);
+	const form = node('div.guki-composer', [tools, textarea]);
+	const footer = node('div.guki-footer', [form]);
+	const bubbleLi = node('li[dir=auto]');
+	const bubbleBody = node('div.guki-message-body', [bubbleLi]);
+	const bubble = node('div.guki-message', [bubbleBody]);
+	const transcript = node('div.guki-messages-wrap', [bubble]);
+	const panel = node('div.guki-root', [transcript, footer]);
+	const viewContent = node('div.view-content', [panel]);
+	const gukiLeaf = node('div.workspace-leaf-content[guki]', [viewContent]);
+	const noteLi = node('li[dir=auto][note]');
+	const noteEditor = node('div.cm-content', [noteLi]);
+	const noteTab = node('div.workspace-tab-header');
+	const noteLeaf = node('div.workspace-leaf-content[markdown]', [noteEditor, noteTab]);
+	const workspace = node('div.workspace', [gukiLeaf, noteLeaf]);
+	const body = node('body', [workspace]);
+
+	const ours = (target: FakeNode, pointerInPanel: boolean, shown: boolean): boolean =>
+		pasteBelongsToComposer(asNode(target), asNode(form), asNode(panel), pointerInPanel, shown);
+
+	// The tree itself, first — a `contains` that answered "yes" to everything would make every row
+	// below pass. This is the §K lesson: prove the fixture before trusting the assertion.
+	check('the fixture: the panel contains the bubble\'s li', asNode(panel).contains(asNode(bubbleLi)));
+	check('the fixture: the panel does NOT contain the note\'s li', !asNode(panel).contains(asNode(noteLi)));
+	check('the fixture: body contains the composer', asNode(body).contains(asNode(form)));
+	check('the fixture: the note leaf does not contain the composer', !asNode(noteLeaf).contains(asNode(form)));
+
+	// 1. The caret is in the textarea — the ordinary paste, and the `fenerbahçe` path's target.
+	// Guards off, because this branch must not depend on them.
+	eq('1. the textarea is ours', ours(textarea, false, true), true);
+	eq('...and does not need the last click', ours(textarea, false, false), true);
+
+	// 2. Inside the composer but not the textarea: clicking the tools row's empty area, which
+	// Emre's console showed as `PASTE <div class="guki-composer-tools">`.
+	eq('2. an attach button inside the composer is ours', ours(attachButton, false, true), true);
+	eq('...and so is the tools row itself', ours(tools, false, true), true);
+
+	/*
+	 * 3. **The escaped defect.** Clicking the text of a reply bubble puts a selection in it
+	 * (`.guki-message` re-enables `user-select`, styles.css:76) and Chromium dispatches `paste` to
+	 * the selection anchor's node — the `<li>` — not to `document.activeElement`, which was `body`.
+	 * Neither of the old branches matched: the composer does not contain the `<li>`, and the `<li>`
+	 * does not contain the composer. Without this row the fix is unverified.
+	 */
+	eq('3. an li inside a reply bubble is ours', ours(bubbleLi, true, true), true);
+	// Asserted with the guards *off* as well, because the in-panel branch is deliberately
+	// unguarded: a target in the panel says where the reader is, so nothing else has to.
+	eq('...even with no recorded click in the panel', ours(bubbleLi, false, true), true);
+	eq('...and the bubble and the transcript with it', ours(bubble, false, true), true);
+	eq('...including the scroller between bubbles', ours(transcript, false, true), true);
+	// The panel's own root, and the footer: in-panel ancestors of the composer, which the old
+	// version reached only through the guarded branch and this one claims outright.
+	eq('...and blank panel space (the root itself)', ours(panel, false, false), true);
+	eq('...and the footer around the composer', ours(footer, false, false), true);
+
+	// 4. Outside the transcript there is no selection, so the paste goes to `body` — the case the
+	// ancestor branch was written for, and the one Emre's second console line shows.
+	eq('4. body with the last click in the panel is ours', ours(body, true, true), true);
+	eq('...and so is any other ancestor of the composer', ours(viewContent, true, true), true);
+	eq('...and the leaf holding our view', ours(gukiLeaf, true, true), true);
+
+	/*
+	 * 5. **The guard Emre confirmed by hand, and the most important row here.** Obsidian routes an
+	 * unfocused paste to the active leaf (§M5), so clicking another note's tab header and pressing
+	 * Cmd+V puts the text in that note. `body` is an ancestor of our composer too, so without the
+	 * last-click requirement we would claim it. A failure on this row means we are stealing pastes.
+	 */
+	eq('5. body with the last click OUTSIDE the panel is not ours', ours(body, false, true), false);
+	eq('...nor is any other ancestor', ours(viewContent, false, true), false);
+
+	// 6. The stale path: the panel was clicked, then hidden by a keyboard tab switch rather than by
+	// a click somewhere else, so `pointerInPanel` is still true and only `isShown()` knows.
+	eq('6. body with the panel hidden is not ours', ours(body, true, false), false);
+	eq('...and both guards failing is still not ours', ours(body, false, false), false);
+
+	/*
+	 * 7. A different subtree entirely — a note's own `<li>`, its editor, its tab header. Asserted
+	 * with **both guards true**, which is the strongest form: the subtree test alone has to refuse
+	 * it, or the widened branch 1 would have widened the panel's claim to the whole app.
+	 */
+	eq('7. an li in a note is not ours', ours(noteLi, true, true), false);
+	eq('...nor the note\'s editor', ours(noteEditor, true, true), false);
+	eq('...nor another note\'s tab header', ours(noteTab, true, true), false);
+	eq('...nor the leaf that holds them', ours(noteLeaf, true, true), false);
+	// The workspace is an ancestor of the panel *and* of the note leaf, so it is the one node above
+	// the panel that is genuinely ambiguous — and it is exactly what the guards are for.
+	eq('the workspace above both is ours only with the last click here', ours(workspace, true, true), true);
+	eq('...and not without it', ours(workspace, false, true), false);
 }
 
 rmSync(POLICY_VAULT.base, { recursive: true, force: true });

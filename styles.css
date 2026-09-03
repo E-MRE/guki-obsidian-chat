@@ -6,6 +6,24 @@
  * The shell around it is Apple-inspired: bubbles, a card-shaped composer, generous rounding and
  * spacing. Every colour is an Obsidian CSS variable, so light/dark and third-party themes stay
  * readable without a single hardcoded value.
+ *
+ * Three conventions, so the next change does not have to re-derive them:
+ *
+ *  - **One token per pixel step.** Obsidian ships two spacing scales that overlap —
+ *    `--size-2-2` and `--size-4-1` are both 4px — and this file used both for the same 4px.
+ *    The ladder here is 2 / 4 / 6 / 8 / 12 / 16 = `--size-2-1`, `--size-4-1`, `--size-2-3`,
+ *    `--size-4-2`, `--size-4-3`, `--size-4-4`, and nothing else. Reaching for a second token
+ *    for a step that already has one is how the scale stopped being readable.
+ *  - **Rounding is hierarchical.** A container is `--radius-l`, what sits inside it is
+ *    `--radius-m`, and what sits inside that is `--radius-s`. The composer and the bubbles are
+ *    containers; every control inside the composer is one step in.
+ *  - **One layer of separation per surface.** A border *or* a background shift *or* a shadow —
+ *    not all three. The only resting shadows in the panel are on things that are asking for
+ *    something (a pending permission card) or floating over content (the jump button).
+ *
+ * Cursors come from `var(--cursor)` for the same reason colours come from variables: Obsidian
+ * sets it to `default` and a theme may set it to `pointer`, and a hardcoded `pointer` takes that
+ * choice away from the theme just as a hardcoded hex takes the palette away.
  */
 
 .guki-chat-content {
@@ -58,7 +76,7 @@
 .guki-message {
 	display: flex;
 	flex-direction: column;
-	gap: var(--size-2-2);
+	gap: var(--size-4-1);
 	max-width: 85%;
 
 	/* Obsidian's shell turns selection off everywhere outside an editor surface, and our panel is
@@ -85,10 +103,16 @@
 	margin-bottom: 0;
 }
 
+/* Deliberately inline flow rather than a flex row. The horizontal padding matches the bubble's
+   own (`--size-4-3`), so the meta text lines up with the text inside the bubble — at 8px it sat
+   4px outside it on both sides, right-aligned under the user's bubble and left-aligned under the
+   reply. And inline flow is what lets task 5's cost/duration badge arrive as one `<span>` with no
+   layout change: a flex row here would need `justify-content: center` restored for the notice and
+   a `min-width: 0` on its detail `<code>` before it broke even. */
 .guki-message-meta {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-faint);
-	padding: 0 var(--size-4-2);
+	padding: 0 var(--size-4-3);
 }
 
 .guki-message-meta:empty {
@@ -206,7 +230,7 @@
 	display: flex;
 	flex-direction: column;
 	align-items: flex-start;
-	gap: var(--size-2-2);
+	gap: var(--size-4-1);
 	max-width: 100%;
 }
 
@@ -297,7 +321,7 @@
 	background-color: transparent;
 	border: none;
 	border-radius: 0;
-	padding: var(--size-2-2) var(--size-4-2);
+	padding: var(--size-4-1) var(--size-4-2);
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 	cursor: var(--cursor);
@@ -398,7 +422,7 @@
 	padding: var(--size-4-2);
 	display: flex;
 	flex-direction: column;
-	gap: var(--size-2-2);
+	gap: var(--size-4-1);
 }
 
 .guki-tool-diffstat {
@@ -469,7 +493,7 @@
 
 .guki-diff-line {
 	display: flex;
-	gap: var(--size-2-2);
+	gap: var(--size-4-1);
 	font-family: var(--font-monospace);
 	font-size: var(--font-smallest);
 	line-height: var(--line-height-tight);
@@ -542,7 +566,7 @@
 	display: flex;
 	align-items: center;
 	gap: var(--size-2-3);
-	padding: var(--size-2-2) var(--size-4-2);
+	padding: var(--size-4-1) var(--size-4-2);
 	border-bottom: 1px solid var(--background-modifier-border);
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
@@ -586,7 +610,7 @@
 	padding: var(--size-4-2);
 	display: flex;
 	flex-direction: column;
-	gap: var(--size-2-2);
+	gap: var(--size-4-1);
 }
 
 /* The file being written to. The tool card drops this line because its header already prints the
@@ -650,7 +674,7 @@
 	padding: var(--size-4-1) var(--size-4-3);
 	font-weight: var(--font-medium);
 	box-shadow: none;
-	cursor: pointer;
+	cursor: var(--cursor);
 }
 
 .guki-perm-allow {
@@ -679,7 +703,7 @@
 }
 
 .guki-perm-status {
-	padding: var(--size-2-2) var(--size-4-2);
+	padding: var(--size-4-1) var(--size-4-2);
 	font-size: var(--font-ui-smaller);
 	color: var(--text-faint);
 }
@@ -709,7 +733,7 @@
 	left: 50%;
 	transform: translateX(-50%);
 	z-index: 1;
-	padding: var(--size-2-2) var(--size-4-3);
+	padding: var(--size-4-1) var(--size-4-3);
 	border-radius: var(--radius-l);
 	font-size: var(--font-ui-smaller);
 	background-color: var(--background-secondary-alt);
@@ -749,9 +773,14 @@
 	border-radius: var(--radius-m);
 }
 
+/* A notice's detail is a spawn error or a binary path, so it has long unbroken runs in it.
+   `pre-wrap` alone only breaks at whitespace, and one path with none would have pushed the
+   scroller into a horizontal scrollbar in the sidebar — `overflow-y: auto` on `.guki-messages`
+   makes its `overflow-x` computed `auto` too. Same treatment `.guki-message-body` already has. */
 .guki-message-notice .guki-message-meta code {
 	font-size: var(--font-smallest);
 	white-space: pre-wrap;
+	overflow-wrap: anywhere;
 }
 
 /* Error: applied to assistant turns and notices alike. */
@@ -771,8 +800,14 @@
 	flex: 0 0 auto;
 }
 
-/* A column now: the attachment chips sit above the input row. The row below keeps the layout the
-   composer had before chips existed, so the narrow-pane overrides still apply to this element. */
+/* A column of three: the attachment chips, the two attach controls, then the textarea and Send.
+   Every gap between them is this element's own `gap`, which is what keeps the chips and the tools
+   row the same distance from the textarea in both panes.
+
+   One layer of separation, not three: this had a `--shadow-s` on top of the border and the
+   background shift, which is the usual cause of a busy panel — and it put the only resting shadow
+   in the panel on a surface that is not asking for anything. The pending permission card keeps
+   its shadow, and now it is the one thing that has one. */
 .guki-composer {
 	display: flex;
 	flex-direction: column;
@@ -781,7 +816,6 @@
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-l);
 	background-color: var(--background-primary-alt);
-	box-shadow: var(--shadow-s);
 	transition: border-color 120ms ease-in-out;
 }
 
@@ -794,6 +828,19 @@
 .guki-composer.guki-composer-dragover {
 	border-color: var(--interactive-accent);
 	background-color: var(--background-modifier-hover);
+}
+
+/* The two attach controls, on their own row above the textarea (Emre's preference, task 2's
+   acceptance run). No narrow override, and it needs none: the row holds two ~34px buttons, so it
+   fits a 300px sidebar with room to spare, and the composer's own column gap is what separates it
+   from the textarea — the same gap the chips already use, in both panes.
+
+   Left-aligned deliberately: the button's 8px padding puts its glyph at the same x as the
+   textarea's own text, which sits behind `.guki-composer-input`'s 8px horizontal padding. */
+.guki-composer-tools {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-1);
 }
 
 .guki-composer-row {
@@ -833,13 +880,23 @@
 	color: var(--text-faint);
 }
 
+/* A chip renders two ways and both have to put the same-sized glyph in the same slot. `setIcon`
+   emits an SVG at Obsidian's default `--icon-size`, which is `--icon-m` — 18px, measured in
+   `app.css` 1.13.7 — while the thumbnail was 16px, so a file chip and an image chip sitting next
+   to each other started their name at different x and were a pixel apart in height. The tool and
+   permission card icons are already pinned to `--icon-s`; this makes it all four. */
+.guki-composer-chip-icon .svg-icon {
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
 /* A thumbnail in the icon's slot, at the icon's size. The clipboard calls every screenshot
    `image.png`, so the picture is the only thing that tells two pasted images apart — `cover` keeps
    it square and legible rather than letterboxed into a strip. */
 .guki-composer-chip-thumb {
 	flex: 0 0 auto;
-	width: var(--size-4-4);
-	height: var(--size-4-4);
+	width: var(--icon-s);
+	height: var(--icon-s);
 	object-fit: cover;
 	border-radius: var(--radius-s);
 	background-color: var(--background-modifier-border);
@@ -861,13 +918,23 @@
 	justify-content: center;
 	flex: 0 0 auto;
 	padding: 0;
-	width: var(--size-4-4);
-	height: var(--size-4-4);
+	/* The same slot the leading glyph and the thumbnail occupy, so the chip is icon / name / icon
+	   and its height does not depend on which of the two chip kinds it is. */
+	width: var(--icon-s);
+	height: var(--icon-s);
 	border: none;
 	box-shadow: none;
 	background-color: transparent;
 	color: var(--text-faint);
-	cursor: pointer;
+	cursor: var(--cursor);
+}
+
+/* `--icon-xs`, inside a 16px box: the default 18px SVG overflowed its own button by a pixel on
+   each side, and removing a chip is the secondary action on it — the leading glyph is what the
+   reader identifies the chip by. */
+.guki-composer-chip-remove .svg-icon {
+	width: var(--icon-xs);
+	height: var(--icon-xs);
 }
 
 .guki-composer-chip-remove:hover {
@@ -887,7 +954,7 @@
 	background-color: transparent;
 	color: var(--text-muted);
 	border-radius: var(--radius-m);
-	cursor: pointer;
+	cursor: var(--cursor);
 }
 
 .guki-composer-attach:hover {
@@ -938,15 +1005,17 @@
 	color: var(--text-faint);
 }
 
+/* `--radius-m`, not `--radius-l`: rounding is hierarchical, and `--radius-l` is the composer's own
+   radius. Every control inside it — chip, attach, Send — is one step in. */
 .guki-composer-send {
 	flex: 0 0 auto;
-	border-radius: var(--radius-l);
+	border-radius: var(--radius-m);
 	padding: var(--size-4-2) var(--size-4-4);
 	background-color: var(--interactive-accent);
 	color: var(--text-on-accent);
 	font-weight: var(--font-medium);
 	box-shadow: none;
-	cursor: pointer;
+	cursor: var(--cursor);
 }
 
 .guki-composer-send:hover {
@@ -964,6 +1033,16 @@
 .guki-composer-send.guki-composer-stop:hover {
 	background-color: var(--background-modifier-border-hover);
 	color: var(--text-normal);
+}
+
+/* Blocked: the approval gate is not running, the button is genuinely `disabled`, and it must stop
+   looking pressable. Obsidian styles no plain `button:disabled` at all — measured in `app.css`
+   1.13.7, where only `select`/`.dropdown` get one — so the accent background is ours to undo, and
+   without this the one state the panel must never be quiet about looked exactly like Send. */
+.guki-composer-send.guki-composer-blocked {
+	background-color: var(--background-modifier-border);
+	color: var(--text-faint);
+	cursor: default;
 }
 
 /* --- narrow panel ------------------------------------------------------- */
@@ -995,12 +1074,11 @@
 	padding: var(--size-4-2) var(--size-4-2);
 }
 
-/* Two icon buttons and a Send in a 300px sidebar leave the textarea very little: the buttons give
-   up their horizontal padding first, since their icon is the target and the text is what suffers
-   from being squeezed. The textarea already has `min-width: 0`, so it takes what is left. */
-.guki-root.guki-narrow .guki-composer-attach {
-	padding: var(--size-4-2) var(--size-4-1);
-}
+/* The attach buttons used to give up their horizontal padding here, because two icon buttons and a
+   Send in a 300px sidebar left the textarea very little. They no longer share that row with the
+   textarea (`.guki-composer-tools`), so the squeeze is gone and the override with it — keeping it
+   would only pull the icons 4px in from the textarea's text edge, and only in the sidebar, which is
+   how every styling defect in this project has looked. */
 
 /* The diff goes vertical in the sidebar (PLAN Phase 4.3). Two panes side by side in a 400px pane
    leaves ~20 characters per line, which turns every line of code into a wrapped paragraph. */
