@@ -9,9 +9,12 @@ import {
 	activeVaultFile,
 	droppedVaultFiles,
 	externalFilePaths,
+	readImageAttachment,
 	resolveExternalFile,
 	resolveVaultFile,
+	triageImageFiles,
 	type ExternalFile,
+	type ImageTriage,
 } from '../core/attachment-resolver';
 import type { Attachment } from '../core/attachments';
 import type { SessionManager } from '../core/session-manager';
@@ -89,10 +92,18 @@ export class ChatView extends ItemView {
 					void this.attachExternalFiles(external);
 					return;
 				}
+				// Files with no path: an image dragged out of a web page, which has no file behind
+				// it. Rarer than it looks — a screenshot dragged from macOS's bottom-right
+				// thumbnail is a real file in `/private/var/…` and went through the branch above.
+				const triage = triageImageFiles(dataTransfer?.files);
+				if (triage.images.length > 0 || triage.unsupported.length > 0) {
+					void this.attachImages(triage);
+					return;
+				}
 				if ((dataTransfer?.files.length ?? 0) > 0) {
-					// There were files, but none had a path: a dragged clipboard image. That is
-					// PLAN Phase 6 task 3, so it is left alone rather than given a notice that
-					// task 3 would delete.
+					// There were files, but no path and not an image either — so neither door
+					// claims them. Left silent, which is what task 2 did with every path-less
+					// `File`: the notice below would say "no file" and there plainly was one.
 					return;
 				}
 				// Dragging a tab header lands here, and so does dragged text or a link — there is
@@ -101,14 +112,30 @@ export class ChatView extends ItemView {
 			},
 			// Returns whether the paste was taken, which is what suppresses the textarea's own
 			// handling. A file copied in Finder arrives exactly as a dropped one does.
+			/*
+			 * **The return value is the whole subtlety here.** It is what calls
+			 * `preventDefault()`, so it has to be synchronous, and it has to be `false` for an
+			 * ordinary text paste or the textarea stops receiving typed-in text — a regression
+			 * Emre tested by hand in task 2 (step 7, pasting the word "fenerbahçe").
+			 *
+			 * Both doors are consulted, and both payloads can arrive in one paste, so neither
+			 * `return`s early: a file copied in Finder is a path chip, a clipboard bitmap is bytes.
+			 * Plain text produces no `files` at all and falls through to `false`.
+			 */
 			onPasted: (clipboardData: DataTransfer | null): boolean => {
 				const external = externalFilePaths(clipboardData?.files);
-				if (external.length === 0) {
-					// Ordinary text, or a clipboard image with no path (task 3). Either way this
-					// paste is not ours, and the textarea must still get it.
+				const triage = triageImageFiles(clipboardData?.files);
+				const takingImages = triage.images.length > 0 || triage.unsupported.length > 0;
+				if (external.length === 0 && !takingImages) {
+					// Ordinary text. This paste is not ours and the textarea must still get it.
 					return false;
 				}
-				void this.attachExternalFiles(external);
+				if (external.length > 0) {
+					void this.attachExternalFiles(external);
+				}
+				if (takingImages) {
+					void this.attachImages(triage);
+				}
 				return true;
 			},
 			onAttachActiveNote: () => {
@@ -244,6 +271,46 @@ export class ChatView extends ItemView {
 		}
 		if (lost.length > 0) {
 			new Notice(`Could not attach ${lost.join(', ')} — that path no longer resolves.`);
+		}
+	}
+
+	/**
+	 * The third door: `File`s that have no path, which is a bitmap living only in the clipboard.
+	 *
+	 * **Nothing here goes near the permission policy, and that is not an omission.** A path chip
+	 * makes the model call `Read`, which is what PLAN §2b gates; bytes are handed straight to the
+	 * model with no tool call at all, so there is nothing for a card to authorise. This is also why
+	 * it must stay scoped to images — a general "send any file as bytes" route would be a fifth
+	 * silent bypass of the whole of Phase 5b.
+	 *
+	 * Refusals are reported, unlike task 2's silent pass-over of a path-less `File`: by the time we
+	 * are here the reader has deliberately pasted a picture, and the alternative to a notice is a
+	 * turn that costs money and comes back with the model saying it could not see it (§M3).
+	 */
+	private async attachImages(triage: ImageTriage): Promise<void> {
+		const unreadable: string[] = [];
+
+		for (const file of triage.images) {
+			const attachment = await readImageAttachment(file);
+			if (!attachment) {
+				unreadable.push(file.name);
+				continue;
+			}
+			// The composer may have gone away while the bytes were being read — the panel can be
+			// closed mid-paste, and `onClose` drops the reference.
+			this.composer?.attach(attachment);
+		}
+
+		if (triage.unsupported.length > 0) {
+			const named = triage.unsupported
+				.map((image) => `${image.displayName} (${image.mediaType})`)
+				.join(', ');
+			new Notice(
+				`Cannot attach ${named} — only PNG, JPEG, GIF and WebP images can be sent.`,
+			);
+		}
+		if (unreadable.length > 0) {
+			new Notice(`Could not read ${unreadable.join(', ')} — the image data was unavailable.`);
 		}
 	}
 

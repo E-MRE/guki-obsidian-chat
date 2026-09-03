@@ -108,6 +108,34 @@
 	border-bottom-right-radius: var(--radius-s);
 }
 
+/* An image-only message has no text at all, and an empty accent pill above the picture reads as a
+   rendering fault. The images carry the bubble in that case. */
+.guki-message-user .guki-message-body:empty {
+	display: none;
+}
+
+/* Pasted images, above the text they were asked about — the same order as the composer's chips.
+   `flex-end` to match the user bubble's own alignment; wrapping so several images stack in a narrow
+   sidebar instead of forcing a horizontal scroll. */
+.guki-message-images {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: var(--size-4-1);
+}
+
+/* Bounded in both axes: a full-display screenshot is thousands of pixels wide and would otherwise
+   set the bubble's width. `max-width: 100%` keeps it inside the 85% bubble in the narrow pane,
+   where the pixel cap alone would not. */
+.guki-message-image {
+	max-width: 100%;
+	max-height: 220px;
+	width: auto;
+	height: auto;
+	border-radius: var(--radius-m);
+	border: 1px solid var(--background-modifier-border);
+}
+
 /* Obsidian's selection highlight is accent-tinted, and so is this bubble — so a selection inside
    the user's own message was invisible and only the cursor shape gave it away (Emre, Phase 4
    acceptance run). The reply bubbles sit on a neutral background and never had the problem.
@@ -803,6 +831,18 @@
 	display: flex;
 	flex: 0 0 auto;
 	color: var(--text-faint);
+}
+
+/* A thumbnail in the icon's slot, at the icon's size. The clipboard calls every screenshot
+   `image.png`, so the picture is the only thing that tells two pasted images apart — `cover` keeps
+   it square and legible rather than letterboxed into a strip. */
+.guki-composer-chip-thumb {
+	flex: 0 0 auto;
+	width: var(--size-4-4);
+	height: var(--size-4-4);
+	object-fit: cover;
+	border-radius: var(--radius-s);
+	background-color: var(--background-modifier-border);
 }
 
 /* The name is what gets ellipsised; the icon and the remove button keep their size. The full path

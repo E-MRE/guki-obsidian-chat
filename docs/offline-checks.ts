@@ -38,6 +38,12 @@
  *     Task 2 adds the other direction: a file that arrived from *outside* Obsidian is placed by
  *     where it resolves, so the same door produces an `@` for a vault file and a plain path for
  *     anything else (§O5), and a `File` is turned into a path by feature detection (§O6).
+ *     Task 3 adds the one attachment that is **not** a path: a pasted clipboard image, sent as
+ *     bytes. §O7 pins that it contributes no text to the prompt at all — an invented path would
+ *     reach `attachmentReference`'s `location` check and could come back as an `@` for something
+ *     that is not a file. §O8 drives the real `SessionManager` to pin that an image with no typed
+ *     text is not silently dropped. §O9 pins the base64 across a chunk boundary. §O10 is the
+ *     media-type gate and `onPasted`'s decision table, including that plain text is **not** taken.
  * N.  Phase 5b: the permission policy — PLAN §2b's table and the Bash gate, over a real temp vault
  *     with a real symlink out of it, plus the broker end to end. Longer than any other section
  *     because an auto-allow is invisible: it produces no card, so every `allow` branch needs an
@@ -65,6 +71,7 @@ import {
 	isSystemInitEvent,
 	mcpServerStatus,
 	parseStreamJsonLine,
+	userMessageLine,
 	type ResultEvent,
 	type StreamJsonEvent,
 	type SystemInitEvent,
@@ -79,16 +86,27 @@ import { tokenizeCommand } from '../src/core/bash-whitelist';
 import { createVaultPaths } from '../src/core/vault-path-resolver';
 import {
 	addAttachment,
+	attachmentKey,
 	attachmentReference,
 	composeMessage,
+	encodeBase64,
 	hasSendableContent,
+	imageAttachments,
+	imageDataUrl,
+	imageSummary,
+	isImageMediaType,
+	promptReference,
 	type Attachment,
 	type AttachmentLocation,
+	type ImageAttachment,
+	type PathAttachment,
 } from '../src/core/attachments';
 import {
 	externalFilePaths,
+	readImageAttachment,
 	resolveExternalFile,
 	resolveVaultFile,
+	triageImageFiles,
 } from '../src/core/attachment-resolver';
 import { absolutePathForFile } from '../src/cli/node-api';
 import { FileSystemAdapter, TFile } from 'obsidian';
@@ -3395,7 +3413,8 @@ console.log('O1. attachmentReference: the @-form, and when there must not be one
 	];
 
 	for (const c of cases) {
-		const attachment: Attachment = {
+		const attachment: PathAttachment = {
+			kind: 'path',
 			absolutePath: c.path,
 			displayName: 'x',
 			location: c.location,
@@ -3406,6 +3425,7 @@ console.log('O1. attachmentReference: the @-form, and when there must not be one
 	// Stated once as its own assertion rather than left implicit in the table: no reference for an
 	// out-of-vault path may begin with `@`.
 	const outside = attachmentReference({
+		kind: 'path',
 		absolutePath: '/etc/hosts',
 		displayName: 'hosts',
 		location: 'outside-vault',
@@ -3443,7 +3463,8 @@ console.log('O2. composeMessage: an in-vault path reaches the CLI only as an @-f
 	}
 
 	const spaced = '/vault/\u{1F3F0} 300-Projects/Sellina.md';
-	const inVault = (path: string): Attachment => ({
+	const inVault = (path: string): PathAttachment => ({
+		kind: 'path',
 		absolutePath: path,
 		displayName: 'n.md',
 		location: 'in-vault',
@@ -3556,7 +3577,8 @@ console.log('O3. resolveVaultFile: only a path that resolves inside the vault be
 
 console.log('O4. the chip list');
 {
-	const chip = (path: string): Attachment => ({
+	const chip = (path: string): PathAttachment => ({
+		kind: 'path',
 		absolutePath: path,
 		displayName: 'n.md',
 		location: 'in-vault',
@@ -3711,7 +3733,7 @@ console.log('O5. resolveExternalFile: the location comes from the path, never fr
 		{ name: 'task2-outside.txt', path: outsideFile },
 	] as unknown as ArrayLike<File>);
 	eq('both files came through with paths', files.length, 2);
-	const attachments: Attachment[] = [];
+	const attachments: PathAttachment[] = [];
 	for (const file of files) {
 		const resolution = await resolveExternalFile(vaultPaths, file);
 		if (resolution.kind === 'attached') {
@@ -3778,6 +3800,407 @@ console.log('O6. absolutePathForFile: feature detection, and the no-path branch 
 	eq('...and the display name comes off the File', mixed[0]?.displayName, 'a.pdf');
 	eq('no FileList at all is no files', externalFilePaths(null).length, 0);
 	eq('an empty FileList is no files', externalFilePaths([] as unknown as ArrayLike<File>).length, 0);
+}
+
+/*
+ * §O7–O10 are task 3: the pasted clipboard image, the one attachment that sends **bytes**.
+ *
+ * Everything above holds a path, and the assertions above are about which *syntax* that path
+ * reaches the CLI as. An image has no path at all, and the failure modes are different in kind:
+ *
+ * - it must never contribute text to the prompt. A fake path — `''`, a `blob:` URL, a temp file —
+ *   would flow through `composeMessage` into the message body and through `attachmentReference`'s
+ *   `location` check, where a bitmap would be classified as in-vault or out-of-vault. One of those
+ *   is an `@`. Nothing errors (§O7);
+ * - an image with no typed text composes to the empty string, and `SessionManager.send`'s emptiness
+ *   test used to drop exactly that message with no bubble, no error and no notice (§O8);
+ * - the base64 has to be right, and eyeballing a screenshot proves nothing (§O9);
+ * - the media type is a gate, because bytes the pipeline cannot decode come back
+ *   `subtype: "success"` — a billed turn with the model apologising, and no error state anywhere
+ *   (measured, PHASE6-TASK3-STATE M3). §O10.
+ */
+
+console.log('O7. an image attachment contributes NO text to the prompt');
+{
+	const image = (id: string, data = 'aGk='): ImageAttachment => ({
+		kind: 'image',
+		id,
+		displayName: 'Pasted image',
+		mediaType: 'image/png',
+		data,
+		byteLength: 2,
+	});
+	const inVault: PathAttachment = {
+		kind: 'path',
+		absolutePath: `${POLICY_VAULT.root}/notes/todo.md`,
+		displayName: 'todo.md',
+		location: 'in-vault',
+	};
+
+	// The exhaustive dispatcher: this is where the compiler asks every kind what it puts in the
+	// prompt, and for an image the answer is nothing, because it travels in its own content block.
+	eq('promptReference of an image is null', promptReference(image('image-1')), null);
+	eq('promptReference of a path is the reference', promptReference(inVault), `@"${inVault.absolutePath}"`);
+
+	// The acceptance-shaped statement of the same thing.
+	eq('an image alone composes to the empty string', composeMessage('', [image('image-1')]), '');
+	eq('...and with text, to exactly the text', composeMessage('what is this?', [image('image-1')]), 'what is this?');
+
+	/*
+	 * The catastrophic direction, stated so it cannot be reintroduced quietly. A bytes attachment
+	 * that carried an invented path would put that path in the prompt as free-standing text, and a
+	 * bytes attachment that carried a `location` would take the `@` branch.
+	 */
+	const mixed = composeMessage('compare these', [image('image-1'), inVault, image('image-2')]);
+	eq(
+		'two images beside a path chip leave only the path in the message',
+		mixed,
+		`@"${inVault.absolutePath}"\n\ncompare these`,
+	);
+	check('no image id leaks into the prompt', !mixed.includes('image-1') && !mixed.includes('image-2'), mixed);
+	check('no base64 leaks into the prompt', !mixed.includes('aGk='), mixed);
+	check('no data: URL leaks into the prompt', !mixed.includes('data:'), mixed);
+	// The one that has no visible symptom: an `@` for something that is not a file at all.
+	check('an image never produces an @', !composeMessage('', [image('image-1')]).includes('@'), mixed);
+
+	// Identity. A path chip is keyed by its path, an image by its generated id — the clipboard calls
+	// every screenshot `image.png`, so two pastes must be two chips and not one.
+	eq('an image is keyed by its id', attachmentKey(image('image-7')), 'image-7');
+	eq('a path is keyed by its path', attachmentKey(inVault), inVault.absolutePath);
+	eq('the same image id twice is one chip', addAttachment([image('image-1')], image('image-1')).length, 1);
+	eq(
+		'two pasted images with identical bytes are two chips',
+		addAttachment([image('image-1')], image('image-2')).length,
+		2,
+	);
+	// A path chip and an image chip cannot collide even if the ids were to look like paths.
+	eq('a path and an image coexist', addAttachment([inVault], image('image-1')).length, 2);
+
+	// The split the wire is built from.
+	eq('imageAttachments picks only the images', imageAttachments([image('image-1'), inVault, image('image-2')]).length, 2);
+	eq('...in order', imageAttachments([image('image-3'), inVault, image('image-4')]).map((i) => i.id).join(','), 'image-3,image-4');
+	eq('a chip list with no images yields none', imageAttachments([inVault]).length, 0);
+}
+
+console.log('O8. an image with no typed text is a sendable message, and is not dropped');
+{
+	/*
+	 * **The bug this section exists for.** `SessionManager.send` tested `message.length === 0` and
+	 * returned. An image contributes nothing to `message`, so an image with no typed text hit that
+	 * branch: the composer cleared, no user bubble appeared, no assistant turn started, and nothing
+	 * anywhere said why. `hasSendableContent` already answered `true` for the same input, so the
+	 * composer let Send be pressed — the two disagreed and this was the one that lied.
+	 *
+	 * Driven through the real `SessionManager` with `ensureProcess` and the process stubbed, the
+	 * way §C drives the queue, so it is the production emptiness test under assertion and not a
+	 * re-implementation of it.
+	 */
+	const image: ImageAttachment = {
+		kind: 'image',
+		id: 'image-send-1',
+		displayName: 'Pasted image',
+		mediaType: 'image/png',
+		data: 'aVZCT1J3MEs=',
+		byteLength: 8,
+	};
+
+	const written: string[] = [];
+	const session = new SessionManager({ vault: { adapter: {} } } as never);
+	const internals = session as unknown as {
+		ensureProcess: () => Promise<boolean>;
+		process: { alive: boolean; write: (line: string) => boolean; stop: () => void } | null;
+	};
+	internals.ensureProcess = () => Promise.resolve(true);
+	internals.process = {
+		alive: true,
+		write: (line: string) => {
+			written.push(line);
+			return true;
+		},
+		stop: () => undefined,
+	};
+
+	// The composer's own gate already says this is sendable; that half was never wrong.
+	eq('an image with no text is sendable content', hasSendableContent('', [image]), true);
+
+	session.send('', [image]);
+	await Promise.resolve();
+	await Promise.resolve();
+
+	const userItems = session.state.items.filter((item) => item.kind === 'user');
+	eq('an image with no typed text produces a user message', userItems.length, 1);
+	eq('...an assistant turn was started for it', session.state.items.filter((i) => i.kind === 'assistant').length, 1);
+	eq('...and it reached the CLI', written.length, 1);
+
+	// The transcript keeps the picture, because the panel shows what was actually sent and an
+	// image-only bubble would otherwise be empty.
+	const userItem = userItems[0];
+	eq('the bubble carries the image', userItem?.kind === 'user' && (userItem.images?.length ?? 0), 1);
+	eq('...with no text', userItem?.kind === 'user' && userItem.text, '');
+
+	/*
+	 * And the wire payload really is an image block with no text block beside it (M4).
+	 *
+	 * Deliberately **not** `required(written[0], …)`: reverting the emptiness test is the whole
+	 * point of this section, and that revert leaves `written` empty. `required` throws, which would
+	 * kill the run before its summary line — a reversion that crashes the harness is
+	 * indistinguishable from one that never ran, and it reads as a pass. The sentinel turns it into
+	 * two reported failures instead.
+	 */
+	const line = written[0] ?? '';
+	const content: { type: string }[] =
+		line.length > 0 ? (JSON.parse(line) as { message: { content: { type: string }[] } }).message.content : [];
+	eq('one content block', content.length, 1);
+	eq('...and it is the image', content[0]?.type, 'image');
+
+	session.dispose();
+}
+
+console.log('O9. base64: pinned against a known sequence, and across a chunk boundary');
+{
+	/*
+	 * The encoder is chunked because `btoa(String.fromCharCode(...bytes))` overflows the call stack
+	 * on anything screenshot-sized. Chunking is only correct while the chunk is a multiple of 3 —
+	 * base64 maps 3 input bytes onto 4 output characters, so a boundary anywhere else would emit
+	 * padding in the middle of the string. That is silent: the prefix decodes, the rest is garbage,
+	 * and the model reports that it could not see the picture.
+	 *
+	 * So the interesting fixture is one **longer than the chunk**, compared against Node's own
+	 * encoder rather than against a hand-written expectation.
+	 */
+	eq('empty input encodes to nothing', encodeBase64(new Uint8Array(0)), '');
+	eq('a known sequence', encodeBase64(new Uint8Array([104, 105])), 'aGk=');
+	// The PNG magic number, which is what every pasted screenshot actually starts with.
+	eq(
+		'the PNG signature',
+		encodeBase64(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+		'iVBORw0KGgo=',
+	);
+	// Each of the three residue classes mod 3, so both padding cases are covered.
+	for (const length of [1, 2, 3, 4, 5]) {
+		const bytes = new Uint8Array(length);
+		for (let i = 0; i < length; i += 1) bytes[i] = (i * 37 + 11) & 0xff;
+		eq(`${String(length)} byte(s) match Buffer`, encodeBase64(bytes), Buffer.from(bytes).toString('base64'));
+	}
+
+	/*
+	 * Longer than one chunk (32,766 bytes) and deliberately not a multiple of it, so the last chunk
+	 * is short and the boundary is really crossed. This is the assertion that fails if the chunk
+	 * size stops being divisible by 3.
+	 *
+	 * **Sized like a real screenshot, not like a threshold.** The first version of this fixture was
+	 * 66 KB, and the sweep caught it: reverting the encoder to
+	 * `btoa(String.fromCharCode(...bytes))` — the exact trap chunking exists to avoid — left the
+	 * suite GREEN, because 66,766 arguments do not overflow V8's stack. A fixture tuned to sit just
+	 * past the real limit would rot the moment a stack size changes, so this uses the input size
+	 * the code actually sees instead: a full-display retina PNG. Task 2's measured clipboard paste
+	 * was 27,878 bytes and the screenshots on this machine run 240–526 KB (M2), so 3 MiB is a
+	 * generous but honest stand-in, and it overflows the spread form comfortably.
+	 */
+	const big = new Uint8Array(3 * 1024 * 1024 + 1234);
+	for (let i = 0; i < big.length; i += 1) big[i] = (i * 31 + 7) & 0xff;
+	/*
+	 * `eqCall`, not `eq`, and for the reason `eqCall` exists. The failure this guards against is
+	 * `btoa(String.fromCharCode(...bytes))`, which does not return a wrong answer — it **throws**
+	 * a stack overflow. Evaluated as an argument to `eq` that throw would escape, kill the run
+	 * before its summary line, and read as a check that never ran.
+	 */
+	eqCall('a multi-chunk buffer matches Buffer exactly', () => encodeBase64(big), Buffer.from(big).toString('base64'));
+	// Stated separately, because it is the specific way a wrong chunk size fails: padding may only
+	// ever appear as one or two characters at the very end. Interior `=` means a chunk boundary
+	// landed off a multiple of 3, and everything after it decodes to garbage — silently.
+	let encoded = '';
+	try {
+		encoded = encodeBase64(big);
+	} catch {
+		// Reported by the assertion below rather than taking the run down with it.
+	}
+	check('...with padding only at the very end', /^[A-Za-z0-9+/]+={0,2}$/.test(encoded), encoded.slice(0, 40));
+
+	// The data URL the chip and the bubble render from, and the tooltip that tells two apart.
+	const shot: ImageAttachment = {
+		kind: 'image',
+		id: 'image-1',
+		displayName: 'Pasted image',
+		mediaType: 'image/png',
+		data: 'iVBORw0KGgo=',
+		byteLength: 27_878,
+	};
+	eq('the data URL carries the media type', imageDataUrl(shot), 'data:image/png;base64,iVBORw0KGgo=');
+	eq('the tooltip names the format and size', imageSummary(shot), 'Pasted image — PNG, 27 KB');
+}
+
+console.log('O10. the media-type gate, and onPasted\'s decision table');
+{
+	/*
+	 * Which formats, and why there is a gate at all when PLAN says "no supported-format list of our
+	 * own". That sentence is about the path case, where `Read` decides what it can open. Here we
+	 * build the block, so we make the claim.
+	 *
+	 * Measured 2026-09-02 (M3), and it is the reason this is not merely tidiness: bytes the
+	 * pipeline cannot decode return `subtype: "success"`, `is_error: false`, as an ordinary
+	 * assistant bubble in which the model says it could not see the image. No error state, no red,
+	 * a real API charge. In all three refusals the model named exactly PNG / JPEG / GIF / WebP.
+	 */
+	eq('png is accepted', isImageMediaType('image/png'), true);
+	eq('jpeg is accepted', isImageMediaType('image/jpeg'), true);
+	eq('gif is accepted', isImageMediaType('image/gif'), true);
+	eq('webp is accepted', isImageMediaType('image/webp'), true);
+	// The one a web-page drag really produces, and the one that would come back as a polite
+	// non-answer rather than an error.
+	eq('svg is refused', isImageMediaType('image/svg+xml'), false);
+	eq('heic is refused', isImageMediaType('image/heic'), false);
+	eq('tiff is refused', isImageMediaType('image/tiff'), false);
+	eq('bmp is refused', isImageMediaType('image/bmp'), false);
+	eq('an empty type is refused', isImageMediaType(''), false);
+	eq('a non-image type is refused', isImageMediaType('application/pdf'), false);
+	// Case matters: the list is compared exactly, so a would-be `IMAGE/PNG` is not silently taken.
+	eq('the comparison is exact', isImageMediaType('IMAGE/PNG'), false);
+
+	/*
+	 * `triageImageFiles` — the synchronous half, which is what `onPasted` answers from.
+	 *
+	 * `absolutePathForFile` answers `null` for every `File` in this harness that has no `path`
+	 * property (there is no `electron` module here, §O6), so a fixture with a `path` is the
+	 * "file copied in Finder" case and one without is the "clipboard bitmap" case.
+	 */
+	const asFiles = (shapes: Record<string, unknown>[]): ArrayLike<File> => shapes as unknown as ArrayLike<File>;
+
+	// 1. Plain text: no files at all, so nothing is taken and the textarea keeps the paste.
+	const nothing = triageImageFiles(asFiles([]));
+	eq('an empty list yields no images', nothing.images.length, 0);
+	eq('...and no refusals', nothing.unsupported.length, 0);
+	eq('no list at all is the same', triageImageFiles(null).images.length, 0);
+	eq('undefined is the same', triageImageFiles(undefined).unsupported.length, 0);
+
+	// 2. A file copied in Finder — it has a path, so it belongs to task 2 and this door ignores it
+	// entirely. Including when it is an image: a `.png` on disk is read by `Read`, not sent as bytes.
+	const withPaths = triageImageFiles(asFiles([
+		{ name: 'a.pdf', type: 'application/pdf', path: '/tmp/a.pdf' },
+		{ name: 'shot.png', type: 'image/png', path: '/tmp/shot.png' },
+	]));
+	eq('a file with a path is not taken as bytes', withPaths.images.length, 0);
+	eq('...not even an image file with a path', withPaths.unsupported.length, 0);
+	// Stated from the other side too: task 2's door still claims both of them.
+	eq('...because task 2 has them', externalFilePaths(asFiles([
+		{ name: 'a.pdf', type: 'application/pdf', path: '/tmp/a.pdf' },
+		{ name: 'shot.png', type: 'image/png', path: '/tmp/shot.png' },
+	])).length, 2);
+
+	// 3. The clipboard bitmap: path-less and in an accepted format.
+	const pasted = triageImageFiles(asFiles([{ name: 'image.png', type: 'image/png', size: 27878 }]));
+	eq('a path-less png is taken as bytes', pasted.images.length, 1);
+	eq('...and is not refused', pasted.unsupported.length, 0);
+
+	// 4. A path-less image in a format the model cannot read — refused, and the notice can name it.
+	const svg = triageImageFiles(asFiles([{ name: 'logo.svg', type: 'image/svg+xml' }]));
+	eq('a path-less svg is not sent', svg.images.length, 0);
+	eq('...it is refused', svg.unsupported.length, 1);
+	eq('...naming the file', svg.unsupported[0]?.displayName, 'logo.svg');
+	eq('...and the type, so the notice is actionable', svg.unsupported[0]?.mediaType, 'image/svg+xml');
+
+	// 5. A path-less `File` that is not an image at all is passed over **in silence**, which is
+	// what task 2 did with every path-less File. We have never seen one; inventing a notice for it
+	// would train the reader to ignore notices.
+	const odd = triageImageFiles(asFiles([{ name: 'mystery', type: 'application/x-thing' }]));
+	eq('a path-less non-image is not taken', odd.images.length, 0);
+	eq('...and is not reported either', odd.unsupported.length, 0);
+
+	// 6. One paste carrying both doors' payloads. Neither door may swallow the other's file.
+	const both = asFiles([
+		{ name: 'notes.txt', type: 'text/plain', path: '/tmp/notes.txt' },
+		{ name: 'image.png', type: 'image/png' },
+	]);
+	eq('the path file goes to task 2', externalFilePaths(both).length, 1);
+	eq('...at its path', externalFilePaths(both)[0]?.absolutePath, '/tmp/notes.txt');
+	eq('the path-less image goes to task 3', triageImageFiles(both).images.length, 1);
+
+	/*
+	 * 7. `onPasted`'s decision table, as the view computes it.
+	 *
+	 * This is the value that decides `preventDefault()`. Getting it wrong in the false direction
+	 * means an ordinary text paste stops landing in the textarea — the regression Emre checked by
+	 * hand in task 2 step 7. The view's expression is reproduced here rather than called, because
+	 * there is no DOM harness in this project; manual steps 3 and 4 are the witnesses to the
+	 * wiring itself, and this pins the decision the wiring carries.
+	 */
+	const paste = (files: ArrayLike<File> | null): boolean => {
+		const external = externalFilePaths(files);
+		const triage = triageImageFiles(files);
+		return external.length > 0 || triage.images.length > 0 || triage.unsupported.length > 0;
+	};
+	eq('plain text is NOT taken, so the textarea still gets it', paste(asFiles([])), false);
+	eq('...and neither is a paste with no clipboard data', paste(null), false);
+	eq('a file copied in Finder is taken, as a path chip', paste(asFiles([{ name: 'a.pdf', path: '/tmp/a.pdf', type: 'application/pdf' }])), true);
+	eq('a path-less image is taken, as bytes', paste(asFiles([{ name: 'image.png', type: 'image/png' }])), true);
+	eq('a refused image is still taken, so the notice is the answer', paste(asFiles([{ name: 'l.svg', type: 'image/svg+xml' }])), true);
+	eq('a path-less non-image is NOT taken', paste(asFiles([{ name: 'mystery', type: 'application/x-thing' }])), false);
+
+	/*
+	 * 8. `readImageAttachment` end to end, with a `File` stub whose `arrayBuffer` is real. This is
+	 * the function that stamps the media type onto the outgoing block, so it re-checks rather than
+	 * trusting the triage.
+	 */
+	const stubFile = (name: string, type: string, bytes: Uint8Array): File => ({
+		name,
+		type,
+		arrayBuffer: () => Promise.resolve(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)),
+	}) as unknown as File;
+
+	const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+	const read = await readImageAttachment(stubFile('image.png', 'image/png', png));
+	eq('a png File becomes an image attachment', read?.kind, 'image');
+	eq('...with the bytes base64-encoded', read?.data, 'iVBORw0KGgo=');
+	eq('...carrying its media type', read?.mediaType, 'image/png');
+	eq('...and its decoded length', read?.byteLength, 8);
+	// The clipboard's generic name is replaced; anything else is kept.
+	eq('the clipboard\'s generic name becomes a label', read?.displayName, 'Pasted image');
+	eq(
+		'...but a real name is kept',
+		(await readImageAttachment(stubFile('diagram.png', 'image/png', png)))?.displayName,
+		'diagram.png',
+	);
+	// Ids are per-attachment, so two reads of identical bytes are two chips.
+	const first = await readImageAttachment(stubFile('image.png', 'image/png', png));
+	const second = await readImageAttachment(stubFile('image.png', 'image/png', png));
+	check('two reads get different ids', (first?.id ?? '') !== (second?.id ?? ''), `${String(first?.id)} vs ${String(second?.id)}`);
+
+	// The gate again, at the point the claim is made.
+	eq('an svg File is refused here too', await readImageAttachment(stubFile('l.svg', 'image/svg+xml', png)), null);
+	// Zero bytes would decode to nothing and come back as a successful turn saying so (M3).
+	eq('an empty File is refused', await readImageAttachment(stubFile('image.png', 'image/png', new Uint8Array(0))), null);
+	// A read that throws is a refusal, not a crash inside the paste handler.
+	const exploding = { name: 'image.png', type: 'image/png', arrayBuffer: () => Promise.reject(new Error('gone')) } as unknown as File;
+	eq('a File whose bytes cannot be read is refused', await readImageAttachment(exploding), null);
+
+	/*
+	 * 9. The wire format, from RESEARCH B6 — images first, text last, and no empty text block.
+	 */
+	const block = (data: string, mediaType = 'image/png') => ({ mediaType, data });
+	const withText: unknown = JSON.parse(userMessageLine('what is this?', [block('aGk=')]));
+	const contentOf = (payload: unknown): { type: string; text?: string; source?: { type: string; media_type: string; data: string } }[] =>
+		(payload as { message: { content: { type: string; text?: string; source?: { type: string; media_type: string; data: string } }[] } }).message.content;
+
+	eq('an image and text are two blocks', contentOf(withText).length, 2);
+	eq('...the image comes first', contentOf(withText)[0]?.type, 'image');
+	eq('...as a base64 source', contentOf(withText)[0]?.source?.type, 'base64');
+	eq('...with the media type the API field name wants', contentOf(withText)[0]?.source?.media_type, 'image/png');
+	eq('...and the raw base64, with no data: prefix', contentOf(withText)[0]?.source?.data, 'aGk=');
+	eq('...the text comes last', contentOf(withText)[1]?.type, 'text');
+	eq('...unchanged', contentOf(withText)[1]?.text, 'what is this?');
+
+	// Measured (M4): a content array of image blocks alone is accepted, so no filler text is
+	// invented for the API's benefit. An empty text block would be a request the API rejects.
+	const noText: unknown = JSON.parse(userMessageLine('', [block('aGk='), block('/9j/', 'image/jpeg')]));
+	eq('an image with no text is image blocks only', contentOf(noText).length, 2);
+	eq('...both images', contentOf(noText).filter((b) => b.type === 'image').length, 2);
+	eq('...and no empty text block', contentOf(noText).filter((b) => b.type === 'text').length, 0);
+	eq('...in the order they were attached', contentOf(noText)[1]?.source?.media_type, 'image/jpeg');
+
+	// The unchanged case: a message with no images is exactly what Phases 2–5 sent.
+	const plain: unknown = JSON.parse(userMessageLine('merhaba'));
+	eq('a text-only message is one text block', contentOf(plain).length, 1);
+	eq('...unchanged from RESEARCH B1', contentOf(plain)[0]?.text, 'merhaba');
 }
 
 rmSync(POLICY_VAULT.base, { recursive: true, force: true });

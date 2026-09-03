@@ -11,7 +11,14 @@
  * is why all four affordances arrive here as raw payloads and leave as one `Attachment`.
  */
 import { setIcon, type Component } from 'obsidian';
-import { addAttachment, hasSendableContent, type Attachment } from '../core/attachments';
+import {
+	addAttachment,
+	attachmentKey,
+	hasSendableContent,
+	imageDataUrl,
+	imageSummary,
+	type Attachment,
+} from '../core/attachments';
 
 export interface ComposerOptions {
 	/**
@@ -257,8 +264,8 @@ export class Composer {
 		this.renderChips();
 	}
 
-	private detach(absolutePath: string): void {
-		this.attachments = this.attachments.filter((held) => held.absolutePath !== absolutePath);
+	private detach(key: string): void {
+		this.attachments = this.attachments.filter((held) => attachmentKey(held) !== key);
 		this.renderChips();
 	}
 
@@ -270,12 +277,30 @@ export class Composer {
 
 		for (const attachment of this.attachments) {
 			const chip = this.chipsEl.createDiv({ cls: 'guki-composer-chip' });
-			const iconEl = chip.createSpan({ cls: 'guki-composer-chip-icon' });
-			setIcon(iconEl, 'file-text');
-			chip.createSpan({ cls: 'guki-composer-chip-name', text: attachment.displayName });
-			// The full path in the tooltip, not on the chip: the chip is narrow, but which of two
-			// same-named notes this is can only be answered by the path.
-			chip.setAttr('aria-label', attachment.absolutePath);
+
+			if (attachment.kind === 'image') {
+				/*
+				 * A thumbnail, not an icon, and this is the minimum rather than a flourish. The
+				 * clipboard names every screenshot `image.png` (measured, task 2 §R3), so two
+				 * pasted images would otherwise be two identical chips and the reader could not
+				 * tell which one they were about to remove. The picture is the only thing that
+				 * distinguishes them, and it is already in memory — no decode, no canvas, no work.
+				 */
+				const thumbEl = chip.createEl('img', { cls: 'guki-composer-chip-thumb' });
+				thumbEl.src = imageDataUrl(attachment);
+				thumbEl.alt = '';
+				chip.createSpan({ cls: 'guki-composer-chip-name', text: attachment.displayName });
+				// Standing in for the absolute path a file chip shows: format and size, which is
+				// what actually differs between two screenshots.
+				chip.setAttr('aria-label', imageSummary(attachment));
+			} else {
+				const iconEl = chip.createSpan({ cls: 'guki-composer-chip-icon' });
+				setIcon(iconEl, 'file-text');
+				chip.createSpan({ cls: 'guki-composer-chip-name', text: attachment.displayName });
+				// The full path in the tooltip, not on the chip: the chip is narrow, but which of
+				// two same-named notes this is can only be answered by the path.
+				chip.setAttr('aria-label', attachment.absolutePath);
+			}
 
 			const removeEl = chip.createEl('button', {
 				cls: 'guki-composer-chip-remove',
@@ -290,7 +315,7 @@ export class Composer {
 			// which lives as long as the panel does. These listeners belong to an element that is
 			// dropped by the next `empty()`, so they go with it.
 			removeEl.addEventListener('click', () => {
-				this.detach(attachment.absolutePath);
+				this.detach(attachmentKey(attachment));
 			});
 		}
 	}

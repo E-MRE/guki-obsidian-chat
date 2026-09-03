@@ -7,6 +7,8 @@
  * the same structure — flat concatenation would have to be torn out again.
  */
 
+import type { ImageAttachment } from './attachments';
+
 export type BlockKind = 'text' | 'thinking' | 'tool_use';
 
 export interface MessageBlock {
@@ -89,6 +91,15 @@ export interface UserItem {
 	kind: 'user';
 	id: string;
 	text: string;
+	/**
+	 * The pasted images this message carried, if any.
+	 *
+	 * **A sent image has to leave a visible trace.** The panel's standing rule is that it shows what
+	 * was actually sent — that is why the `@` references are in the bubble rather than hidden — and
+	 * an image contributes nothing to `text`, so an image-only message would otherwise render an
+	 * empty bubble. An empty bubble reads as a bug and hides the mechanism.
+	 */
+	images?: readonly ImageAttachment[];
 }
 
 export interface AssistantItem {
@@ -198,8 +209,11 @@ export class ChatState {
 		}
 	}
 
-	addUserMessage(text: string): UserItem {
+	addUserMessage(text: string, images: readonly ImageAttachment[] = []): UserItem {
 		const item: UserItem = { kind: 'user', id: newId('user'), text };
+		if (images.length > 0) {
+			item.images = images;
+		}
 		this.itemList.push(item);
 		this.emitChange();
 		return item;

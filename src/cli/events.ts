@@ -424,13 +424,42 @@ export function parseStreamJsonLine(line: string): StreamJsonEvent | null {
 	return parsed as StreamJsonEvent;
 }
 
-/** The stdin payload shape verified in RESEARCH B1. */
-export function userMessageLine(text: string): string {
+/**
+ * One image, as `source.data` wants it: base64 with no `data:` prefix.
+ *
+ * Declared here rather than imported from `core/attachments.ts` so the dependency keeps pointing
+ * the right way — `cli/` describes the wire and knows nothing about chips.
+ */
+export interface OutgoingImage {
+	mediaType: string;
+	data: string;
+}
+
+/**
+ * The stdin payload shape verified in RESEARCH B1, plus the `image` blocks verified in B6.
+ *
+ * The payload is a raw Messages API message, so any content block the API accepts works — no flag,
+ * no temp file, no path indirection. Images go **first and text last**, which is the order B6
+ * verified and the order that reads naturally to the model ("here is a picture, here is my
+ * question").
+ *
+ * **The text block is omitted entirely when there is no text**, rather than sent empty. Measured
+ * 2026-09-02 (PHASE6-TASK3-STATE M4): a content array of image blocks alone is accepted and
+ * answered, so an image with no typed text needs no filler invented for the API's benefit.
+ */
+export function userMessageLine(text: string, images: readonly OutgoingImage[] = []): string {
+	const content: unknown[] = images.map((image) => ({
+		type: 'image',
+		source: { type: 'base64', media_type: image.mediaType, data: image.data },
+	}));
+	if (text.length > 0) {
+		content.push({ type: 'text', text });
+	}
 	const payload = {
 		type: 'user',
 		message: {
 			role: 'user',
-			content: [{ type: 'text', text }],
+			content,
 		},
 	};
 	return `${JSON.stringify(payload)}\n`;

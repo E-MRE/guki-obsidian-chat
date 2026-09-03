@@ -62,6 +62,8 @@ export class ClaudeProcess {
 	private stderrBuffer = '';
 	private stopping = false;
 	private exited = false;
+	/** Set once stdin has failed. A broken pipe never heals, so no later write is attempted. */
+	private stdinBroken = false;
 	private timers: number[] = [];
 
 	constructor(private readonly options: ClaudeProcessOptions) {}
@@ -160,6 +162,24 @@ export class ClaudeProcess {
 			callbacks.onSpawnError(error);
 		});
 
+		/*
+		 * stdin needs its own listener, and Phase 6 task 3 is what makes that reachable.
+		 *
+		 * An `'error'` event on a stream with no listener is re-thrown by Node, and this stream
+		 * lives in Obsidian's renderer — an unhandled EPIPE here does not fail a turn, it takes the
+		 * window's script context down with it. Until task 3 the largest line written was a typed
+		 * message plus a few paths, kilobytes; a pasted image puts megabytes of base64 on one line,
+		 * and a large enough one kills the CLI mid-write. Measured while probing the size ceiling
+		 * (PHASE6-TASK3-STATE M1): a 309 MiB line ended the process and the writer died on EPIPE.
+		 *
+		 * Marking the process gone is what turns that into a legible failure: `write` then returns
+		 * false and `SessionManager` fails the turn with a message, instead of the panel freezing.
+		 */
+		child.stdin.on('error', (error: Error) => {
+			this.stdinBroken = true;
+			callbacks.onStderr?.(`stdin write failed: ${error.message}\n`);
+		});
+
 		child.on('exit', (code, signal) => {
 			this.exited = true;
 			this.clearTimers();
@@ -201,13 +221,24 @@ export class ClaudeProcess {
 		this.options.callbacks.onEvent(event);
 	}
 
-	/** Writes one NDJSON line to stdin. Returns false when there is no live process to write to. */
+	/**
+	 * Writes one NDJSON line to stdin. Returns false when there is no live process to write to.
+	 *
+	 * The `try` is not decoration: `write` throws synchronously on an already-destroyed stream, and
+	 * a throw out of here reaches the composer's click handler. Both this and the `'error'`
+	 * listener installed at spawn exist for the same reason — see that comment.
+	 */
 	write(line: string): boolean {
 		const child = this.child;
-		if (!child || this.exited || !child.stdin.writable) {
+		if (!child || this.exited || this.stdinBroken || !child.stdin.writable) {
 			return false;
 		}
-		child.stdin.write(line);
+		try {
+			child.stdin.write(line);
+		} catch {
+			this.stdinBroken = true;
+			return false;
+		}
 		return true;
 	}
 

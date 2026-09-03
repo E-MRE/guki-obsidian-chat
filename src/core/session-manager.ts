@@ -17,7 +17,12 @@ import {
 	type SystemInitEvent,
 } from '../cli/events';
 import { CLAUDE_BINARY_OVERRIDE, FALLBACK_VAULT_PATH, MCP_SERVER_NAME } from '../constants';
-import { composeMessage, type Attachment } from './attachments';
+import {
+	composeMessage,
+	imageAttachments,
+	type Attachment,
+	type ImageAttachment,
+} from './attachments';
 import { ChatState, type AssistantItem } from './chat-state';
 import { PermissionBroker, type PermissionBehavior } from './permission-broker';
 import type { VaultPaths } from './permission-policy';
@@ -29,6 +34,8 @@ const MCP_CONNECTED = 'connected';
 
 interface QueuedTurn {
 	text: string;
+	/** The `image` content blocks this turn carries. Empty for every turn that is not an image. */
+	images: readonly ImageAttachment[];
 	item: AssistantItem;
 	/** Set by `interrupt` when Stop is pressed before this turn ever reached the CLI. */
 	cancelled?: boolean;
@@ -136,21 +143,29 @@ export class SessionManager {
 	/**
 	 * Enqueues a message. Returns immediately; the UI follows `ChatState`.
 	 *
-	 * Attachments become path references in the text (`composeMessage`) rather than a separate
-	 * field on the wire: we hold a path, not bytes, so there is nothing to send but the prompt.
+	 * File attachments become path references in the text (`composeMessage`) rather than a separate
+	 * field on the wire: they hold a path, not bytes, so there is nothing to send but the prompt.
 	 * The composed message is what goes into `ChatState` too — the panel shows what was actually
 	 * sent, including the `@` references, rather than hiding the mechanism that skips the
 	 * permission gate.
+	 *
+	 * A pasted **image** is the exception and travels as its own `image` block, so it contributes
+	 * nothing to `message`. **That is why the emptiness test below is not `message.length === 0`.**
+	 * An image with no typed text composes to the empty string, and the old test returned here on
+	 * it: the composer cleared, no bubble appeared, no error was reported, and the message was
+	 * simply gone. `hasSendableContent` already said such a message was sendable, so the composer
+	 * happily let Send be pressed — the two disagreed, and this one was the liar.
 	 */
 	send(text: string, attachments: readonly Attachment[] = []): void {
 		const message = composeMessage(text, attachments);
-		if (message.length === 0 || this.disposed || this.blockedReason !== null) {
+		const images = imageAttachments(attachments);
+		if ((message.length === 0 && images.length === 0) || this.disposed || this.blockedReason !== null) {
 			return;
 		}
 
-		this.state.addUserMessage(message);
+		this.state.addUserMessage(message, images);
 		const item = this.state.addAssistantMessage();
-		this.queue.push({ text: message, item });
+		this.queue.push({ text: message, images, item });
 		void this.pump();
 	}
 
@@ -242,7 +257,7 @@ export class SessionManager {
 
 		this.queue.shift();
 		this.reducer.beginTurn(next.item);
-		const written = this.process?.write(userMessageLine(next.text)) ?? false;
+		const written = this.process?.write(userMessageLine(next.text, next.images)) ?? false;
 		if (!written) {
 			this.reducer.failActiveTurn('The message could not be written to the CLI: the process is gone.');
 			this.state.addNotice('error', 'The Claude Code process is not running.');

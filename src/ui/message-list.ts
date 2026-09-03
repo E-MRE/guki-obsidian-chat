@@ -11,6 +11,7 @@
  * broken.
  */
 import type { App, Component } from 'obsidian';
+import { imageDataUrl, imageSummary } from '../core/attachments';
 import {
 	hasRenderableContent,
 	orderedBlocks,
@@ -62,6 +63,11 @@ interface RenderedItem {
 	blocks: Map<number, RenderedBlock>;
 	/** Permission items only. Holds the buttons, so it is updated in place, never rebuilt. */
 	permissionCard?: RenderedPermissionCard;
+	/**
+	 * User items that carried pasted images. Its presence is what says they have been rendered —
+	 * a `UserItem` never changes after it is created, so there is nothing to re-sync.
+	 */
+	userImagesEl?: HTMLElement;
 }
 
 export class MessageList {
@@ -163,8 +169,33 @@ export class MessageList {
 	}
 
 	private updateUser(item: UserItem, entry: RenderedItem): boolean {
+		let changed = false;
+
+		/*
+		 * The images this message carried, above its text — the same order the composer showed
+		 * them in, and the same order they sit in on the wire.
+		 *
+		 * **A sent image has to leave a visible trace.** An image-only message has no text at all,
+		 * so without this the bubble renders empty, which reads as a bug and hides the one
+		 * mechanism in the whole attachment design that sends bytes. Rendered once: a `UserItem`
+		 * is immutable, and the bytes are already in memory, so there is nothing to decode.
+		 */
+		if (item.images && item.images.length > 0 && !entry.userImagesEl) {
+			const imagesEl = entry.el.createDiv({ cls: 'guki-message-images' });
+			// Before the body, not after it: the text is the question *about* the pictures.
+			entry.el.insertBefore(imagesEl, entry.bodyEl);
+			for (const image of item.images) {
+				const imgEl = imagesEl.createEl('img', { cls: 'guki-message-image' });
+				imgEl.src = imageDataUrl(image);
+				imgEl.alt = image.displayName;
+				imgEl.title = imageSummary(image);
+			}
+			entry.userImagesEl = imagesEl;
+			changed = true;
+		}
+
 		if (entry.renderedText === item.text) {
-			return false;
+			return changed;
 		}
 		// The user's own text is shown verbatim, not as rendered markdown.
 		entry.bodyEl.setText(item.text);
