@@ -7,7 +7,7 @@
  * the same structure — flat concatenation would have to be torn out again.
  */
 
-import type { RateLimitWarning } from '../cli/events';
+import type { QuotaSnapshot } from '../cli/events';
 import type { ImageAttachment } from './attachments';
 
 export type BlockKind = 'text' | 'thinking' | 'tool_use';
@@ -202,24 +202,51 @@ export class ChatState {
 	private readonly itemList: ChatItem[] = [];
 	private readonly listeners = new Set<() => void>();
 	/**
-	 * The most recent `rate_limit_event`, if any — ambient session state, not a transcript entry.
-	 * A warning only, never a gauge (Emre's decision, 2026-09-03): the event has never been observed
-	 * below `surpassedThreshold` (0.75 or 0.9 in every capture), so there is nothing to show most of
-	 * the time, and there is no measured event that means "back under the threshold" to clear it
-	 * with. It is replaced by a later warning, never cleared by this class.
+	 * The most recent `rate_limit_event`, if any — ambient session state, not a transcript entry
+	 * (Phase 6 task 7 turned this into a live gauge, both windows, replacing task 5's single-window
+	 * warning-only strip — see `parseQuotaSnapshot`'s own comment for why the threshold gate went
+	 * away). Replaced by a later snapshot, never cleared by this class: there is no measured event
+	 * that means "nothing to report" to clear it with.
 	 */
-	private quota: RateLimitWarning | null = null;
+	private quota: QuotaSnapshot | null = null;
+
+	/** `system/init.model`, from the most recent init — tracks a mid-session model change (task 7 Trap 4). */
+	private modelName: string | null = null;
+
+	/** The most recent turn's context percentage (`contextUsageFromResult`). Sticky across turns. */
+	private contextPct: number | null = null;
 
 	get items(): readonly ChatItem[] {
 		return this.itemList;
 	}
 
-	get quotaWarning(): RateLimitWarning | null {
+	get quotaSnapshot(): QuotaSnapshot | null {
 		return this.quota;
 	}
 
-	setQuotaWarning(warning: RateLimitWarning): void {
-		this.quota = warning;
+	setQuotaSnapshot(snapshot: QuotaSnapshot): void {
+		this.quota = snapshot;
+		this.emitChange();
+	}
+
+	get model(): string | null {
+		return this.modelName;
+	}
+
+	setModel(model: string | null): void {
+		if (model === this.modelName) {
+			return;
+		}
+		this.modelName = model;
+		this.emitChange();
+	}
+
+	get contextPercent(): number | null {
+		return this.contextPct;
+	}
+
+	setContextPercent(percent: number): void {
+		this.contextPct = percent;
 		this.emitChange();
 	}
 

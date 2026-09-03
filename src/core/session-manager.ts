@@ -92,10 +92,17 @@ export class SessionManager {
 
 		this.reducer.onInit = (event: SystemInitEvent) => {
 			this.checkPermissionServer(event);
+			// Every init, not just the first (RESEARCH B1) — a model switched mid-session must not
+			// leave the status line showing the old name (task 7 Trap 4).
+			this.state.setModel(event.model ?? null);
 		};
 
-		this.reducer.onQuotaWarning = (warning) => {
-			this.state.setQuotaWarning(warning);
+		this.reducer.onQuota = (snapshot) => {
+			this.state.setQuotaSnapshot(snapshot);
+		};
+
+		this.reducer.onContextUsage = (usage) => {
+			this.state.setContextPercent(usage.percent);
 		};
 	}
 

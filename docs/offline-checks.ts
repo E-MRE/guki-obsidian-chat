@@ -71,14 +71,15 @@ import { StreamReducer } from '../src/core/stream-reducer';
 import { SessionManager } from '../src/core/session-manager';
 import { PermissionBroker } from '../src/core/permission-broker';
 import {
+	contextUsageFromResult,
 	deniedToolUseIds,
+	formatModelName,
 	isSystemInitEvent,
 	mcpServerStatus,
-	parseRateLimitWarning,
+	parseQuotaSnapshot,
 	parseStreamJsonLine,
 	userMessageLine,
 	type RateLimitEvent,
-	type RateLimitWarning,
 	type ResultEvent,
 	type StreamJsonEvent,
 	type SystemInitEvent,
@@ -87,7 +88,7 @@ import { startsExpanded, toolCategory, toolResultText, toolSummary } from '../sr
 import { diffFromToolInput, diffStats, emptyPaneText } from '../src/ui/diff-view';
 import { toolResultTitle, toolStatusText } from '../src/ui/tool-card';
 import { permissionDiff } from '../src/ui/permission-card';
-import { formatQuotaWarning } from '../src/ui/chat-view';
+import { renderQuotaBar } from '../src/ui/composer';
 import { formatTurnMeta, withTurnMeta } from '../src/ui/message-list';
 import { containsPath, permissionVerdict } from '../src/core/permission-policy';
 import { FALLBACK_VAULT_PATH } from '../src/constants';
@@ -4440,10 +4441,17 @@ console.log('P3. Trap 3: an errored turn was still billed for, and the meta line
 	eq('...nor its duration', turn.meta?.durationMs, 4200);
 }
 
-// --- Q. quota warning: rate_limit_event parsing and the reducer's callback ---
+// --- Q. quota snapshot: rate_limit_event parsing (both windows) and the reducer's callback ---
+//
+// Task 5's `parseRateLimitWarning` gated on `rate_limit_info.status === 'allowed_warning'` and
+// kept only the single window `rateLimitType` named. Task 7 replaces it with `parseQuotaSnapshot`
+// — no status gate, both windows together — per the measurement in `cli/events.ts`'s own comment:
+// the status fires on an ordinary turn with no prior warning state too, so it reads as "here is
+// your current quota", not a threshold crossing a live gauge would need to gate on.
 
-console.log("Q1. parseRateLimitWarning: the one status ever measured, and what it refuses");
+console.log('Q1. parseQuotaSnapshot: both windows together, and what a malformed payload refuses');
 {
+	// Verbatim from docs/capture-phase4-tools.jsonl line 36.
 	const measuredInfo = {
 		status: 'allowed_warning',
 		resetsAt: 1787927400,
@@ -4451,47 +4459,59 @@ console.log("Q1. parseRateLimitWarning: the one status ever measured, and what i
 		utilization: 0.91,
 		isUsingOverage: false,
 		surpassedThreshold: 0.9,
-		unifiedWindows: {},
+		unifiedWindows: {
+			five_hour: { utilization: 0.91, resetsAt: 1787927400 },
+			seven_day: { utilization: 0.88, resetsAt: 1788051600 },
+		},
 	};
 	const measured: RateLimitEvent = { type: 'rate_limit_event', rate_limit_info: measuredInfo };
-	const warning = parseRateLimitWarning(measured);
-	check('the measured shape parses', warning !== null);
-	eq('rateLimitType', warning?.rateLimitType, 'five_hour');
-	eq('utilization', warning?.utilization, 0.91);
-	eq('resetsAt', warning?.resetsAt, 1787927400);
+	const snapshot = parseQuotaSnapshot(measured);
+	check('the measured shape parses', snapshot !== null);
+	eq('fiveHourUtilization', snapshot?.fiveHourUtilization, 0.91);
+	eq('fiveHourResetsAt', snapshot?.fiveHourResetsAt, 1787927400);
+	eq('sevenDayUtilization', snapshot?.sevenDayUtilization, 0.88);
+	eq('sevenDayResetsAt', snapshot?.sevenDayResetsAt, 1788051600);
 
-	// Not an enum: branch on the one status ever observed and refuse everything else, rather than
-	// inventing 'allowed' | 'rejected' around a value that has never been measured on the wire.
+	// No status gate (the deliberate difference from task 5): a status this project has never
+	// measured still parses, as long as `unifiedWindows` itself is there.
 	eqCall(
-		'a status this project has never measured refuses rather than guessing at its shape',
-		() => parseRateLimitWarning({ type: 'rate_limit_event', rate_limit_info: { ...measuredInfo, status: 'rejected' } }),
-		null,
+		"a status never measured on the wire still parses — there is no gate on it",
+		() => parseQuotaSnapshot({ type: 'rate_limit_event', rate_limit_info: { ...measuredInfo, status: 'rejected' } })?.fiveHourUtilization,
+		0.91,
 	);
-	eqCall('missing rate_limit_info refuses', () => parseRateLimitWarning({ type: 'rate_limit_event' }), null);
+	eqCall('missing rate_limit_info refuses', () => parseQuotaSnapshot({ type: 'rate_limit_event' }), null);
 	eqCall(
 		'a non-object rate_limit_info refuses',
-		() => parseRateLimitWarning({ type: 'rate_limit_event', rate_limit_info: 'nope' }),
+		() => parseQuotaSnapshot({ type: 'rate_limit_event', rate_limit_info: 'nope' }),
 		null,
 	);
 	eqCall(
-		'a field with the wrong type refuses rather than coercing',
-		() =>
-			parseRateLimitWarning({
-				type: 'rate_limit_event',
-				rate_limit_info: { ...measuredInfo, resetsAt: '1787927400' },
-			}),
+		'missing unifiedWindows refuses',
+		() => parseQuotaSnapshot({ type: 'rate_limit_event', rate_limit_info: { ...measuredInfo, unifiedWindows: undefined } }),
 		null,
+	);
+	eqCall(
+		'a window field with the wrong type is dropped from that window rather than coercing',
+		() =>
+			parseQuotaSnapshot({
+				type: 'rate_limit_event',
+				rate_limit_info: {
+					...measuredInfo,
+					unifiedWindows: { ...measuredInfo.unifiedWindows, five_hour: { utilization: '0.91', resetsAt: 1787927400 } },
+				},
+			})?.fiveHourUtilization,
+		undefined,
 	);
 }
 
-console.log("Q2. StreamReducer.onQuotaWarning over docs/capture-phase4-tools.jsonl: three climbing warnings inside one turn");
+console.log('Q2. StreamReducer.onQuota over docs/capture-phase4-tools.jsonl: three snapshots inside one turn, both windows every time');
 {
 	const captureQ2 = readFileSync(join(process.cwd(), 'docs', 'capture-phase4-tools.jsonl'), 'utf8');
 	const s = new ChatState();
 	const r = new StreamReducer(s);
-	const seen: Array<{ rateLimitType: string; utilization: number; resetsAt: number }> = [];
-	r.onQuotaWarning = (w) => {
-		seen.push({ rateLimitType: w.rateLimitType, utilization: w.utilization, resetsAt: w.resetsAt });
+	const seen: Array<{ fiveHour?: number; sevenDay?: number }> = [];
+	r.onQuota = (snapshot) => {
+		seen.push({ fiveHour: snapshot.fiveHourUtilization, sevenDay: snapshot.sevenDayUtilization });
 	};
 
 	const turn = s.addAssistantMessage();
@@ -4504,22 +4524,21 @@ console.log("Q2. StreamReducer.onQuotaWarning over docs/capture-phase4-tools.jso
 	}
 
 	// One callback per event, not deduplicated and not collapsed to the last: the callback is the
-	// reducer's whole contract, and it is the view's job (chat-view.ts's `updateQuotaStrip`) to
-	// turn a same-text repeat into "update in place" rather than a fresh line each time.
+	// reducer's whole contract, and it is the view's job to turn a same-value repeat into "update
+	// in place" rather than a fresh line each time.
 	eq('the callback fired once per real event in the capture', seen.length, 3);
-	eq('utilization climbs across the three, in order', seen.map((w) => w.utilization).join(','), '0.91,0.92,0.93');
-	check('every one names the five_hour window', seen.every((w) => w.rateLimitType === 'five_hour'));
-	check('every one carries the same reset time', seen.every((w) => w.resetsAt === 1787927400));
+	eq('the five_hour window climbs across the three, in order', seen.map((w) => w.fiveHour).join(','), '0.91,0.92,0.93');
+	check('the seven_day window is present on every one of them, unchanged', seen.every((w) => w.sevenDay === 0.88));
 }
 
-console.log('Q3. A second real window type and a repeat with no change: docs/capture-phase3-thinking-redacted.jsonl');
+console.log('Q3. A capture where seven_day is the triggering window: docs/capture-phase3-thinking-redacted.jsonl');
 {
 	const captureQ3 = readFileSync(join(process.cwd(), 'docs', 'capture-phase3-thinking-redacted.jsonl'), 'utf8');
 	const s = new ChatState();
 	const r = new StreamReducer(s);
-	const seen: Array<{ rateLimitType: string; utilization: number }> = [];
-	r.onQuotaWarning = (w) => {
-		seen.push({ rateLimitType: w.rateLimitType, utilization: w.utilization });
+	const seen: Array<{ fiveHour?: number; sevenDay?: number }> = [];
+	r.onQuota = (snapshot) => {
+		seen.push({ fiveHour: snapshot.fiveHourUtilization, sevenDay: snapshot.sevenDayUtilization });
 	};
 
 	const turn = s.addAssistantMessage();
@@ -4531,66 +4550,109 @@ console.log('Q3. A second real window type and a repeat with no change: docs/cap
 		}
 	}
 
-	eq('both events in this capture reach the callback, unchanged in shape', seen.length, 2);
-	eq('...and they are identical — the "update in place, never stack" case the strip has to collapse', seen.map((w) => w.utilization).join(','), '0.83,0.83');
-	check('this capture\'s window is the other one ever measured: seven_day', seen.every((w) => w.rateLimitType === 'seven_day'));
+	eq('both events in this capture reach the callback', seen.length, 2);
+	// Task 5's Q3 only ever saw `seven_day` in this capture because it kept just the triggering
+	// window; task 7 carries `five_hour` too, present the whole time at a different value.
+	eq('...and both windows are present on both, five_hour unchanged', seen.map((w) => w.fiveHour).join(','), '0.46,0.47');
+	check('...seven_day unchanged too — the "no change" case a live gauge still has to render the same', seen.every((w) => w.sevenDay === 0.83));
 }
 
-// --- R. Follow-up round: the quota strip's date marker, and the badge's display layer ---
+// --- T. Phase 6 task 7: the composer status line's pure arithmetic ---
 //
-// Driven directly against the real, exported `formatQuotaWarning` (chat-view.ts) and
-// `formatTurnMeta` / `withTurnMeta` (message-list.ts) — previously exported-but-untested, per the
-// orchestrator's audit of this task. Reaching them meant extending `obsidian-stub.mjs` with four
-// empty classes (`ItemView`, `Notice`, `WorkspaceLeaf`, `MarkdownRenderer` — see its own comment);
-// nothing here instantiates any of the four or calls a method on them.
+// `contextUsageFromResult`, `formatModelName` and `renderQuotaBar` are the three pieces of new
+// pure logic this task adds — all in `cli/events.ts` (the first two) or `ui/composer.ts` (the
+// third), none of them touching a DOM, so all three are driven directly here rather than only
+// through a manual round.
 
-console.log('R1. formatQuotaWarning: a reset on the reader\'s current calendar day prints a bare time; any other day carries a date marker');
+console.log('T1. contextUsageFromResult: the real capture from this task\'s brief, and what a malformed result refuses');
 {
-	// The real pair from docs/capture-phase4-tools.jsonl / capture-phase3-thinking-redacted.jsonl:
-	// the same event's five_hour window resets same-afternoon, its seven_day window two days
-	// later, and both printed as a bare, indistinguishable clock time before this fix (measured by
-	// the orchestrator: "resets 17:30." / "resets 4:00." on the same event).
-	const warning: RateLimitWarning = { rateLimitType: 'five_hour', utilization: 0.91, resetsAt: 1787927400 };
-	const resetDate = new Date(warning.resetsAt * 1000);
-	const expectedTime = resetDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+	// Verbatim from this task's brief: a real `result` event, one model, contextWindow 1,000,000.
+	const measured: ResultEvent = {
+		type: 'result',
+		subtype: 'success',
+		usage: { input_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 34519, output_tokens: 35 },
+		modelUsage: {
+			'claude-sonnet-5[1m]': {
+				inputTokens: 2,
+				cacheReadInputTokens: 34519,
+				cacheCreationInputTokens: 0,
+				contextWindow: 1000000,
+				maxOutputTokens: 64000,
+				canonicalModel: 'claude-sonnet-5',
+			},
+		},
+		total_cost_usd: 0.0072578,
+	};
+	const usage = contextUsageFromResult(measured);
+	check('the measured shape parses', usage !== null);
+	// (2 + 0 + 34519) / 1000000 = 3.4521% → rounds to 3.
+	eq('percent', usage?.percent, 3);
+	eq('model prefers canonicalModel over the modelUsage key', usage?.model, 'claude-sonnet-5');
 
-	// Built from the reset's own local calendar date, not from a raw offset in seconds — so "same
-	// day" and "a different day" hold in whatever timezone actually runs this suite, not just
-	// Europe/Istanbul. This is the same rule `formatQuotaWarning` itself applies (`toDateString()`
-	// equality), so the test is pinned to the *rule*, never to a rendered, locale-formatted string.
-	const sameDayNow = new Date(
-		resetDate.getFullYear(),
-		resetDate.getMonth(),
-		resetDate.getDate(),
-		0,
-		1,
-		0,
-	).getTime();
-	const otherDayNow = new Date(
-		resetDate.getFullYear(),
-		resetDate.getMonth(),
-		resetDate.getDate() - 3,
-		12,
-		0,
-		0,
-	).getTime();
+	eqCall('missing usage refuses', () => contextUsageFromResult({ ...measured, usage: undefined }), null);
+	eqCall('missing modelUsage refuses', () => contextUsageFromResult({ ...measured, modelUsage: undefined }), null);
+	eqCall(
+		'a zero contextWindow refuses rather than dividing by zero',
+		() =>
+			contextUsageFromResult({
+				...measured,
+				modelUsage: { 'claude-sonnet-5[1m]': { ...measured.modelUsage!['claude-sonnet-5[1m]'], contextWindow: 0 } },
+			}),
+		null,
+	);
+	eqCall(
+		'no canonicalModel falls back to the modelUsage key',
+		() =>
+			contextUsageFromResult({
+				...measured,
+				modelUsage: { 'claude-sonnet-5[1m]': { ...measured.modelUsage!['claude-sonnet-5[1m]'], canonicalModel: undefined } },
+			})?.model,
+		'claude-sonnet-5[1m]',
+	);
+}
 
-	const textSameDay = formatQuotaWarning(warning, sameDayNow);
+console.log('T2. contextUsageFromResult over the real captures already in the repo — three different models, three different windows');
+{
+	// docs/capture-phase4-tools.jsonl: 16 + 26397 + 123137 = 149550 / 1000000 → rounds to 15%.
 	eq(
-		'same calendar day: the text is exactly the bare time, computed the same way as production, no marker',
-		textSameDay,
-		`Approaching the five hour usage limit — 91% used, resets ${expectedTime}.`,
+		'capture-phase4-tools.jsonl (claude-opus-5, 1m window)',
+		contextUsageFromResult({
+			type: 'result',
+			subtype: 'success',
+			usage: { input_tokens: 16, cache_creation_input_tokens: 26397, cache_read_input_tokens: 123137 },
+			modelUsage: { 'claude-opus-5': { contextWindow: 1000000, canonicalModel: 'claude-opus-5' } },
+		})?.percent,
+		15,
 	);
+	// docs/capture-phase5a-stop.jsonl: 10 + 12135 + 14994 = 27139 / 200000 → rounds to 14%.
+	eq(
+		'capture-phase5a-stop.jsonl (claude-haiku-4-5, 200k window)',
+		contextUsageFromResult({
+			type: 'result',
+			subtype: 'error_during_execution',
+			usage: { input_tokens: 10, cache_creation_input_tokens: 12135, cache_read_input_tokens: 14994 },
+			modelUsage: { 'claude-haiku-4-5-20251001': { contextWindow: 200000, canonicalModel: 'claude-haiku-4-5' } },
+		})?.percent,
+		14,
+	);
+}
 
-	const textOtherDay = formatQuotaWarning(warning, otherDayNow);
-	check(
-		'a different calendar day is not the bare-time string alone — a marker was added',
-		textOtherDay !== `Approaching the five hour usage limit — 91% used, resets ${expectedTime}.`,
-	);
-	check(
-		'...and the same bare time still appears inside it, just not alone — this is additive, not a substitute',
-		textOtherDay.includes(expectedTime),
-	);
+console.log('T3. formatModelName: strips the claude- prefix and any [window] suffix, title-cases the rest');
+{
+	eq('a bracketed context-window suffix', formatModelName('claude-sonnet-5[1m]'), 'Sonnet 5');
+	eq('no suffix at all', formatModelName('claude-sonnet-5'), 'Sonnet 5');
+	eq('a multi-word canonical name', formatModelName('claude-haiku-4-5'), 'Haiku 4 5');
+	eq('a model id this project has never named still formats sensibly', formatModelName('claude-opus-9000[200k]'), 'Opus 9000');
+}
+
+console.log('T4. renderQuotaBar: 10 cells, clamped to the 0–100 range');
+{
+	eq('0%', renderQuotaBar(0), '░░░░░░░░░░');
+	eq('100%', renderQuotaBar(100), '▓▓▓▓▓▓▓▓▓▓');
+	eq('51% rounds to 5 filled cells', renderQuotaBar(51), '▓▓▓▓▓░░░░░');
+	eq('81% rounds to 8 filled cells', renderQuotaBar(81), '▓▓▓▓▓▓▓▓░░');
+	eq('a value below 0 clamps rather than producing a negative repeat count', renderQuotaBar(-5), '░░░░░░░░░░');
+	eq('a value above 100 clamps to fully filled', renderQuotaBar(140), '▓▓▓▓▓▓▓▓▓▓');
 }
 
 console.log('R2. formatTurnMeta: the total is suppressed when it equals the turn cost, shown when it differs');

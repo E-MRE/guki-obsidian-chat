@@ -1,5 +1,6 @@
 /**
- * The composer: attachment chips, a row of two attach controls, then the textarea and Send.
+ * The composer: attachment chips above a full-height textarea, with a bottom toolbar overlaid on
+ * top of it — the two attach controls, the live status line, and Send.
  *
  * Enter sends, Shift+Enter inserts a newline, and that is the only key behaviour there is — no
  * other shortcut, by closed decision #3. The chat is not a terminal.
@@ -19,6 +20,20 @@ import {
 	imageSummary,
 	type Attachment,
 } from '../core/attachments';
+
+/**
+ * The live status line's data. Every field `null` means "not known yet" — before the first
+ * `system/init` there is no model, and before the first `result`/`rate_limit_event` there is
+ * nothing else either (task 7 brief: "before the first turn there is nothing to show yet").
+ * Percentages are 0–100, already rounded; the composer only formats and collapses, it does not
+ * compute them — that arithmetic lives in `cli/events.ts` where it can be tested without a DOM.
+ */
+export interface ComposerStatus {
+	model: string | null;
+	contextPercent: number | null;
+	fiveHourPercent: number | null;
+	sevenDayPercent: number | null;
+}
 
 export interface ComposerOptions {
 	/**
@@ -100,6 +115,17 @@ const DEFAULT_PLACEHOLDER = 'Message GuKi… (Enter to send, Shift+Enter for a n
  * then pasting is now ours**, and the pasted text lands in the textarea. In a read-only transcript
  * there is nothing else it could sensibly do, and the alternative is the silent nothing above.
  */
+/**
+ * A 10-cell filled/empty block string, the same idea `~/.claude/statusline-command.sh` (Emre's own
+ * terminal statusline) uses for its bars. Plain text rather than a mini progress-bar element: the
+ * status line is one line of text end to end, and a `<div>` bar would be one more thing the
+ * collapse logic in `Composer.renderStatus` would have to measure separately.
+ */
+export function renderQuotaBar(percent: number): string {
+	const filled = Math.max(0, Math.min(10, Math.round(percent / 10)));
+	return '▓'.repeat(filled) + '░'.repeat(10 - filled);
+}
+
 export function pasteBelongsToComposer(
 	target: Node,
 	formEl: Node,
@@ -118,10 +144,19 @@ export function pasteBelongsToComposer(
 export class Composer {
 	private readonly chipsEl: HTMLElement;
 	private readonly inputEl: HTMLTextAreaElement;
+	private readonly statusEl: HTMLElement;
 	private readonly actionEl: HTMLButtonElement;
 	private readonly attachEl: HTMLButtonElement;
 	private readonly pickEl: HTMLButtonElement;
 	private readonly fileInputEl: HTMLInputElement;
+	/**
+	 * The status line's parts, in the fixed order they collapse from — `[model, context, 5h, 7d]`.
+	 * `renderStatus` always slices from the front, so the fields to the right are the ones dropped
+	 * first as the panel narrows, and the model is dropped last (task 7 brief).
+	 */
+	private statusParts: string[] = [];
+	private statusResizeObserver: ResizeObserver | null = null;
+	private pendingStatusMeasure: number | null = null;
 	private busy = false;
 	/** Non-null when the panel is refusing input; the text is shown in place of the placeholder. */
 	private blocked: string | null = null;
@@ -172,15 +207,22 @@ export class Composer {
 		});
 
 		/*
-		 * The attach controls, on their own row *above* the textarea rather than beside it.
-		 *
-		 * Emre's preference from task 2's acceptance run, and it pays for itself in the sidebar:
-		 * the two buttons and Send used to share the input row with the textarea, and each button
-		 * is `--input-height` tall (30px) by Obsidian's own button rule and ~34px wide, so a 300px
-		 * panel left the textarea barely half its width. On their own row the textarea gets that
-		 * width back and the buttons cost one 30px row.
+		 * The textarea fills the whole box; the toolbar is a bottom-anchored overlay inside it
+		 * (Emre's ChatGPT-style reference, task 7). `.guki-composer` is the positioned ancestor
+		 * (`position: relative`, styles.css) and `.guki-composer-toolbar` is `position: absolute;
+		 * bottom: 0`, so it paints over the textarea rather than pushing it down — the textarea's
+		 * own `padding-bottom` (styles.css) reserves the toolbar's height so typed text never runs
+		 * under the icons (Trap 1).
 		 */
-		const tools = form.createDiv({ cls: 'guki-composer-tools' });
+		this.inputEl = form.createEl('textarea', {
+			cls: 'guki-composer-input',
+			attr: {
+				rows: '3',
+				placeholder: DEFAULT_PLACEHOLDER,
+			},
+		});
+
+		const toolbar = form.createDiv({ cls: 'guki-composer-toolbar' });
 
 		/*
 		 * Two attach controls, not one button behind a menu. They are two different actions —
@@ -191,32 +233,37 @@ export class Composer {
 		 * The paperclip is Obsidian's own icon for attaching a file (`editor:attach-file` uses
 		 * `lucide-paperclip`), so the meaning is borrowed rather than invented.
 		 */
-		this.pickEl = tools.createEl('button', {
+		this.pickEl = toolbar.createEl('button', {
 			cls: 'guki-composer-attach',
 			attr: { 'aria-label': 'Attach files from disk' },
 		});
 		setIcon(this.pickEl, 'paperclip');
 
-		this.attachEl = tools.createEl('button', {
+		this.attachEl = toolbar.createEl('button', {
 			cls: 'guki-composer-attach',
 			attr: { 'aria-label': 'Attach the active note' },
 		});
 		setIcon(this.attachEl, 'file-plus');
 
-		const row = form.createDiv({ cls: 'guki-composer-row' });
+		this.statusEl = toolbar.createDiv({ cls: 'guki-composer-status' });
 
-		this.inputEl = row.createEl('textarea', {
-			cls: 'guki-composer-input',
-			attr: {
-				rows: '3',
-				placeholder: DEFAULT_PLACEHOLDER,
-			},
-		});
-
-		this.actionEl = row.createEl('button', {
+		// Icon-only, same busy/stop swap `setBusy` already drives — see its own comment for the
+		// icon choice.
+		this.actionEl = toolbar.createEl('button', {
 			cls: 'guki-composer-send',
-			text: 'Send',
+			attr: { 'aria-label': 'Send the message' },
 		});
+		setIcon(this.actionEl, 'arrow-up');
+
+		// The status line's own width is what decides which fields fit (Trap 3) — the toolbar's
+		// width changes whenever the panel is resized or moved between panes, same trigger
+		// `ChatView.observeWidth` already uses for the narrow-pane class, and for the same reason:
+		// a `ResizeObserver` alone misses a leaf being dragged between panes, but this element's
+		// `clientWidth` is re-read on every `setStatus` call too, so that gap does not matter here.
+		this.statusResizeObserver = new ResizeObserver(() => {
+			this.scheduleStatusMeasure();
+		});
+		this.statusResizeObserver.observe(toolbar);
 
 		component.registerDomEvent(this.inputEl, 'keydown', (event: KeyboardEvent) => {
 			// isComposing: mid-IME-composition Enter belongs to the input method, not to us.
@@ -532,15 +579,107 @@ export class Composer {
 		}
 	}
 
-	/** Swaps the button between Send and Stop. Idempotent — called on every state change. */
+	/**
+	 * Swaps the button between Send and Stop. Idempotent — called on every state change.
+	 *
+	 * Icon-only now (task 7): `arrow-up` for Send — the same glyph ChatGPT's own send button uses,
+	 * and unambiguous next to a circular button — and `square` for Stop, Lucide's stop-shape icon
+	 * (there is no dedicated "stop" icon in the set; a filled square is the universal stand-in, and
+	 * it is not the error/destructive color here — stopping a reply is a normal thing to do). The
+	 * accessible name still carries the words a screen reader needs; only the visible label moved
+	 * from text to a glyph.
+	 */
 	setBusy(busy: boolean): void {
 		if (busy === this.busy) {
 			return;
 		}
 		this.busy = busy;
-		this.actionEl.setText(busy ? 'Stop' : 'Send');
+		setIcon(this.actionEl, busy ? 'square' : 'arrow-up');
 		this.actionEl.toggleClass('guki-composer-stop', busy);
 		this.actionEl.setAttr('aria-label', busy ? 'Stop the current reply' : 'Send the message');
+	}
+
+	/**
+	 * Renders the live status line: model name, context percentage, and both quota bars — see
+	 * `ComposerStatus`'s own comment for what `null` means on each field.
+	 *
+	 * Idempotent-ish but not guarded like `setBusy`/`setBlocked`: unlike those two, every field here
+	 * can change independently on a timer the composer doesn't control (a `result` event lands, a
+	 * `rate_limit_event` lands separately), so there is no single "did anything change" test worth
+	 * the complexity — `renderStatus` below is cheap, and it is the same re-render-from-scratch
+	 * approach `MessageList` already uses for a streaming block.
+	 */
+	setStatusLine(status: ComposerStatus): void {
+		const parts: string[] = [];
+		if (status.model !== null) {
+			parts.push(status.model);
+		}
+		if (status.contextPercent !== null) {
+			parts.push(`Context ${String(status.contextPercent)}%`);
+		}
+		if (status.fiveHourPercent !== null) {
+			parts.push(`5h ${renderQuotaBar(status.fiveHourPercent)} ${String(status.fiveHourPercent)}%`);
+		}
+		if (status.sevenDayPercent !== null) {
+			parts.push(`7d ${renderQuotaBar(status.sevenDayPercent)} ${String(status.sevenDayPercent)}%`);
+		}
+		this.statusParts = parts;
+		this.renderStatus();
+	}
+
+	/**
+	 * Re-renders the status line's text at whatever width currently fits, and schedules a
+	 * re-measure when the toolbar's own width changes (Trap 3, the panel narrowing must never wrap
+	 * the line — fields drop right to left instead).
+	 *
+	 * **Why measurement, not a CSS-only collapse.** Fields don't have a natural breakpoint each —
+	 * "does '7d ▓▓▓▓▓▓▓▓░░ 81%' fit" depends on the model name's own length and the current font,
+	 * not a fixed pixel width `@media`/container queries could name in advance. Measuring
+	 * `scrollWidth` against the actual `clientWidth` is the same class of "no fixed threshold to
+	 * guess at" problem `ChatView.applyWidthClass` already solves for the whole panel, just scoped
+	 * to one line — reused here rather than inventing a second mechanism.
+	 */
+	private renderStatus(): void {
+		if (this.statusParts.length === 0) {
+			this.statusEl.setText('');
+			return;
+		}
+		let count = this.statusParts.length;
+		while (count > 0) {
+			this.statusEl.setText(this.statusParts.slice(0, count).join(' · '));
+			if (count === 1 || this.statusEl.scrollWidth <= this.statusEl.clientWidth) {
+				break;
+			}
+			count -= 1;
+		}
+	}
+
+	/**
+	 * Deferred by one frame, the same trap `ChatView.refreshWidthClass` already documents: right
+	 * after the toolbar is resized (or the leaf is moved between panes) the element has its new
+	 * size but a re-measure inside the same tick can still read the old layout.
+	 */
+	private scheduleStatusMeasure(): void {
+		if (this.pendingStatusMeasure !== null) {
+			return;
+		}
+		this.pendingStatusMeasure = window.requestAnimationFrame(() => {
+			this.pendingStatusMeasure = null;
+			this.renderStatus();
+		});
+	}
+
+	/**
+	 * `ResizeObserver` is not covered by `Component.register*` (the same trap `ChatView.onClose`
+	 * documents for its own observer), so the view calls this by hand from `onClose`.
+	 */
+	destroy(): void {
+		this.statusResizeObserver?.disconnect();
+		this.statusResizeObserver = null;
+		if (this.pendingStatusMeasure !== null) {
+			window.cancelAnimationFrame(this.pendingStatusMeasure);
+			this.pendingStatusMeasure = null;
+		}
 	}
 
 	/**

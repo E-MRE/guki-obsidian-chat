@@ -15,6 +15,7 @@
  *   messages (a tool-use round trip). `blockBase` absorbs that so slots stay unique per turn.
  */
 import {
+	contextUsageFromResult,
 	isAssistantEvent,
 	isRateLimitEvent,
 	isResultEvent,
@@ -24,11 +25,12 @@ import {
 	isThinkingTokensEvent,
 	isUserEvent,
 	deniedToolUseIds,
-	parseRateLimitWarning,
+	parseQuotaSnapshot,
 	type AssistantEvent,
 	type ContentBlock,
+	type ContextUsage,
+	type QuotaSnapshot,
 	type RateLimitEvent,
-	type RateLimitWarning,
 	type ResultEvent,
 	type SseContentBlockDelta,
 	type SseContentBlockStart,
@@ -142,12 +144,20 @@ export class StreamReducer {
 	onTurnEnd: (() => void) | null = null;
 
 	/**
-	 * Called for every `rate_limit_event` whose `rate_limit_info` parses as a warning
-	 * (`parseRateLimitWarning`). Never called for one that doesn't — there is nothing observed to
-	 * show for any other shape, and a callback fired with `null` would ask every caller to repeat
-	 * the same "is there anything here" check `parseRateLimitWarning` already did.
+	 * Called for every `rate_limit_event` whose `rate_limit_info` parses at all
+	 * (`parseQuotaSnapshot`). Never called for one that doesn't — there is nothing observed to show
+	 * for any other shape, and a callback fired with `null` would ask every caller to repeat the
+	 * same "is there anything here" check `parseQuotaSnapshot` already did.
 	 */
-	onQuotaWarning: ((warning: RateLimitWarning) => void) | null = null;
+	onQuota: ((snapshot: QuotaSnapshot) => void) | null = null;
+
+	/**
+	 * Called with the current turn's context percentage, once its `result` event carries `usage`
+	 * and `modelUsage` (`contextUsageFromResult`). Absent on a cancelled turn and on any turn whose
+	 * `result` didn't carry the fields — the status line keeps showing the last value it has rather
+	 * than blanking (task 7 brief).
+	 */
+	onContextUsage: ((usage: ContextUsage) => void) | null = null;
 
 	/**
 	 * Called for **every** `system/init`, not just the first — it arrives at the start of every
@@ -335,9 +345,9 @@ export class StreamReducer {
 	 * accumulate.
 	 */
 	private applyRateLimit(event: RateLimitEvent): void {
-		const warning = parseRateLimitWarning(event);
-		if (warning) {
-			this.onQuotaWarning?.(warning);
+		const snapshot = parseQuotaSnapshot(event);
+		if (snapshot) {
+			this.onQuota?.(snapshot);
 		}
 	}
 
@@ -714,6 +724,10 @@ export class StreamReducer {
 			durationMs: event.duration_ms,
 			sessionCostUsd: event.total_cost_usd === undefined ? undefined : this.sessionCostUsd,
 		};
+		const usage = contextUsageFromResult(event);
+		if (usage) {
+			this.onContextUsage?.(usage);
+		}
 		// Whatever the outcome, no block is still streaming once the turn is over — otherwise a
 		// cancelled turn leaves a thinking header saying "Thinking…" forever.
 		closeOpenBlocks(item);

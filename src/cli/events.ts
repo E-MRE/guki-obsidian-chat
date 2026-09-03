@@ -257,6 +257,32 @@ export interface PermissionDenial {
 	tool_input?: unknown;
 }
 
+/**
+ * `result.usage`, the turn's own token counts (Phase 6 task 7, verbatim from a real capture —
+ * see this task's brief). Every field optional: a malformed or absent `usage` must read as "no
+ * context percentage to show", never throw.
+ */
+export interface ResultUsage {
+	input_tokens?: number;
+	cache_creation_input_tokens?: number;
+	cache_read_input_tokens?: number;
+	output_tokens?: number;
+}
+
+/**
+ * One entry of `result.modelUsage`, keyed by the model string. `contextWindow` is what makes the
+ * context-percentage arithmetic need no hardcoded per-model table — it comes from the API response
+ * itself, live, per turn (task 7 brief).
+ */
+export interface ResultModelUsage {
+	inputTokens?: number;
+	cacheReadInputTokens?: number;
+	cacheCreationInputTokens?: number;
+	contextWindow?: number;
+	maxOutputTokens?: number;
+	canonicalModel?: string;
+}
+
 export interface ResultEvent {
 	type: 'result';
 	subtype: string;
@@ -269,7 +295,9 @@ export interface ResultEvent {
 	duration_api_ms?: number;
 	/** Intra-turn counter, not cumulative (RESEARCH B1). */
 	num_turns?: number;
-	usage?: unknown;
+	usage?: ResultUsage;
+	/** One entry in every real capture measured so far; read as the first (only) entry. */
+	modelUsage?: Record<string, ResultModelUsage>;
 	permission_denials?: PermissionDenial[];
 	stop_reason?: string | null;
 	/**
@@ -282,6 +310,56 @@ export interface ResultEvent {
 	 */
 	terminal_reason?: string;
 	ttft_ms?: number;
+}
+
+/** The context percentage for one turn, and the model it was computed against (task 7 brief). */
+export interface ContextUsage {
+	model: string;
+	/** 0–100, rounded. */
+	percent: number;
+}
+
+/**
+ * `(cache_read + cache_creation + input tokens) / contextWindow`, the same arithmetic
+ * Emre's own terminal statusline does with `used_percentage`/`total_input_tokens`/
+ * `context_window_size` — verified against a real capture in this task's brief. `modelUsage` is
+ * read as its first entry: every capture measured so far carries exactly one.
+ *
+ * `null` whenever either `usage` or `modelUsage` is missing or malformed, or `contextWindow` is
+ * zero — there is nothing to show rather than a divide-by-zero or a guessed percentage.
+ */
+export function contextUsageFromResult(event: ResultEvent): ContextUsage | null {
+	const usage = event.usage;
+	const modelUsage = event.modelUsage;
+	if (typeof usage !== 'object' || usage === null || typeof modelUsage !== 'object' || modelUsage === null) {
+		return null;
+	}
+	const entry = Object.entries(modelUsage)[0];
+	if (!entry) {
+		return null;
+	}
+	const [model, info] = entry;
+	const contextWindow = info?.contextWindow;
+	if (typeof contextWindow !== 'number' || contextWindow <= 0) {
+		return null;
+	}
+	const used =
+		(usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+	return { model: info.canonicalModel ?? model, percent: Math.round((used / contextWindow) * 100) };
+}
+
+/**
+ * `"claude-sonnet-5[1m]"` / `"claude-sonnet-5"` → `"Sonnet 5"` — drops the `claude-` prefix, any
+ * trailing `[…]` context-window suffix, and title-cases what's left. Not a lookup table: a model
+ * name this project has never seen still formats sensibly rather than falling back to the raw id.
+ */
+export function formatModelName(model: string): string {
+	const stripped = model.replace(/^claude-/, '').replace(/\[[^\]]*]$/, '');
+	return stripped
+		.split('-')
+		.filter((part) => part.length > 0)
+		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+		.join(' ');
 }
 
 /**
@@ -305,42 +383,66 @@ export interface RateLimitEvent {
 }
 
 /**
- * The one shape ever measured (docs/NEXT.md Phase 6 task 5, verbatim from
- * `docs/capture-phase4-tools.jsonl`, `docs/capture-phase3-thinking-redacted.jsonl` and
- * `docs/capture-phase5a-stop.jsonl`): `rateLimitType` names the window that tripped
- * (`'five_hour'`, `'seven_day'` — both seen; treated as an open string, not an enum, because
- * nothing says those are the only two), `utilization` is 0–1, `resetsAt` is unix **seconds**.
+ * `rate_limit_info.unifiedWindows`, both windows together (task 7 brief): every capture measured
+ * so far — seven occurrences, across three captures, `'allowed_warning'` every time — carries
+ * `five_hour` and `seven_day` in the same payload, not just whichever window `rateLimitType`
+ * names. **No `status` gate here, deliberately** — task 5's `parseRateLimitWarning` gated on
+ * `status === 'allowed_warning'` under the narrower reading that this event means "you are near a
+ * limit"; re-measured for this task, the event fires on an ordinary turn with no prior warning
+ * state too, so the status appears to mean "here is your current quota", not a threshold crossing.
+ * A live gauge has no such threshold to gate on.
  */
-export interface RateLimitWarning {
-	rateLimitType: string;
-	utilization: number;
-	resetsAt: number;
+export interface QuotaSnapshot {
+	fiveHourUtilization?: number;
+	fiveHourResetsAt?: number;
+	sevenDayUtilization?: number;
+	sevenDayResetsAt?: number;
 }
 
 /**
- * `rate_limit_info.status` is `'allowed_warning'` on every occurrence measured — seven, across
- * three captures — and nothing else. Not modelled as an enum: a value nobody has seen (an
- * outright rejection, say) must read as "nothing to show" rather than be guessed at. Every other
- * field is guarded the same way; a malformed payload yields `null`, never a half-filled warning.
+ * Guarded the same way `parseRateLimitWarning` was: a malformed or absent `rate_limit_info`, or a
+ * window whose fields are the wrong type, yields that window simply absent rather than a thrown
+ * error or a guessed number. `null` only when neither window parses at all.
  */
-export function parseRateLimitWarning(event: RateLimitEvent): RateLimitWarning | null {
+export function parseQuotaSnapshot(event: RateLimitEvent): QuotaSnapshot | null {
 	const info = event.rate_limit_info;
 	if (typeof info !== 'object' || info === null) {
 		return null;
 	}
-	const record = info as Record<string, unknown>;
-	if (record.status !== 'allowed_warning') {
+	const windows = (info as Record<string, unknown>).unifiedWindows;
+	if (typeof windows !== 'object' || windows === null) {
 		return null;
 	}
-	const { rateLimitType, utilization, resetsAt } = record;
+	const record = windows as Record<string, unknown>;
+
+	const window = (key: string): { utilization?: number; resetsAt?: number } => {
+		const entry = record[key];
+		if (typeof entry !== 'object' || entry === null) {
+			return {};
+		}
+		const { utilization, resetsAt } = entry as Record<string, unknown>;
+		return {
+			utilization: typeof utilization === 'number' ? utilization : undefined,
+			resetsAt: typeof resetsAt === 'number' ? resetsAt : undefined,
+		};
+	};
+
+	const fiveHour = window('five_hour');
+	const sevenDay = window('seven_day');
 	if (
-		typeof rateLimitType !== 'string' ||
-		typeof utilization !== 'number' ||
-		typeof resetsAt !== 'number'
+		fiveHour.utilization === undefined &&
+		fiveHour.resetsAt === undefined &&
+		sevenDay.utilization === undefined &&
+		sevenDay.resetsAt === undefined
 	) {
 		return null;
 	}
-	return { rateLimitType, utilization, resetsAt };
+	return {
+		fiveHourUtilization: fiveHour.utilization,
+		fiveHourResetsAt: fiveHour.resetsAt,
+		sevenDayUtilization: sevenDay.utilization,
+		sevenDayResetsAt: sevenDay.resetsAt,
+	};
 }
 
 /** A `type` we have not modelled. Kept so the reducer can ignore it instead of throwing. */
