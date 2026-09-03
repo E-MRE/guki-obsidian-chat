@@ -117,7 +117,10 @@
 .guki-message-meta {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-faint);
-	margin: 0 var(--size-4-3);
+	/* Right-only now (task 8 follow-up, ask 2): the left gap used to come from this margin, back
+	   when `.guki-message-meta` was the first thing in the row. Now `.guki-message-footer`'s own
+	   `gap` sits between it and the copy button to its left, so a left margin here would double up. */
+	margin: 0 var(--size-4-3) 0 0;
 	padding: var(--size-4-1) var(--size-4-2);
 }
 
@@ -132,6 +135,64 @@
 
 .guki-message-meta:empty {
 	display: none;
+}
+
+/* Wraps the meta pill and the copy button as row siblings (task 8 follow-up, ask 2) instead of
+   letting `.guki-message`'s own `flex-direction: column` stack them. Placed where the bare
+   `.guki-message-meta` used to sit, so it inherits the same per-kind alignment (`flex-end` for a
+   user bubble, `flex-start` for an assistant one) with no rule of its own needed — the same trick
+   `.guki-message-meta` itself relied on before this wrapper existed. A user item has no meta
+   content (`.guki-message-meta` stays `:empty` for it, collapsing to nothing), so for that kind
+   this row shrinks to just the copy button, unchanged from a plain sibling. */
+.guki-message-footer {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-1);
+}
+
+/* Doubled selector, not `!important` — same fix as `.guki-composer-attach.guki-composer-attach`
+   (task 7 follow-up): Obsidian's own `button:not(.clickable-icon)` rule sets `background-color`/
+   `box-shadow` at specificity (0,1,1), one step above a plain `.guki-message-copy` at (0,1,0), so
+   the idle background below was silently losing to Obsidian's default button fill — which is the
+   actual reason it read as a separate boxed control rather than part of the bubble (task 8
+   follow-up, ask 3). `.guki-message-copy.guki-message-copy` reaches (0,2,0) and wins outright. */
+.guki-message-copy.guki-message-copy {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: var(--size-4-6);
+	height: var(--size-4-6);
+	padding: 0;
+	margin: 0;
+	/* `--background-primary`/`--text-normal`: Emre's own final pick after eyeballing it in
+	   Obsidian (task 8 follow-up round 2) — not `--background-modifier-hover`, that's the
+	   `:hover` colour just below and using it for idle too would leave hover with nothing to
+	   change to. */
+	background-color: var(--background-primary);
+	box-shadow: none;
+	border: none;
+	border-radius: var(--radius-s);
+	color: var(--text-normal);
+	cursor: var(--cursor);
+
+	/* Not `user-select: text` like the rest of the bubble (trap 4, task 8 brief) — a `<button>`
+	   is never selectable regardless, but this keeps its icon from ever becoming copyable text. */
+	-webkit-user-select: none;
+	user-select: none;
+}
+
+.guki-message-copy:hover {
+	color: var(--text-normal);
+	background-color: var(--background-modifier-hover);
+}
+
+.guki-message-copy.guki-message-copy-done {
+	color: var(--text-success);
+}
+
+.guki-message-copy svg {
+	width: var(--icon-s);
+	height: var(--icon-s);
 }
 
 /* User: accent bubble, right-aligned, verbatim text. */
@@ -1096,9 +1157,9 @@
 	color: var(--text-muted);
 }
 
-/* Icon-only and circular (task 7) — `var(--input-height)` matches the attach buttons' own height
-   so all three controls share one row and one baseline. `--radius-m`'s hierarchy comment no longer
-   applies now that this is a circle; kept the same accent/on-accent colors as before. */
+/* Icon-only (task 7) — `var(--input-height)` matches the attach buttons' own height so all three
+   controls share one row and one baseline. `border-radius: var(--radius-m)` (task 8 follow-up
+   round 2, Emre's own pick, squared off from task 7's original circle) rather than `50%`. */
 .guki-composer-send {
 	flex: 0 0 auto;
 	display: flex;
@@ -1107,7 +1168,7 @@
 	width: var(--input-height);
 	height: var(--input-height);
 	padding: 0;
-	border-radius: 50%;
+	border-radius: var(--radius-m);
 	background-color: var(--interactive-accent);
 	color: var(--text-on-accent);
 	box-shadow: none;
@@ -1122,13 +1183,17 @@
 /* Stop: the same button, so the control the reader is already looking at is the one that stops
    the reply. Deliberately not the error red — stopping is a normal thing to do, not a failure. */
 .guki-composer-send.guki-composer-stop {
-	background-color: var(--background-modifier-border);
+	background-color: var(--background-primary);
 	color: var(--text-normal);
 }
 
+.guki-composer-send.guki-composer-stop svg rect {
+	fill: currentColor;
+}
+
 .guki-composer-send.guki-composer-stop:hover {
-	background-color: var(--background-modifier-border-hover);
-	color: var(--text-normal);
+	background-color: var(--interactive-accent-hover);
+	color: var(--text-on-accent);
 }
 
 /* Blocked: the approval gate is not running, the button is genuinely `disabled`, and it must stop

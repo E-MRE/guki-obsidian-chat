@@ -10,9 +10,11 @@
  * block final. Rendering half a fenced code block on every delta is both expensive and looks
  * broken.
  */
-import type { App, Component } from 'obsidian';
+import { setIcon, type App, type Component } from 'obsidian';
 import { imageDataUrl, imageSummary } from '../core/attachments';
 import {
+	assistantCopyText,
+	assistantCopyVisible,
 	hasRenderableContent,
 	orderedBlocks,
 	type AssistantItem,
@@ -68,7 +70,15 @@ interface RenderedItem {
 	 * a `UserItem` never changes after it is created, so there is nothing to re-sync.
 	 */
 	userImagesEl?: HTMLElement;
+	/**
+	 * Copies the whole bubble's text (Phase 6 task 8). User and assistant items only — a notice or
+	 * a permission card is not a conversation bubble, and Emre never asked for one there.
+	 */
+	copyEl?: HTMLButtonElement;
 }
+
+/** How long the icon shows "copied" before reverting — long enough to register, not a toast. */
+const COPY_FEEDBACK_MS = 1500;
 
 export class MessageList {
 	private readonly rendered = new Map<string, RenderedItem>();
@@ -141,17 +151,64 @@ export class MessageList {
 	private createItem(item: ChatItem): RenderedItem {
 		const el = this.scrollEl.createDiv({ cls: `guki-message guki-message-${item.kind}` });
 		const bodyEl = el.createDiv({ cls: 'guki-message-body' });
-		const metaEl = el.createDiv({ cls: 'guki-message-meta' });
+		// One row, not two stacked elements (task 8 follow-up, ask 2): the copy button and the meta
+		// pill are row siblings inside this wrapper, copy button first so it lands to the pill's
+		// left. Created for every kind, same as `.guki-message-meta` was before it, so notice/
+		// permission items keep the exact same DOM shape they always had.
+		const footerEl = el.createDiv({ cls: 'guki-message-footer' });
+
+		// Not notices or permission cards (scope, task 8 brief) — those are not conversation
+		// bubbles, and Emre never asked for a copy affordance on either. Created first so it is the
+		// left-hand sibling of the meta pill created just below.
+		const copyEl =
+			item.kind === 'user' || item.kind === 'assistant'
+				? this.createCopyButton(footerEl, item)
+				: undefined;
+
+		const metaEl = footerEl.createDiv({ cls: 'guki-message-meta' });
 		const entry: RenderedItem = {
 			el,
 			bodyEl,
 			metaEl,
+			copyEl,
 			renderedText: '',
 			status: '',
 			blocks: new Map(),
 		};
+
 		this.rendered.set(item.id, entry);
 		return entry;
+	}
+
+	/**
+	 * Reads `item.text` (user) or `assistantCopyText(item)` (assistant) at click time, never the
+	 * DOM — the whole reason this exists is to copy the raw markdown the model sent, not whatever
+	 * Obsidian's renderer turned it into (`docs/NEXT.md` Open items, task 8 brief).
+	 *
+	 * `item` is closed over rather than re-looked-up: `ChatState` mutates a `UserItem`/`AssistantItem`
+	 * in place and never replaces the object (`SessionManager`/`StreamReducer` write through the same
+	 * reference for the item's whole life), so the reference captured here stays current.
+	 */
+	private createCopyButton(el: HTMLElement, item: UserItem | AssistantItem): HTMLButtonElement {
+		const copyEl = el.createEl('button', {
+			cls: 'guki-message-copy',
+			attr: { 'aria-label': 'Copy message' },
+		});
+		setIcon(copyEl, 'copy');
+
+		this.component.registerDomEvent(copyEl, 'click', () => {
+			const text = item.kind === 'user' ? item.text : assistantCopyText(item);
+			void navigator.clipboard.writeText(text).then(() => {
+				setIcon(copyEl, 'check');
+				copyEl.addClass('guki-message-copy-done');
+				window.setTimeout(() => {
+					setIcon(copyEl, 'copy');
+					copyEl.removeClass('guki-message-copy-done');
+				}, COPY_FEEDBACK_MS);
+			});
+		});
+
+		return copyEl;
 	}
 
 	/** Returns true when it touched the DOM — the jump-to-bottom hint keys off that. */
@@ -216,6 +273,18 @@ export class MessageList {
 		changed = true;
 		entry.el.toggleClass('guki-message-error', item.status === 'error');
 		entry.metaEl.empty();
+
+		// Fix 1 (task 8 follow-up): the button must not read as available before the turn's
+		// blocks are done mutating — `pending`/`streaming` hide it outright rather than merely
+		// disabling it, so it does not sit under the bubble looking clickable during the exact
+		// window Emre caught it in.
+		if (entry.copyEl) {
+			if (assistantCopyVisible(item)) {
+				entry.copyEl.show();
+			} else {
+				entry.copyEl.hide();
+			}
+		}
 
 		switch (item.status) {
 			case 'pending':

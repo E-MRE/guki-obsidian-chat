@@ -323,6 +323,32 @@ export function orderedBlocks(item: AssistantItem): MessageBlock[] {
 	return [...item.blocks.values()].sort((a, b) => a.index - b.index);
 }
 
+/**
+ * What the copy button under an assistant bubble copies: the turn's `text`-kind blocks' raw
+ * markdown, in slot order, joined as separate paragraphs. `thinking` and `tool_use` blocks carry no
+ * prose of their own and are skipped — a mixed turn (text, a tool call, more text) reads as one
+ * reply with a card in the middle, not as three things to choose between (Phase 6 task 8 brief).
+ */
+export function assistantCopyText(item: AssistantItem): string {
+	return orderedBlocks(item)
+		.filter((block) => block.kind === 'text')
+		.map((block) => block.text)
+		.join('\n\n');
+}
+
+/**
+ * Whether the copy button under an assistant bubble should be shown at all (task 8 follow-up,
+ * fix 1). `pending`/`streaming` are excluded: the turn is still mutating, so there is nothing
+ * final to copy yet, and a click mid-stream would silently grab a partial sentence with no sign
+ * anything was wrong. `complete`, `stopped`, and `error` all freeze the turn's blocks — `error`
+ * is included because a turn can fail after producing real text (a tool card mid-turn, say), and
+ * that text is exactly as final as a `stopped` turn's; `withTurnMeta` already treats `error` and
+ * `stopped` the same way for the cost badge, for the same reason.
+ */
+export function assistantCopyVisible(item: AssistantItem): boolean {
+	return item.status === 'complete' || item.status === 'stopped' || item.status === 'error';
+}
+
 /** True when the turn has produced something the reader can see yet. Drives the "Working…" meta. */
 export function hasRenderableContent(item: AssistantItem): boolean {
 	for (const block of item.blocks.values()) {

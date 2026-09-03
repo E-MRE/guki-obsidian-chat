@@ -61,10 +61,13 @@ import { createConnection, createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
+	assistantCopyText,
+	assistantCopyVisible,
 	ChatState,
 	hasRenderableContent,
 	orderedBlocks,
 	type AssistantItem,
+	type MessageBlock,
 	type PermissionItem,
 } from '../src/core/chat-state';
 import { StreamReducer } from '../src/core/stream-reducer';
@@ -4944,6 +4947,96 @@ console.log('S5. listSessions against the real ~/.claude/projects directory (env
 		'sorted newest-first',
 		sessions.every((s, i) => i === 0 || (sessions[i - 1]?.startedAt ?? '') >= s.startedAt),
 	);
+}
+
+// --- T. Phase 6 task 8: the per-message copy button's text assembly --------
+
+/*
+ * `assistantCopyText` is the one piece of the copy button that is pure and worth driving against
+ * fixtures rather than eyeballing in Obsidian (task 8 brief) — which blocks are concatenated, in
+ * what order, and with what joiner. The clipboard write and the "copied" icon swap are real-DOM
+ * behaviour and are covered by the manual round instead (task 8 report).
+ */
+
+function assistantFixture(blocks: MessageBlock[]): AssistantItem {
+	const item: AssistantItem = { kind: 'assistant', id: 'fixture', blocks: new Map(), status: 'complete' };
+	// Inserted out of slot order on purpose: `assistantCopyText` goes through `orderedBlocks`,
+	// which sorts by `index`, so a test that inserted in order would not catch a regression to
+	// plain `Map` iteration order.
+	for (const block of [...blocks].reverse()) {
+		item.blocks.set(block.index, block);
+	}
+	return item;
+}
+
+console.log('T1. a single text block: copied verbatim, no joiner to get wrong');
+eq(
+	'exact markdown, not innerText',
+	assistantCopyText(assistantFixture([{ index: 0, kind: 'text', text: '**bold** and a [link](x)', final: true }])),
+	'**bold** and a [link](x)',
+);
+
+console.log('T2. text blocks either side of a tool call and a thinking block: only the text blocks, in slot order');
+{
+	const item = assistantFixture([
+		{ index: 0, kind: 'text', text: 'Before the call.', final: true },
+		{ index: 1, kind: 'tool_use', text: '', final: true, toolName: 'Read' },
+		{ index: 2, kind: 'thinking', text: 'reasoning the reader never sees copied', final: true },
+		{ index: 3, kind: 'text', text: 'After the call.', final: true },
+	]);
+	eq(
+		'joined as separate paragraphs, tool_use/thinking text excluded entirely',
+		assistantCopyText(item),
+		'Before the call.\n\nAfter the call.',
+	);
+}
+
+console.log('T3. a turn with no text block at all (opens with a tool call, nothing else yet): empty string, not a throw');
+eq(
+	'empty, not "undefined" or a stray joiner',
+	assistantCopyText(assistantFixture([{ index: 0, kind: 'tool_use', text: '', final: false, toolName: 'Read' }])),
+	'',
+);
+
+console.log('T4. a still-streaming text block: block.text copied as-is — there is no markdown to strip either way');
+eq(
+	'the in-flight plain-text delta, unchanged',
+	assistantCopyText(assistantFixture([{ index: 0, kind: 'text', text: 'partial sente', final: false }])),
+	'partial sente',
+);
+
+/*
+ * Task 8 follow-up, fix 1: the copy button was reachable while a turn was still `pending`/
+ * `streaming` (Emre caught it live). `assistantCopyVisible` is the pure decision the DOM-touching
+ * `hide()`/`show()` call in `MessageList.updateAssistant` is keyed off, so it is driven against
+ * fixtures the same way `assistantCopyText` is above, rather than only eyeballed in Obsidian.
+ */
+
+console.log('T5. assistantCopyVisible: hidden while the turn is still mutating, shown once it is not');
+{
+	const pending = assistantFixture([]);
+	pending.status = 'pending';
+	eq('pending: hidden — nothing has arrived yet', assistantCopyVisible(pending), false);
+}
+{
+	const streaming = assistantFixture([{ index: 0, kind: 'text', text: 'partial', final: false }]);
+	streaming.status = 'streaming';
+	eq('streaming: hidden — the reply is still being written', assistantCopyVisible(streaming), false);
+}
+{
+	const complete = assistantFixture([{ index: 0, kind: 'text', text: 'done', final: true }]);
+	complete.status = 'complete';
+	eq('complete: shown', assistantCopyVisible(complete), true);
+}
+{
+	const stopped = assistantFixture([{ index: 0, kind: 'text', text: 'cut off', final: true }]);
+	stopped.status = 'stopped';
+	eq('stopped: shown — the turn is frozen, whatever text exists is final', assistantCopyVisible(stopped), true);
+}
+{
+	const errored = assistantFixture([{ index: 0, kind: 'text', text: 'got this far', final: true }]);
+	errored.status = 'error';
+	eq('error: shown — same reasoning as stopped, the turn is frozen either way', assistantCopyVisible(errored), true);
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
