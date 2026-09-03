@@ -232,7 +232,9 @@ export class MessageList {
 				entry.metaEl.setText(withTurnMeta('Stopped.', item));
 				break;
 			case 'error':
-				entry.metaEl.setText(item.errorText ?? 'Something went wrong.');
+				// Trap 3: an errored turn still cost money. `withTurnMeta` appends the badge to the
+				// error text exactly as the `stopped` case does above.
+				entry.metaEl.setText(withTurnMeta(item.errorText ?? 'Something went wrong.', item));
 				break;
 			case 'complete':
 				entry.metaEl.setText(formatTurnMeta(item));
@@ -487,20 +489,40 @@ function thinkingHeaderText(block: MessageBlock): string {
 		: `Thinking… ${String(block.thinkingTokens)} tokens`;
 }
 
-/** Cost and duration, from the `result` event (RESEARCH B2). Either half may be absent. */
-function formatTurnMeta(item: AssistantItem): string {
+/**
+ * Duration, this turn's own cost, and the session total — from the `result` event (RESEARCH B2,
+ * PHASE6-TASK5-STATE §M1). Any part may be absent.
+ *
+ * **The total is shown only when it differs from the turn's own cost.** On the first turn of a
+ * process they are the same number (`StreamReducer.turnCostUsd` has no baseline yet), and printing
+ * it twice reads as a bug — Emre's call, task 5 brief. Compared as the same 4-decimal string this
+ * function prints, not as raw floats, so two values that round to the same display never repeat.
+ */
+export function formatTurnMeta(item: AssistantItem): string {
 	const parts: string[] = [];
 	if (item.meta?.durationMs !== undefined) {
 		parts.push(`${(item.meta.durationMs / 1000).toFixed(1)} s`);
 	}
 	if (item.meta?.costUsd !== undefined) {
-		parts.push(`$${item.meta.costUsd.toFixed(4)}`);
+		const turnCost = `$${item.meta.costUsd.toFixed(4)}`;
+		parts.push(turnCost);
+		if (item.meta.sessionCostUsd !== undefined) {
+			const total = `$${item.meta.sessionCostUsd.toFixed(4)}`;
+			if (total !== turnCost) {
+				parts.push(`${total} total`);
+			}
+		}
 	}
 	return parts.join(' · ');
 }
 
-/** A cancelled turn still carries `duration_ms` and `total_cost_usd` (PHASE3-STATE F5). */
-function withTurnMeta(prefix: string, item: AssistantItem): string {
+/**
+ * A cancelled turn still carries `duration_ms` and `total_cost_usd` (PHASE3-STATE F5) — and so
+ * does an errored one (trap 3, PHASE6-TASK5-STATE): a turn that ends in error was billed the same
+ * way as any other, so `updateAssistant`'s `error` branch runs its text through this too rather
+ * than writing `errorText` alone.
+ */
+export function withTurnMeta(prefix: string, item: AssistantItem): string {
 	const meta = formatTurnMeta(item);
 	return meta.length > 0 ? `${prefix} ${meta}` : prefix;
 }

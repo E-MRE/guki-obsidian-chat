@@ -74,8 +74,11 @@ import {
 	deniedToolUseIds,
 	isSystemInitEvent,
 	mcpServerStatus,
+	parseRateLimitWarning,
 	parseStreamJsonLine,
 	userMessageLine,
+	type RateLimitEvent,
+	type RateLimitWarning,
 	type ResultEvent,
 	type StreamJsonEvent,
 	type SystemInitEvent,
@@ -84,6 +87,8 @@ import { startsExpanded, toolCategory, toolResultText, toolSummary } from '../sr
 import { diffFromToolInput, diffStats, emptyPaneText } from '../src/ui/diff-view';
 import { toolResultTitle, toolStatusText } from '../src/ui/tool-card';
 import { permissionDiff } from '../src/ui/permission-card';
+import { formatQuotaWarning } from '../src/ui/chat-view';
+import { formatTurnMeta, withTurnMeta } from '../src/ui/message-list';
 import { containsPath, permissionVerdict } from '../src/core/permission-policy';
 import { FALLBACK_VAULT_PATH } from '../src/constants';
 import { tokenizeCommand } from '../src/core/bash-whitelist';
@@ -246,6 +251,9 @@ check(
 eq('turn ended as complete', item.status, 'complete');
 eq('onTurnEnd fired once', turnEnds, 1);
 check('meta line has both halves', item.meta?.durationMs === 15238 && item.meta.costUsd === 0.1832235);
+// This is the reducer's first turn, so there is no baseline yet: the running total is the
+// reported cumulative verbatim, same number as the turn's own cost (PHASE6-TASK5-STATE §P).
+eq('sessionCostUsd on a process\'s first turn equals the turn\'s own cost', item.meta?.sessionCostUsd, 0.1832235);
 
 // What the renderer keys off. `text.length > 0` is the exact expander condition in
 // `MessageList.updateThinkingBlock`; on this capture it is false for the whole turn.
@@ -4355,6 +4363,328 @@ console.log('O11. which paste is the composer\'s — the ownership predicate');
 	// the panel that is genuinely ambiguous — and it is exactly what the guards are for.
 	eq('the workspace above both is ours only with the last click here', ours(workspace, true, true), true);
 	eq('...and not without it', ours(workspace, false, true), false);
+}
+
+// --- P. cost/duration badge: delta accounting and the process-restart guard --
+
+console.log("P1. Three turns in one process: each result carries this turn's own delta, and the running total is the reducer's own sum");
+{
+	const s = new ChatState();
+	const r = new StreamReducer(s);
+
+	const turn1 = s.addAssistantMessage();
+	r.beginTurn(turn1);
+	r.apply({ type: 'result', subtype: 'success', is_error: false, total_cost_usd: 0.25, duration_ms: 1000 } as StreamJsonEvent);
+	eq('turn 1: no baseline yet, so the cost is the reported cumulative verbatim', turn1.meta?.costUsd, 0.25);
+	eq('turn 1: the running total equals the turn cost (first turn of the process)', turn1.meta?.sessionCostUsd, 0.25);
+
+	const turn2 = s.addAssistantMessage();
+	r.beginTurn(turn2);
+	r.apply({ type: 'result', subtype: 'success', is_error: false, total_cost_usd: 0.75, duration_ms: 1500 } as StreamJsonEvent);
+	eq("turn 2: cost is the delta off the CLI's cumulative (0.75 − 0.25)", turn2.meta?.costUsd, 0.5);
+	eq('turn 2: the running total is the sum of the two turn costs, not the echoed cumulative', turn2.meta?.sessionCostUsd, 0.75);
+
+	const turn3 = s.addAssistantMessage();
+	r.beginTurn(turn3);
+	r.apply({ type: 'result', subtype: 'success', is_error: false, total_cost_usd: 1.5, duration_ms: 800 } as StreamJsonEvent);
+	eq('turn 3: the next delta (1.5 − 0.75)', turn3.meta?.costUsd, 0.75);
+	eq('turn 3: running total keeps climbing', turn3.meta?.sessionCostUsd, 1.5);
+}
+
+console.log('P2. The restart guard: a cumulative that drops reads as a fresh process, never as a negative delta');
+{
+	// `SessionManager.handleExit` (session-manager.ts:360) only fails the active turn — it does not
+	// replace `this.reducer` — so a subprocess restart mid-session is proven on the *same* reducer
+	// instance, exactly as it happens in the real panel.
+	const s = new ChatState();
+	const r = new StreamReducer(s);
+
+	const before = s.addAssistantMessage();
+	r.beginTurn(before);
+	r.apply({ type: 'result', subtype: 'success', is_error: false, total_cost_usd: 0.6, duration_ms: 500 } as StreamJsonEvent);
+	eq('pre-restart: baseline is fresh, cost is reported verbatim', before.meta?.costUsd, 0.6);
+	eq('pre-restart: running total', before.meta?.sessionCostUsd, 0.6);
+
+	// The process died and a fresh one started: `total_cost_usd` accumulates per CLI process, not
+	// per session id (measured, PHASE6-TASK5-STATE §M1), so the next result arrives with a
+	// cumulative that reset to near-zero.
+	const after = s.addAssistantMessage();
+	r.beginTurn(after);
+	r.apply({ type: 'result', subtype: 'success', is_error: false, total_cost_usd: 0.05, duration_ms: 700 } as StreamJsonEvent);
+	eq('post-restart: a lower cumulative is read as the fresh process\'s own total, not a delta', after.meta?.costUsd, 0.05);
+	check('the turn cost is never negative across a restart', (after.meta?.costUsd ?? -1) >= 0);
+	eq(
+		"post-restart: the running total keeps climbing across the restart rather than dropping with the CLI's own number",
+		after.meta?.sessionCostUsd,
+		0.65,
+	);
+}
+
+console.log('P3. Trap 3: an errored turn was still billed for, and the meta line must say so');
+{
+	const s = new ChatState();
+	const r = new StreamReducer(s);
+	const turn = s.addAssistantMessage();
+	r.beginTurn(turn);
+	r.apply({
+		type: 'result',
+		subtype: 'error_during_execution',
+		is_error: true,
+		total_cost_usd: 0.02,
+		duration_ms: 4200,
+	} as StreamJsonEvent);
+	eq('the turn reads as an error', turn.status, 'error');
+	eq('...but its cost is not dropped', turn.meta?.costUsd, 0.02);
+	eq('...nor its duration', turn.meta?.durationMs, 4200);
+}
+
+// --- Q. quota warning: rate_limit_event parsing and the reducer's callback ---
+
+console.log("Q1. parseRateLimitWarning: the one status ever measured, and what it refuses");
+{
+	const measuredInfo = {
+		status: 'allowed_warning',
+		resetsAt: 1787927400,
+		rateLimitType: 'five_hour',
+		utilization: 0.91,
+		isUsingOverage: false,
+		surpassedThreshold: 0.9,
+		unifiedWindows: {},
+	};
+	const measured: RateLimitEvent = { type: 'rate_limit_event', rate_limit_info: measuredInfo };
+	const warning = parseRateLimitWarning(measured);
+	check('the measured shape parses', warning !== null);
+	eq('rateLimitType', warning?.rateLimitType, 'five_hour');
+	eq('utilization', warning?.utilization, 0.91);
+	eq('resetsAt', warning?.resetsAt, 1787927400);
+
+	// Not an enum: branch on the one status ever observed and refuse everything else, rather than
+	// inventing 'allowed' | 'rejected' around a value that has never been measured on the wire.
+	eqCall(
+		'a status this project has never measured refuses rather than guessing at its shape',
+		() => parseRateLimitWarning({ type: 'rate_limit_event', rate_limit_info: { ...measuredInfo, status: 'rejected' } }),
+		null,
+	);
+	eqCall('missing rate_limit_info refuses', () => parseRateLimitWarning({ type: 'rate_limit_event' }), null);
+	eqCall(
+		'a non-object rate_limit_info refuses',
+		() => parseRateLimitWarning({ type: 'rate_limit_event', rate_limit_info: 'nope' }),
+		null,
+	);
+	eqCall(
+		'a field with the wrong type refuses rather than coercing',
+		() =>
+			parseRateLimitWarning({
+				type: 'rate_limit_event',
+				rate_limit_info: { ...measuredInfo, resetsAt: '1787927400' },
+			}),
+		null,
+	);
+}
+
+console.log("Q2. StreamReducer.onQuotaWarning over docs/capture-phase4-tools.jsonl: three climbing warnings inside one turn");
+{
+	const captureQ2 = readFileSync(join(process.cwd(), 'docs', 'capture-phase4-tools.jsonl'), 'utf8');
+	const s = new ChatState();
+	const r = new StreamReducer(s);
+	const seen: Array<{ rateLimitType: string; utilization: number; resetsAt: number }> = [];
+	r.onQuotaWarning = (w) => {
+		seen.push({ rateLimitType: w.rateLimitType, utilization: w.utilization, resetsAt: w.resetsAt });
+	};
+
+	const turn = s.addAssistantMessage();
+	r.beginTurn(turn);
+	for (const line of captureQ2.split('\n')) {
+		const event = parseStreamJsonLine(line);
+		if (event) {
+			r.apply(event);
+		}
+	}
+
+	// One callback per event, not deduplicated and not collapsed to the last: the callback is the
+	// reducer's whole contract, and it is the view's job (chat-view.ts's `updateQuotaStrip`) to
+	// turn a same-text repeat into "update in place" rather than a fresh line each time.
+	eq('the callback fired once per real event in the capture', seen.length, 3);
+	eq('utilization climbs across the three, in order', seen.map((w) => w.utilization).join(','), '0.91,0.92,0.93');
+	check('every one names the five_hour window', seen.every((w) => w.rateLimitType === 'five_hour'));
+	check('every one carries the same reset time', seen.every((w) => w.resetsAt === 1787927400));
+}
+
+console.log('Q3. A second real window type and a repeat with no change: docs/capture-phase3-thinking-redacted.jsonl');
+{
+	const captureQ3 = readFileSync(join(process.cwd(), 'docs', 'capture-phase3-thinking-redacted.jsonl'), 'utf8');
+	const s = new ChatState();
+	const r = new StreamReducer(s);
+	const seen: Array<{ rateLimitType: string; utilization: number }> = [];
+	r.onQuotaWarning = (w) => {
+		seen.push({ rateLimitType: w.rateLimitType, utilization: w.utilization });
+	};
+
+	const turn = s.addAssistantMessage();
+	r.beginTurn(turn);
+	for (const line of captureQ3.split('\n')) {
+		const event = parseStreamJsonLine(line);
+		if (event) {
+			r.apply(event);
+		}
+	}
+
+	eq('both events in this capture reach the callback, unchanged in shape', seen.length, 2);
+	eq('...and they are identical — the "update in place, never stack" case the strip has to collapse', seen.map((w) => w.utilization).join(','), '0.83,0.83');
+	check('this capture\'s window is the other one ever measured: seven_day', seen.every((w) => w.rateLimitType === 'seven_day'));
+}
+
+// --- R. Follow-up round: the quota strip's date marker, and the badge's display layer ---
+//
+// Driven directly against the real, exported `formatQuotaWarning` (chat-view.ts) and
+// `formatTurnMeta` / `withTurnMeta` (message-list.ts) — previously exported-but-untested, per the
+// orchestrator's audit of this task. Reaching them meant extending `obsidian-stub.mjs` with four
+// empty classes (`ItemView`, `Notice`, `WorkspaceLeaf`, `MarkdownRenderer` — see its own comment);
+// nothing here instantiates any of the four or calls a method on them.
+
+console.log('R1. formatQuotaWarning: a reset on the reader\'s current calendar day prints a bare time; any other day carries a date marker');
+{
+	// The real pair from docs/capture-phase4-tools.jsonl / capture-phase3-thinking-redacted.jsonl:
+	// the same event's five_hour window resets same-afternoon, its seven_day window two days
+	// later, and both printed as a bare, indistinguishable clock time before this fix (measured by
+	// the orchestrator: "resets 17:30." / "resets 4:00." on the same event).
+	const warning: RateLimitWarning = { rateLimitType: 'five_hour', utilization: 0.91, resetsAt: 1787927400 };
+	const resetDate = new Date(warning.resetsAt * 1000);
+	const expectedTime = resetDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+	// Built from the reset's own local calendar date, not from a raw offset in seconds — so "same
+	// day" and "a different day" hold in whatever timezone actually runs this suite, not just
+	// Europe/Istanbul. This is the same rule `formatQuotaWarning` itself applies (`toDateString()`
+	// equality), so the test is pinned to the *rule*, never to a rendered, locale-formatted string.
+	const sameDayNow = new Date(
+		resetDate.getFullYear(),
+		resetDate.getMonth(),
+		resetDate.getDate(),
+		0,
+		1,
+		0,
+	).getTime();
+	const otherDayNow = new Date(
+		resetDate.getFullYear(),
+		resetDate.getMonth(),
+		resetDate.getDate() - 3,
+		12,
+		0,
+		0,
+	).getTime();
+
+	const textSameDay = formatQuotaWarning(warning, sameDayNow);
+	eq(
+		'same calendar day: the text is exactly the bare time, computed the same way as production, no marker',
+		textSameDay,
+		`Approaching the five hour usage limit — 91% used, resets ${expectedTime}.`,
+	);
+
+	const textOtherDay = formatQuotaWarning(warning, otherDayNow);
+	check(
+		'a different calendar day is not the bare-time string alone — a marker was added',
+		textOtherDay !== `Approaching the five hour usage limit — 91% used, resets ${expectedTime}.`,
+	);
+	check(
+		'...and the same bare time still appears inside it, just not alone — this is additive, not a substitute',
+		textOtherDay.includes(expectedTime),
+	);
+}
+
+console.log('R2. formatTurnMeta: the total is suppressed when it equals the turn cost, shown when it differs');
+{
+	const s = new ChatState();
+
+	const sameValue = s.addAssistantMessage();
+	sameValue.meta = { durationMs: 1200, costUsd: 0.25, sessionCostUsd: 0.25 };
+	eq('equal cost and total: printed once, no "total" suffix', formatTurnMeta(sameValue), '1.2 s · $0.2500');
+
+	// The orchestrator's own measured pair (audit round), pinned verbatim.
+	const differs = s.addAssistantMessage();
+	differs.meta = { durationMs: 1200, costUsd: 0.0028, sessionCostUsd: 0.022 };
+	eq(
+		'a total that differs is printed, labelled',
+		formatTurnMeta(differs),
+		'1.2 s · $0.0028 · $0.0220 total',
+	);
+}
+
+console.log('R3. formatTurnMeta: two distinct floats that round to the same 4-decimal string are treated as equal, not just two equal floats');
+{
+	// Verified in Node before use: 0.100001 !== 0.100004 as raw numbers, but both .toFixed(4) to
+	// "0.1000" — the exact case `formatTurnMeta`'s own comment claims ("compared as the same
+	// 4-decimal string ... not as raw floats"). Held in `number`-typed locals rather than compared
+	// as literals — two distinct numeric literals compared with `!==` is a `tsc` error under this
+	// project's strict config ("this comparison appears to be unintentional"), correctly: the
+	// point being proven is a runtime fact about floats, not a literal-type tautology.
+	const turnCost: number = 0.100001;
+	const sessionTotal: number = 0.100004;
+	check('the two floats really are distinct', turnCost !== sessionTotal);
+	check('...and really do round to the same displayed string', turnCost.toFixed(4) === sessionTotal.toFixed(4));
+
+	const s = new ChatState();
+	const item = s.addAssistantMessage();
+	item.meta = { costUsd: turnCost, sessionCostUsd: sessionTotal };
+	eq(
+		'display-equal floats suppress the total exactly like true-equal ones do',
+		formatTurnMeta(item),
+		'$0.1000',
+	);
+}
+
+console.log('R4. formatTurnMeta: either half absent on its own, and both absent');
+{
+	const s = new ChatState();
+
+	const durationOnly = s.addAssistantMessage();
+	durationOnly.meta = { durationMs: 4200 };
+	eq('duration with no cost at all: just the duration', formatTurnMeta(durationOnly), '4.2 s');
+
+	const costOnly = s.addAssistantMessage();
+	costOnly.meta = { costUsd: 0.02 };
+	eq('cost with no duration and no session total: just the cost', formatTurnMeta(costOnly), '$0.0200');
+
+	const neither = s.addAssistantMessage();
+	neither.meta = {};
+	eq('both absent: an empty string, not a stray separator', formatTurnMeta(neither), '');
+
+	const noMetaAtAll = s.addAssistantMessage();
+	eq('no meta object at all (never reached a result event): still an empty string', formatTurnMeta(noMetaAtAll), '');
+}
+
+console.log('R5. withTurnMeta: the stopped and error prefixes, and the no-meta case falls back to the bare prefix');
+{
+	const s = new ChatState();
+
+	const stopped = s.addAssistantMessage();
+	stopped.status = 'stopped';
+	stopped.meta = { durationMs: 1200, costUsd: 0.0028, sessionCostUsd: 0.022 };
+	eq(
+		'stopped: the badge is appended after a space, same shape as formatTurnMeta alone',
+		withTurnMeta('Stopped.', stopped),
+		'Stopped. 1.2 s · $0.0028 · $0.0220 total',
+	);
+
+	// Trap 3: an errored turn was still billed, so the same function runs on its error text too
+	// (message-list.ts's `case 'error':`).
+	const errored = s.addAssistantMessage();
+	errored.status = 'error';
+	errored.errorText = 'The turn ended with error_during_execution.';
+	errored.meta = { durationMs: 4200, costUsd: 0.02 };
+	eq(
+		'error: the billed badge is appended to the error text, not dropped',
+		withTurnMeta(errored.errorText, errored),
+		'The turn ended with error_during_execution. 4.2 s · $0.0200',
+	);
+
+	const nothingToShow = s.addAssistantMessage();
+	nothingToShow.status = 'error';
+	nothingToShow.meta = {};
+	eq(
+		'no meta at all (failActiveTurn — no result event ever arrived): the bare prefix, no trailing space',
+		withTurnMeta('Something went wrong.', nothingToShow),
+		'Something went wrong.',
+	);
 }
 
 rmSync(POLICY_VAULT.base, { recursive: true, force: true });

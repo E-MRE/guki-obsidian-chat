@@ -304,6 +304,45 @@ export interface RateLimitEvent {
 	rate_limit_info?: unknown;
 }
 
+/**
+ * The one shape ever measured (docs/NEXT.md Phase 6 task 5, verbatim from
+ * `docs/capture-phase4-tools.jsonl`, `docs/capture-phase3-thinking-redacted.jsonl` and
+ * `docs/capture-phase5a-stop.jsonl`): `rateLimitType` names the window that tripped
+ * (`'five_hour'`, `'seven_day'` — both seen; treated as an open string, not an enum, because
+ * nothing says those are the only two), `utilization` is 0–1, `resetsAt` is unix **seconds**.
+ */
+export interface RateLimitWarning {
+	rateLimitType: string;
+	utilization: number;
+	resetsAt: number;
+}
+
+/**
+ * `rate_limit_info.status` is `'allowed_warning'` on every occurrence measured — seven, across
+ * three captures — and nothing else. Not modelled as an enum: a value nobody has seen (an
+ * outright rejection, say) must read as "nothing to show" rather than be guessed at. Every other
+ * field is guarded the same way; a malformed payload yields `null`, never a half-filled warning.
+ */
+export function parseRateLimitWarning(event: RateLimitEvent): RateLimitWarning | null {
+	const info = event.rate_limit_info;
+	if (typeof info !== 'object' || info === null) {
+		return null;
+	}
+	const record = info as Record<string, unknown>;
+	if (record.status !== 'allowed_warning') {
+		return null;
+	}
+	const { rateLimitType, utilization, resetsAt } = record;
+	if (
+		typeof rateLimitType !== 'string' ||
+		typeof utilization !== 'number' ||
+		typeof resetsAt !== 'number'
+	) {
+		return null;
+	}
+	return { rateLimitType, utilization, resetsAt };
+}
+
 /** A `type` we have not modelled. Kept so the reducer can ignore it instead of throwing. */
 export interface UnknownEvent {
 	type: string;
@@ -370,6 +409,10 @@ export function isStreamPartialEvent(ev: StreamJsonEvent): ev is StreamPartialEv
 
 export function isThinkingTokensEvent(ev: StreamJsonEvent): ev is SystemThinkingTokensEvent {
 	return ev.type === 'system' && (ev as SystemOtherEvent).subtype === 'thinking_tokens';
+}
+
+export function isRateLimitEvent(ev: StreamJsonEvent): ev is RateLimitEvent {
+	return ev.type === 'rate_limit_event';
 }
 
 /**

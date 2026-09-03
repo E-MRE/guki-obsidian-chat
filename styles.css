@@ -103,16 +103,31 @@
 	margin-bottom: 0;
 }
 
-/* Deliberately inline flow rather than a flex row. The horizontal padding matches the bubble's
-   own (`--size-4-3`), so the meta text lines up with the text inside the bubble — at 8px it sat
-   4px outside it on both sides, right-aligned under the user's bubble and left-aligned under the
-   reply. And inline flow is what lets task 5's cost/duration badge arrive as one `<span>` with no
-   layout change: a flex row here would need `justify-content: center` restored for the notice and
-   a `min-width: 0` on its detail `<code>` before it broke even. */
+/* Deliberately inline flow rather than a flex row, so the notice's centred layout and its detail
+   `<code>` need no change alongside it. `MessageList` never gives this element a child, only ever
+   `setText`, so `:empty` below still matches on a genuine "nothing to show" (streaming,
+   PHASE6-TASK5-STATE trap 2) rather than on an element that merely prints an empty string into a
+   surviving child node.
+   The pill hugging its own content rather than spanning full width is the *parent's* doing —
+   `align-items: flex-start` on `.guki-message-assistant` below, `center` on
+   `.guki-message-notice`, `flex-end` on `.guki-message-user` — not this rule's. A `display:
+   inline-block` was tried here in task 5's first round and did nothing: `.guki-message` is a flex
+   container, and a flex item's `display` is blockified per spec regardless of what it is set to,
+   so it computed to plain `block` (caught in the follow-up round, PHASE6-TASK5-STATE §F). */
 .guki-message-meta {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-faint);
-	padding: 0 var(--size-4-3);
+	margin: 0 var(--size-4-3);
+	padding: var(--size-4-1) var(--size-4-2);
+}
+
+/* Scoped to assistant turns only: a notice's meta holds a `<code>` detail (a path or a spawn
+   error), and Obsidian's own theme puts a background on bare `code` elements — nesting this pill's
+   background behind that would double-box it. Assistant turns never put anything but plain text in
+   this element, so the pill reads clean there. */
+.guki-message-assistant .guki-message-meta:not(:empty) {
+	background-color: var(--background-modifier-hover);
+	border-radius: var(--radius-m);
 }
 
 .guki-message-meta:empty {
@@ -794,6 +809,28 @@
 	color: var(--text-error);
 }
 
+/* --- quota strip ---------------------------------------------------------- */
+
+/* A warning, not a gauge (Emre's decision, 2026-09-03): `rate_limit_event` is only ever sent near
+   the threshold, so this element sits empty — collapsed by `:empty`, same trick as the meta badge
+   above — until the first one arrives, then holds the latest utilization in place rather than
+   stacking a second line when the event repeats within one turn.
+   `--text-accent` / `--background-modifier-hover` rather than an error/warning-red pair: both are
+   already proven elsewhere in this file, and nothing here could confirm an Obsidian variable this
+   plugin has never used before actually exists (PHASE6-TASK5-STATE). */
+.guki-quota-strip {
+	flex: 0 0 auto;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-accent);
+	background-color: var(--background-modifier-hover);
+	border-radius: var(--radius-m);
+	padding: var(--size-4-1) var(--size-4-2);
+}
+
+.guki-quota-strip:empty {
+	display: none;
+}
+
 /* --- composer ----------------------------------------------------------- */
 
 .guki-footer {
@@ -983,6 +1020,12 @@
 	flex: 1 1 auto;
 	min-width: 0;
 	resize: none;
+	/* JS (`Composer.autoGrow`) sets `height` from `scrollHeight` on every keystroke; this is the
+	   ceiling it grows against. Past it the box stops growing and scrolls its own content instead
+	   of pushing the message list out of view — the composer already does this for attachment
+	   chips, this just gives typed text the same limit (PHASE6-TASK5-STATE). */
+	max-height: 240px;
+	overflow-y: auto;
 	border: none;
 	box-shadow: none;
 	background-color: transparent;
@@ -1057,6 +1100,11 @@
 	gap: var(--size-4-2);
 }
 
+/* The strip's own padding is the same fixed cost in both panes — there is nothing in it to shrink
+   without truncating the utilization or the reset time, and a 480px pane is still wide enough for
+   one line of `--font-ui-smaller` text. Listed here, empty, so its narrow-pane cost is a deliberate
+   "none" rather than an omission (PHASE6-TASK5-STATE). */
+
 .guki-root.guki-narrow .guki-message {
 	max-width: 95%;
 }
@@ -1068,6 +1116,14 @@
 
 .guki-root.guki-narrow .guki-composer-row {
 	gap: var(--size-4-1);
+}
+
+/* A sidebar this narrow is generally also short (it is a column competing with the file
+   explorer and other panes for the window's height), so the main-pane ceiling would let a long
+   paste push the message list down to nothing. Lower, not removed — it still scrolls internally
+   past this rather than resuming the pre-task-5 fixed-3-rows behaviour. */
+.guki-root.guki-narrow .guki-composer-input {
+	max-height: 120px;
 }
 
 .guki-root.guki-narrow .guki-composer-send {

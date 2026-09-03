@@ -26,3 +26,15 @@ export function normalizePath(path) {
 // helper exists so the module links, and touching the DOM here would mean the checks were testing
 // rendering rather than the decision.
 export function setIcon() {}
+
+// Phase 6 task 5 follow-up round: `chat-view.ts`'s `formatQuotaWarning` and `message-list.ts`'s
+// `formatTurnMeta` / `withTurnMeta` are pure, exported, and worth driving directly rather than
+// leaving as manual-only — but importing either module reaches these four as *values*:
+// `chat-view.ts` extends `ItemView` and calls `new Notice(...)` in a non-`type` import that also
+// names `WorkspaceLeaf`, and `message-list.ts` pulls in `markdown.ts`, which imports
+// `MarkdownRenderer`. None of the checks instantiate any of the four or call a method on them —
+// only the module graph has to link — so empty classes are enough.
+export class ItemView {}
+export class Notice {}
+export class WorkspaceLeaf {}
+export class MarkdownRenderer {}

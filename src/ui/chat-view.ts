@@ -17,9 +17,36 @@ import {
 	type ImageTriage,
 } from '../core/attachment-resolver';
 import type { Attachment } from '../core/attachments';
+import type { RateLimitWarning } from '../cli/events';
 import type { SessionManager } from '../core/session-manager';
 import { Composer } from './composer';
 import { MessageList } from './message-list';
+
+/**
+ * Human-readable text for the quota strip. Exported and pure so it can be checked without a DOM
+ * (offline-checks follow-up round extended the stub — see its own comment — so this is now driven
+ * directly rather than only manually).
+ *
+ * **The date marker (follow-up round, orchestrator finding).** A bare clock time reads as "later
+ * today" — true for a `five_hour` warning, false for `seven_day`: the same real
+ * `rate_limit_event` in `docs/capture-phase4-tools.jsonl` carries a `five_hour` reset 17:30 the
+ * same afternoon and a `seven_day` reset 04:00 two days later, and both printed as bare `17:30` /
+ * `4:00` before this fix — a reader has no way to tell those apart. `resetDate.toDateString() ===
+ * now.toDateString()` is the rule: only a reset that falls outside the reader's current calendar
+ * day gets the extra weekday/date prefix. `now` defaults to `Date.now()` rather than reading the
+ * clock directly inside the function, specifically so a test can pin it.
+ */
+export function formatQuotaWarning(warning: RateLimitWarning, now: number = Date.now()): string {
+	const pct = Math.round(warning.utilization * 100);
+	const kind = warning.rateLimitType.replace(/_/g, ' ');
+	const resetDate = new Date(warning.resetsAt * 1000);
+	const sameDay = resetDate.toDateString() === new Date(now).toDateString();
+	const time = resetDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+	const resetsAt = sameDay
+		? time
+		: `${resetDate.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}, ${time}`;
+	return `Approaching the ${kind} usage limit — ${pct}% used, resets ${resetsAt}.`;
+}
 
 export class ChatView extends ItemView {
 	private rootEl: HTMLElement | null = null;
@@ -27,6 +54,8 @@ export class ChatView extends ItemView {
 	private pendingMeasure: number | null = null;
 	private messageList: MessageList | null = null;
 	private composer: Composer | null = null;
+	private quotaEl: HTMLElement | null = null;
+	private lastQuotaText: string | null = null;
 	private unsubscribe: (() => void) | null = null;
 
 	/**
@@ -66,6 +95,12 @@ export class ChatView extends ItemView {
 				this.session.decidePermission(requestId, behavior);
 			},
 		});
+
+		// Between the messages and the composer, so it reads as ambient session state rather than
+		// a reply. One element that updates in place: `rate_limit_event` can repeat several times
+		// within a turn as utilization climbs, and stacking a fresh notice per event would fill a
+		// narrow sidebar (Emre's decision, 2026-09-03).
+		this.quotaEl = root.createDiv({ cls: 'guki-quota-strip' });
 
 		const footer = root.createDiv({ cls: 'guki-footer' });
 		// Kept as a field now: the Send/Stop swap is driven from the session state.
@@ -190,6 +225,8 @@ export class ChatView extends ItemView {
 		this.unsubscribe = null;
 		this.messageList = null;
 		this.composer = null;
+		this.quotaEl = null;
+		this.lastQuotaText = null;
 
 		// A ResizeObserver is not covered by Component.register*, so disconnect it by hand.
 		this.resizeObserver?.disconnect();
@@ -320,6 +357,24 @@ export class ChatView extends ItemView {
 		this.messageList?.sync(this.session.state.items);
 		this.composer?.setBusy(this.session.busy);
 		this.composer?.setBlocked(this.session.blocked);
+		this.updateQuotaStrip();
+	}
+
+	/**
+	 * `ChatState` never clears a warning once set (there is no measured signal that means "back
+	 * under the threshold" — see its own comment), so neither does this: the strip holds the last
+	 * warning for the rest of the process rather than guessing at when it is safe to hide.
+	 */
+	private updateQuotaStrip(): void {
+		const warning = this.session.state.quotaWarning;
+		if (!warning || !this.quotaEl) {
+			return;
+		}
+		const text = formatQuotaWarning(warning);
+		if (text !== this.lastQuotaText) {
+			this.quotaEl.setText(text);
+			this.lastQuotaText = text;
+		}
 	}
 
 	/**

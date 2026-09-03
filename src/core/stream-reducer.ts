@@ -16,6 +16,7 @@
  */
 import {
 	isAssistantEvent,
+	isRateLimitEvent,
 	isResultEvent,
 	isStreamPartialEvent,
 	isSystemInitEvent,
@@ -23,8 +24,11 @@ import {
 	isThinkingTokensEvent,
 	isUserEvent,
 	deniedToolUseIds,
+	parseRateLimitWarning,
 	type AssistantEvent,
 	type ContentBlock,
+	type RateLimitEvent,
+	type RateLimitWarning,
 	type ResultEvent,
 	type SseContentBlockDelta,
 	type SseContentBlockStart,
@@ -118,10 +122,32 @@ export class StreamReducer {
 	private interruptSent = false;
 
 	/**
+	 * The last `result.total_cost_usd` this reducer has seen, and the reducer's own running sum of
+	 * per-turn deltas. `null` means "no result yet" — the state a fresh process starts in, and the
+	 * state a restarted one returns to without recreating the reducer (`SessionManager.handleExit`
+	 * fails the in-flight turn but does not replace `this.reducer`).
+	 *
+	 * `total_cost_usd` accumulates over the CLI **process**, not the session id (measured
+	 * 2026-09-03, PHASE6-TASK5-STATE §M1: a session resumed in a fresh process reported a low
+	 * cumulative, not the old one carried forward). So a reported total *lower* than the last one
+	 * means a new process started, not that the turn cost a negative amount — see `applyResult`.
+	 */
+	private lastCumulativeCostUsd: number | null = null;
+	private sessionCostUsd = 0;
+
+	/**
 	 * Called whenever the active turn ends, for any reason. The SessionManager uses it to send the
 	 * next queued message — nothing else was pumping the queue after a turn finished.
 	 */
 	onTurnEnd: (() => void) | null = null;
+
+	/**
+	 * Called for every `rate_limit_event` whose `rate_limit_info` parses as a warning
+	 * (`parseRateLimitWarning`). Never called for one that doesn't — there is nothing observed to
+	 * show for any other shape, and a callback fired with `null` would ask every caller to repeat
+	 * the same "is there anything here" check `parseRateLimitWarning` already did.
+	 */
+	onQuotaWarning: ((warning: RateLimitWarning) => void) | null = null;
 
 	/**
 	 * Called for **every** `system/init`, not just the first — it arrives at the start of every
@@ -286,7 +312,11 @@ export class StreamReducer {
 			this.applyResult(event);
 			return;
 		}
-		// system/status, hook_*, rate_limit_event, control_response: nothing to render yet.
+		if (isRateLimitEvent(event)) {
+			this.applyRateLimit(event);
+			return;
+		}
+		// system/status, hook_*, control_response: nothing to render yet.
 	}
 
 	private applyInit(event: SystemInitEvent): void {
@@ -296,6 +326,19 @@ export class StreamReducer {
 			this.sessionId = event.session_id ?? null;
 		}
 		this.onInit?.(event);
+	}
+
+	/**
+	 * Repeats within a turn (three in one turn, utilization climbing, in
+	 * `docs/capture-phase4-tools.jsonl`) — the caller's job is to update one strip, not append one
+	 * row per call. That is why this only ever calls `onQuotaWarning`, never anything that could
+	 * accumulate.
+	 */
+	private applyRateLimit(event: RateLimitEvent): void {
+		const warning = parseRateLimitWarning(event);
+		if (warning) {
+			this.onQuotaWarning?.(warning);
+		}
 	}
 
 	// --- live streaming ----------------------------------------------------
@@ -636,6 +679,28 @@ export class StreamReducer {
 		this.state.emitChange();
 	}
 
+	/**
+	 * Turns a cumulative `total_cost_usd` into this turn's own cost, and folds it into
+	 * `sessionCostUsd` — the reducer's own running total, not the CLI's echoed number (Emre's
+	 * decision, 2026-09-03: a total that silently drops because a subprocess died is the same
+	 * class of lie this task exists to fix).
+	 *
+	 * **The restart guard.** A reported total *lower* than the last one means a new CLI process
+	 * started — `total_cost_usd` accumulates over the process, not the session id (measured), and
+	 * `SessionManager.handleExit` does not recreate this reducer. Read that way rather than
+	 * subtracted, so the turn's cost is the fresh process's own total instead of a negative number.
+	 */
+	private turnCostUsd(reported: number | undefined): number | undefined {
+		if (reported === undefined) {
+			return undefined;
+		}
+		const baseline = this.lastCumulativeCostUsd;
+		const turnCost = baseline === null || reported < baseline ? reported : reported - baseline;
+		this.lastCumulativeCostUsd = reported;
+		this.sessionCostUsd += turnCost;
+		return turnCost;
+	}
+
 	private applyResult(event: ResultEvent): void {
 		const item = this.active;
 		this.active = null;
@@ -645,8 +710,9 @@ export class StreamReducer {
 		}
 
 		item.meta = {
-			costUsd: event.total_cost_usd,
+			costUsd: this.turnCostUsd(event.total_cost_usd),
 			durationMs: event.duration_ms,
+			sessionCostUsd: event.total_cost_usd === undefined ? undefined : this.sessionCostUsd,
 		};
 		// Whatever the outcome, no block is still streaming once the turn is over — otherwise a
 		// cancelled turn leaves a thinking header saying "Thinking…" forever.

@@ -93,6 +93,10 @@ export class SessionManager {
 		this.reducer.onInit = (event: SystemInitEvent) => {
 			this.checkPermissionServer(event);
 		};
+
+		this.reducer.onQuotaWarning = (warning) => {
+			this.state.setQuotaWarning(warning);
+		};
 	}
 
 	/** Non-null when input is refused. The composer shows it and disables itself. */

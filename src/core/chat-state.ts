@@ -7,6 +7,7 @@
  * the same structure — flat concatenation would have to be torn out again.
  */
 
+import type { RateLimitWarning } from '../cli/events';
 import type { ImageAttachment } from './attachments';
 
 export type BlockKind = 'text' | 'thinking' | 'tool_use';
@@ -83,8 +84,16 @@ export interface MessageBlock {
 export type TurnStatus = 'pending' | 'streaming' | 'complete' | 'stopped' | 'error';
 
 export interface TurnMeta {
+	/** This turn's own cost — `total_cost_usd` minus the reducer's remembered baseline. */
 	costUsd?: number;
 	durationMs?: number;
+	/**
+	 * The reducer's own running sum of every turn's `costUsd` this process has seen — **not**
+	 * `total_cost_usd` echoed back. The CLI's own cumulative resets to near-zero when the
+	 * subprocess restarts mid-session (measured, PHASE6-TASK5-STATE §M1); a total that can drop
+	 * mid-conversation is the defect this field exists to avoid repeating.
+	 */
+	sessionCostUsd?: number;
 }
 
 export interface UserItem {
@@ -192,9 +201,26 @@ function newId(prefix: string): string {
 export class ChatState {
 	private readonly itemList: ChatItem[] = [];
 	private readonly listeners = new Set<() => void>();
+	/**
+	 * The most recent `rate_limit_event`, if any — ambient session state, not a transcript entry.
+	 * A warning only, never a gauge (Emre's decision, 2026-09-03): the event has never been observed
+	 * below `surpassedThreshold` (0.75 or 0.9 in every capture), so there is nothing to show most of
+	 * the time, and there is no measured event that means "back under the threshold" to clear it
+	 * with. It is replaced by a later warning, never cleared by this class.
+	 */
+	private quota: RateLimitWarning | null = null;
 
 	get items(): readonly ChatItem[] {
 		return this.itemList;
+	}
+
+	get quotaWarning(): RateLimitWarning | null {
+		return this.quota;
+	}
+
+	setQuotaWarning(warning: RateLimitWarning): void {
+		this.quota = warning;
+		this.emitChange();
 	}
 
 	/** Returns an unsubscribe function; callers hold it for their own teardown. */

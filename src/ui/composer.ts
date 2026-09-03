@@ -229,6 +229,15 @@ export class Composer {
 			this.submit();
 		});
 
+		// Typing past the `rows="3"` starting height grows the box, exactly as attaching a file
+		// already does — pre-Phase-6-task-5, only the attach doors moved this element's height,
+		// so a long paste sat scrolled inside three lines. `max-height` in CSS is the ceiling;
+		// this only ever measures and sets `height`, so `resize: none` still holds and the
+		// reader gets no drag handle.
+		component.registerDomEvent(this.inputEl, 'input', () => {
+			this.autoGrow();
+		});
+
 		component.registerDomEvent(this.actionEl, 'click', () => {
 			if (this.busy) {
 				this.options.onStop();
@@ -385,6 +394,22 @@ export class Composer {
 		this.inputEl.value = value.slice(0, selectionStart) + text + value.slice(selectionEnd);
 		const caret = selectionStart + text.length;
 		this.inputEl.setSelectionRange(caret, caret);
+		// The `execCommand` branch above fires a native `input` event on its own; a plain value
+		// assignment does not, so the fallback path has to measure by hand or a pasted `@` chip
+		// added this way would leave the box the wrong height until the next keystroke.
+		this.autoGrow();
+	}
+
+	/**
+	 * Resets to `scrollHeight` before re-measuring: shrinking after a deletion needs the height
+	 * cleared first, or `scrollHeight` still reports the taller, stale box (the standard
+	 * textarea-autogrow trap). CSS `max-height` on `.guki-composer-input` is what actually caps
+	 * the result — this sets `height` past it freely — so growth past the ceiling turns into the
+	 * element's own internal scroll rather than this method clamping anything.
+	 */
+	private autoGrow(): void {
+		this.inputEl.setCssStyles({ height: 'auto' });
+		this.inputEl.setCssStyles({ height: `${this.inputEl.scrollHeight}px` });
 	}
 
 	/**
@@ -551,6 +576,7 @@ export class Composer {
 		}
 		if (this.options.onSubmit(text.trim(), this.attachments)) {
 			this.inputEl.value = '';
+			this.autoGrow();
 			this.attachments = [];
 			this.renderChips();
 		}
