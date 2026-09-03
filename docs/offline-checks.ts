@@ -55,10 +55,10 @@
  *     reader *does* see, and it was being shown wrong.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createConnection, createServer } from 'node:net';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
 	ChatState,
@@ -119,6 +119,8 @@ import {
 } from '../src/core/attachment-resolver';
 import { absolutePathForFile } from '../src/cli/node-api';
 import { pasteBelongsToComposer } from '../src/ui/composer';
+import { projectSlug, scanSessionsDir } from '../src/data/session-index';
+import { NodeTranscriptStore } from '../src/data/transcript-store';
 import { FileSystemAdapter, TFile } from 'obsidian';
 
 let failures = 0;
@@ -4688,6 +4690,199 @@ console.log('R5. withTurnMeta: the stopped and error prefixes, and the no-meta c
 }
 
 rmSync(POLICY_VAULT.base, { recursive: true, force: true });
+
+// --- S. Phase 6 task 6: data/transcript-store.ts's listSessions ------------
+
+/*
+ * `docs/RESEARCH.md` §D generalised "a scan from start/end is enough" from one 202-line sample
+ * file. Measured against the real directory this plugin reads (PHASE6-TASK6-STATE §M), that
+ * generalisation is wrong: `readdir` returns `tool-results` offload directories alongside real
+ * `.jsonl` files, 40% of real sessions have no `ai-title` and 52% have no `cost-state`, and neither
+ * record sits at a fixed offset. `session-index.ts`'s `scanSessionsDir` does a full per-line scan
+ * instead, tolerant of a torn trailing line. §S4 drives that logic against a synthetic fixture,
+ * deterministically; §S5 runs the full `NodeTranscriptStore` against Emre's real
+ * `~/.claude/projects` directory and can only assert properties, not exact values — the directory
+ * keeps growing, including from this very session (trap 4).
+ */
+
+console.log("S1. projectSlug: every '/' in the vault path becomes '-'");
+eq(
+	'the real vault path, the real directory name (verified 2026-09-03)',
+	projectSlug('/Users/you/Documents/YourVault'),
+	'-Users-you-Documents-YourVault',
+);
+
+console.log('S2. resumeArgs: trivial, but the interface shape is worth pinning');
+eq(
+	'--resume + the id, nothing else',
+	new NodeTranscriptStore().resumeArgs('abc-123').join('|'),
+	'--resume|abc-123',
+);
+
+console.log('S3. readSession: a clear not-implemented throw, not a silent []');
+{
+	let threw = false;
+	try {
+		await new NodeTranscriptStore().readSession('abc-123');
+	} catch (error) {
+		threw = true;
+		check('the message names it as v2, not a bare generic error', String(error).includes('v2'));
+	}
+	check('readSession rejects rather than resolving with []', threw);
+}
+
+const SESSION_FIXTURE = (() => {
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-sessions-')));
+
+	// A session with both `ai-title` and `cost-state`, neither at a fixed offset — `ai-title`
+	// appears twice (matching the real file's repeated-emission shape), separated by other record
+	// types, and `cost-state` sits after it rather than at the start or the end.
+	writeFileSync(
+		join(dir, 'session-full.jsonl'),
+		[
+			JSON.stringify({ type: 'system', subtype: 'init' }),
+			JSON.stringify({ type: 'user', timestamp: '2026-01-01T10:00:00.000Z', sessionId: 'session-full' }),
+			JSON.stringify({ type: 'assistant', message: { content: [] } }),
+			JSON.stringify({ type: 'ai-title', aiTitle: 'Full Session', sessionId: 'session-full' }),
+			JSON.stringify({ type: 'cost-state', sessionId: 'session-full', totalCostUSD: 0.4567, totalDuration: 1000 }),
+			JSON.stringify({ type: 'ai-title', aiTitle: 'Full Session', sessionId: 'session-full' }),
+			'',
+		].join('\n'),
+	);
+
+	// Trap 1: a directory sharing `session-full`'s name, holding offloaded tool output — the same
+	// shape the real directory has for 76 of its 155 entries. Must never be read as a session.
+	mkdirSync(join(dir, 'session-full', 'tool-results'), { recursive: true });
+	writeFileSync(join(dir, 'session-full', 'tool-results', 'out.json'), '{}');
+
+	// Neither optional record — the ~40%/~52% real-world case, not a defensive-programming exercise.
+	writeFileSync(
+		join(dir, 'session-no-optional.jsonl'),
+		[
+			JSON.stringify({ type: 'queue-operation', op: 'enqueue' }),
+			JSON.stringify({ type: 'user', timestamp: '2026-01-03T10:00:00.000Z', sessionId: 'session-no-optional' }),
+			JSON.stringify({ type: 'queue-operation', op: 'dequeue' }),
+			'',
+		].join('\n'),
+	);
+
+	// A torn trailing line, as a session still being appended to would produce. The `ai-title`
+	// before it must still be found.
+	writeFileSync(
+		join(dir, 'session-torn.jsonl'),
+		[
+			JSON.stringify({ type: 'user', timestamp: '2026-01-02T10:00:00.000Z', sessionId: 'session-torn' }),
+			JSON.stringify({ type: 'ai-title', aiTitle: 'Torn Session', sessionId: 'session-torn' }),
+			'{"type":"assistant","message":{"content":[{"type":"text","text":"incomple',
+		].join('\n'),
+	);
+
+	// No `user` record at all — excluded from the result rather than given a fabricated start time.
+	writeFileSync(
+		join(dir, 'session-nouser.jsonl'),
+		[
+			JSON.stringify({ type: 'system', subtype: 'init' }),
+			JSON.stringify({ type: 'assistant', message: {} }),
+			'',
+		].join('\n'),
+	);
+
+	// A stray non-`.jsonl` *file* (not a directory) that would parse into a perfectly valid session
+	// if the extension filter were gone. The `tool-results` directory above proves the filter keeps
+	// something out; on its own that proof is weak — a directory fails `readFile` regardless of the
+	// filter, so removing the filter and relying on that read to throw would still read green. This
+	// file reads cleanly, so only the filter itself keeps it out.
+	writeFileSync(
+		join(dir, 'stray-file'),
+		[
+			JSON.stringify({ type: 'user', timestamp: '2026-01-04T10:00:00.000Z' }),
+			JSON.stringify({ type: 'ai-title', aiTitle: 'Should never appear' }),
+			'',
+		].join('\n'),
+	);
+
+	return { dir };
+})();
+
+console.log('S4. scanSessionsDir: the synthetic fixture');
+{
+	const sessions = await scanSessionsDir(SESSION_FIXTURE.dir);
+
+	eq('trap 1 + the no-user case: exactly the three real sessions, not four or five', sessions.length, 3);
+	eq(
+		'exactly one session-full entry despite the same-named tool-results directory',
+		sessions.filter((s) => s.sessionId === 'session-full').length,
+		1,
+	);
+	check(
+		'newest-first: no-optional (Jan 3) before torn (Jan 2) before full (Jan 1)',
+		sessions.map((s) => s.sessionId).join('|') === 'session-no-optional|session-torn|session-full',
+		sessions.map((s) => s.sessionId).join('|'),
+	);
+
+	const full = sessions.find((s) => s.sessionId === 'session-full');
+	eq('session-full: sessionId taken from the filename', full?.sessionId, 'session-full');
+	eq("session-full: title found despite not being on the first or last line, and repeated", full?.title, 'Full Session');
+	eq('session-full: startedAt from the (only) user record', full?.startedAt, '2026-01-01T10:00:00.000Z');
+	eq('session-full: cost read from totalCostUSD verbatim, not recomputed', full?.costUsd, 0.4567);
+
+	const noOptional = sessions.find((s) => s.sessionId === 'session-no-optional');
+	check('session-no-optional: title is optional, not defaulted to an empty string', noOptional?.title === undefined);
+	check('session-no-optional: cost is optional, not defaulted to 0', noOptional?.costUsd === undefined);
+	eq('session-no-optional: still dated correctly', noOptional?.startedAt, '2026-01-03T10:00:00.000Z');
+
+	const torn = sessions.find((s) => s.sessionId === 'session-torn');
+	eq('session-torn: the ai-title before the torn line still parsed', torn?.title, 'Torn Session');
+	eq('session-torn: startedAt unaffected by the trailing garbage', torn?.startedAt, '2026-01-02T10:00:00.000Z');
+
+	check(
+		'session-nouser never appears: no user record means no fabricated startedAt, not a throw',
+		!sessions.some((s) => s.sessionId === 'session-nouser'),
+	);
+	check(
+		'stray-file never appears: the extension filter, not a lucky read failure, keeps it out',
+		!sessions.some((s) => s.title === 'Should never appear'),
+	);
+}
+
+rmSync(SESSION_FIXTURE.dir, { recursive: true, force: true });
+
+console.log('S5. listSessions against the real ~/.claude/projects directory (environment-dependent — see report)');
+{
+	const store = new NodeTranscriptStore();
+	const sessions = await store.listSessions('/Users/you/Documents/YourVault');
+	const projectsDir = join(homedir(), '.claude', 'projects', projectSlug('/Users/you/Documents/YourVault'));
+	const rawEntries = readdirSync(projectsDir);
+	// Most tool-results directories share their owning session's UUID (75 of 77, measured
+	// 2026-09-03) — that pairing is expected, not trap 1. What trap 1 actually forbids is a
+	// directory-only entry, with no `.jsonl` counterpart at all, ever surfacing as a session; the
+	// "matching .jsonl file" check just below already proves that, since no directory-only name
+	// could pass it.
+	const jsonlBaseNames = new Set(rawEntries.filter((e) => e.endsWith('.jsonl')).map((e) => e.slice(0, -'.jsonl'.length)));
+	const orphanDirNames = rawEntries.filter((e) => !e.endsWith('.jsonl') && !jsonlBaseNames.has(e));
+
+	check('at least some sessions returned', sessions.length > 0, `got ${String(sessions.length)}`);
+	check(
+		'every returned sessionId has a matching .jsonl file in the real directory',
+		sessions.every((s) => rawEntries.includes(`${s.sessionId}.jsonl`)),
+	);
+	check(
+		'no orphan directory (no matching .jsonl at all — trap 1) is ever returned as a session',
+		sessions.every((s) => !orphanDirNames.includes(s.sessionId)),
+	);
+	check(
+		'every present title is a non-empty string pulled from a real ai-title record',
+		sessions.every((s) => s.title === undefined || (typeof s.title === 'string' && s.title.length > 0)),
+	);
+	check(
+		'every present cost is a non-negative number',
+		sessions.every((s) => s.costUsd === undefined || (typeof s.costUsd === 'number' && s.costUsd >= 0)),
+	);
+	check(
+		'sorted newest-first',
+		sessions.every((s, i) => i === 0 || (sessions[i - 1]?.startedAt ?? '') >= s.startedAt),
+	);
+}
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
