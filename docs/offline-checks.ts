@@ -94,7 +94,6 @@ import { permissionDiff } from '../src/ui/permission-card';
 import { renderQuotaBar } from '../src/ui/composer';
 import { formatTurnMeta, withTurnMeta } from '../src/ui/message-list';
 import { containsPath, permissionVerdict } from '../src/core/permission-policy';
-import { FALLBACK_VAULT_PATH } from '../src/constants';
 import { tokenizeCommand } from '../src/core/bash-whitelist';
 import { createVaultPaths } from '../src/core/vault-path-resolver';
 import {
@@ -318,7 +317,13 @@ function stub(manager: SessionManager, gate: () => Promise<boolean>, written: st
 	internals.process = live;
 }
 
-const app = { vault: { adapter: {} } } as never;
+// A real `FileSystemAdapter` instance, because the production guard is `instanceof
+// FileSystemAdapter` (§C3 exercises the other side, a plain object that fails it). The path itself
+// is never read from disk by anything in sections C–M: they stub `ensureProcess`/`startProcess`
+// outright, so this only has to be a string `broker.vaultRoot` can be compared against.
+const sharedVaultAdapter = new FileSystemAdapter();
+sharedVaultAdapter.getBasePath = () => join(tmpdir(), 'guki-checks-shared-vault');
+const app = { vault: { adapter: sharedVaultAdapter } } as never;
 
 console.log('C1. Stop pressed before the first turn begins cancels the queued message');
 {
@@ -368,6 +373,50 @@ console.log('C2. A turn failed from outside the stream releases the message queu
 	eq('the dead turn is an error', assistants[0]?.status, 'error');
 	eq('the queued turn was sent, not stranded', written.length, 2);
 	check('the second message is the one that went out', written[1]?.includes('second') === true);
+	manager.dispose();
+}
+
+console.log('C3. A non-FileSystemAdapter vault blocks input instead of guessing a path');
+{
+	// There used to be a hardcoded fallback path here — Emre's own vault. Anyone else's install
+	// would have started the CLI, silently, against the wrong directory. The fix has to close off
+	// every door `vaultPath` had: construction, `send`, and `vaultPaths()`.
+	const mobileApp = { vault: { adapter: {} } } as never;
+	const manager = new SessionManager(mobileApp);
+
+	check(
+		'input is refused at construction, before any message is ever sent',
+		manager.blocked !== null,
+		String(manager.blocked),
+	);
+	const notice = manager.state.items.find((i) => i.kind === 'notice');
+	check('...and a notice explains why, not just a silently disabled composer', notice !== undefined);
+
+	manager.send('hello');
+	eq('the message was refused, not queued toward a startProcess that would throw', manager.busy, false);
+	check(
+		'no assistant turn was created for the refused message',
+		!manager.state.items.some((i) => i.kind === 'assistant'),
+	);
+
+	// The other caller of the same getter: it must reject, not throw synchronously and not hang.
+	let rejected = false;
+	try {
+		await manager.vaultPaths();
+	} catch {
+		rejected = true;
+	}
+	check('vaultPaths() rejects cleanly instead of throwing out of the getter', rejected);
+
+	manager.dispose();
+}
+
+console.log('C4. A real FileSystemAdapter is unaffected by the unsupported-adapter guard');
+{
+	// The most likely way to break this: guarding `vaultPath` so eagerly that a normal desktop
+	// vault — every other test in this file, `app` included — trips it too.
+	const manager = new SessionManager(app);
+	eq('a real FileSystemAdapter is never blocked', manager.blocked, null);
 	manager.dispose();
 }
 
@@ -3113,7 +3162,7 @@ console.log('N10. The broker: an allow never reaches the transcript, and the CLI
 	eq(
 		'SessionManager hands its own vault path to the broker',
 		(wired as unknown as { broker: { vaultRoot: string } }).broker.vaultRoot,
-		FALLBACK_VAULT_PATH,
+		sharedVaultAdapter.getBasePath(),
 	);
 	wired.dispose();
 }
@@ -3924,7 +3973,7 @@ console.log('O8. an image with no typed text is a sendable message, and is not d
 	};
 
 	const written: string[] = [];
-	const session = new SessionManager({ vault: { adapter: {} } } as never);
+	const session = new SessionManager(app);
 	const internals = session as unknown as {
 		ensureProcess: () => Promise<boolean>;
 		process: { alive: boolean; write: (line: string) => boolean; stop: () => void } | null;

@@ -13,13 +13,6 @@ export const CHAT_VIEW_ICON = 'message-square';
 export const NARROW_BREAKPOINT_PX = 480;
 
 /**
- * The CLI runs with the vault root as its `cwd` (RESEARCH B6). The real path comes from
- * `FileSystemAdapter.getBasePath()`; this is only the fallback for when the adapter is not a
- * FileSystemAdapter, and it is never reached on desktop with a local vault.
- */
-export const FALLBACK_VAULT_PATH = '/Users/you/Documents/YourVault';
-
-/**
  * The MCP server name in the generated `mcp.json`, and the tool id built from it.
  *
  * The id format is `mcp__<server>__<tool>`; hyphens in the server name survive it (RESEARCH B5

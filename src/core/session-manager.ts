@@ -16,7 +16,7 @@ import {
 	type StreamJsonEvent,
 	type SystemInitEvent,
 } from '../cli/events';
-import { CLAUDE_BINARY_OVERRIDE, FALLBACK_VAULT_PATH, MCP_SERVER_NAME } from '../constants';
+import { CLAUDE_BINARY_OVERRIDE, MCP_SERVER_NAME } from '../constants';
 import {
 	composeMessage,
 	imageAttachments,
@@ -31,6 +31,15 @@ import { createVaultPaths } from './vault-path-resolver';
 
 /** The one status that means the approval gate is really there (PHASE5A-STATE F1). */
 const MCP_CONNECTED = 'connected';
+
+/**
+ * Thrown by the `vaultPath` getter when `app.vault.adapter` is not a `FileSystemAdapter` — mobile,
+ * or any other vault storage that has no real filesystem path. There used to be a hardcoded
+ * fallback path here (Emre's own vault); shipping that to anyone else's install would have started
+ * the CLI, silently, against the wrong directory. Caught by `resolveVaultPath`, never left to
+ * surface as a raw exception.
+ */
+class UnsupportedVaultAdapterError extends Error {}
 
 interface QueuedTurn {
 	text: string;
@@ -67,8 +76,11 @@ export class SessionManager {
 		pluginDir?: string,
 	) {
 		// The vault root is handed over explicitly: it is the boundary PLAN §2b's whole table is
-		// written against, and it must be the *same* string the CLI is given as its cwd.
-		this.broker = new PermissionBroker(app, this.state, this.vaultPath, pluginDir);
+		// written against, and it must be the *same* string the CLI is given as its cwd. When the
+		// adapter is unsupported, `resolveVaultPath` has already blocked input; the broker gets an
+		// inert placeholder because `start()` on it is now unreachable — `send` refuses before any
+		// turn can reach `ensureProcess`.
+		this.broker = new PermissionBroker(app, this.state, this.resolveVaultPath() ?? '', pluginDir);
 		// The broker knows requests and verdicts; the reducer knows blocks. Joining them here is
 		// what keeps a denial from painting the tool card red — the wire reports our own denial as
 		// `is_error: true`, indistinguishable from a tool that really failed.
@@ -128,13 +140,41 @@ export class SessionManager {
 	/**
 	 * The vault root, for `spawn`'s `cwd`. Checked with `instanceof` rather than cast: a cast that
 	 * silently succeeds on a non-file adapter is exactly the class of bug Phase 1 kept producing.
+	 * Throws rather than falling back to a guessed path — every caller goes through
+	 * `resolveVaultPath`, which turns this into a block instead of an unhandled exception.
 	 */
 	private get vaultPath(): string {
 		const adapter = this.app.vault.adapter;
 		if (adapter instanceof FileSystemAdapter) {
 			return adapter.getBasePath();
 		}
-		return FALLBACK_VAULT_PATH;
+		throw new UnsupportedVaultAdapterError(
+			'This vault type is not supported, so the chat is disabled.',
+		);
+	}
+
+	/**
+	 * `vaultPath`, made safe. `null` means the adapter is unsupported — every caller of `vaultPath`
+	 * goes through here instead, so the block and the notice happen exactly once, at the point of
+	 * first use, rather than as a throw that some caller forgot to catch.
+	 */
+	private resolveVaultPath(): string | null {
+		try {
+			return this.vaultPath;
+		} catch (error) {
+			if (!(error instanceof UnsupportedVaultAdapterError)) {
+				throw error;
+			}
+			if (this.blockedReason === null) {
+				this.blockInput(error.message);
+				this.state.addNotice(
+					'error',
+					'This vault type is not supported, so the chat is disabled.',
+					"The CLI needs a real filesystem path, and this vault's adapter does not provide one.",
+				);
+			}
+			return null;
+		}
 	}
 
 	/**
@@ -145,9 +185,18 @@ export class SessionManager {
 	 * `VaultPaths` objects over one root string cannot drift, whereas two derivations of the root
 	 * could. It is not taken from the broker because the broker only builds its copy inside
 	 * `start()`, which also spawns the permission server — attaching a chip must not do that.
+	 *
+	 * Not memoised on the unsupported-adapter path: there is nothing to cache, and leaving it
+	 * unmemoised means `resolveVaultPath`'s once-only notice guard is the only state involved.
 	 */
 	vaultPaths(): Promise<VaultPaths> {
-		this.vaultPathsPromise ??= createVaultPaths(this.vaultPath);
+		if (!this.vaultPathsPromise) {
+			const root = this.resolveVaultPath();
+			if (root === null) {
+				return Promise.reject(new Error(this.blockedReason ?? 'This vault type is not supported.'));
+			}
+			this.vaultPathsPromise = createVaultPaths(root);
+		}
 		return this.vaultPathsPromise;
 	}
 
@@ -287,6 +336,14 @@ export class SessionManager {
 	}
 
 	private async startProcess(): Promise<boolean> {
+		// Checked first and defensively: `send` already refuses once `blockedReason` is set, so this
+		// is unreachable in practice, but `startProcess` must never be the place an unhandled throw
+		// from `vaultPath` surfaces.
+		const vaultPath = this.resolveVaultPath();
+		if (vaultPath === null) {
+			return false;
+		}
+
 		let binaryPath: string;
 		try {
 			const resolution = await resolveClaudeBinary(CLAUDE_BINARY_OVERRIDE);
@@ -329,7 +386,7 @@ export class SessionManager {
 
 		const claude = new ClaudeProcess({
 			binaryPath,
-			cwd: this.vaultPath,
+			cwd: vaultPath,
 			extraArgs: this.broker.cliArgs,
 			callbacks: {
 				onEvent: (event: StreamJsonEvent) => this.reducer.apply(event),
