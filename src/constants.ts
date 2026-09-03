@@ -34,10 +34,3 @@ export const PERMISSION_SERVER_FILE = 'mcp-permission-server.mjs';
  * the fallback path are guesses — which is exactly why the real value is preferred.
  */
 export const PLUGIN_ID = 'guki-chat';
-
-/**
- * Step 1 of the binary resolution order (RESEARCH C) — the setting, which gains its UI in v2.
- * Empty means "resolve normally". Point it at a nonexistent path to exercise the panel's
- * "binary not found" state by hand.
- */
-export const CLAUDE_BINARY_OVERRIDE = '';

@@ -2,16 +2,22 @@ import { Plugin, WorkspaceLeaf } from 'obsidian';
 import { VIEW_TYPE_GUKI_CHAT } from './constants';
 import { SessionManager } from './core/session-manager';
 import { ChatView } from './ui/chat-view';
+import { DEFAULT_SETTINGS, GukiSettingTab, type GukiChatSettings } from './ui/settings-tab';
 
 export default class GukiChatPlugin extends Plugin {
 	private session: SessionManager | null = null;
+	settings: GukiChatSettings = DEFAULT_SETTINGS;
 
 	async onload(): Promise<void> {
+		await this.loadSettings();
+
 		// The session outlives any single view; the view only subscribes to its state.
 		// `manifest.dir` is how the permission server's own source is located at runtime; it is
 		// optional in the API, and the broker falls back to rebuilding the path when it is absent.
-		const session = new SessionManager(this.app, this.manifest.dir);
+		const session = new SessionManager(this.app, this.manifest.dir, this.settings.claudeBinaryPath);
 		this.session = session;
+
+		this.addSettingTab(new GukiSettingTab(this.app, this));
 
 		this.registerView(VIEW_TYPE_GUKI_CHAT, (leaf) => new ChatView(leaf, session));
 
@@ -43,6 +49,17 @@ export default class GukiChatPlugin extends Plugin {
 		// The subprocess is not covered by Component.register* — kill it by hand.
 		this.session?.dispose();
 		this.session = null;
+	}
+
+	private async loadSettings(): Promise<void> {
+		const data = (await this.loadData()) as Partial<GukiChatSettings> | null;
+		this.settings = { ...DEFAULT_SETTINGS, ...data };
+	}
+
+	/** Called by the settings tab on every change; takes effect on the next session start. */
+	async saveSettings(): Promise<void> {
+		await this.saveData(this.settings);
+		this.session?.setClaudeBinaryOverride(this.settings.claudeBinaryPath);
 	}
 
 	// No onunload leaf teardown on purpose: unregistering the view type is enough for

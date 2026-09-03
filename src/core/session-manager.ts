@@ -16,7 +16,7 @@ import {
 	type StreamJsonEvent,
 	type SystemInitEvent,
 } from '../cli/events';
-import { CLAUDE_BINARY_OVERRIDE, MCP_SERVER_NAME } from '../constants';
+import { MCP_SERVER_NAME } from '../constants';
 import {
 	composeMessage,
 	imageAttachments,
@@ -70,11 +70,20 @@ export class SessionManager {
 	 */
 	private blockedReason: string | null = null;
 
+	/**
+	 * The settings-panel override, step 1 of `resolveClaudeBinary`'s order (RESEARCH C). Set at
+	 * construction from persisted settings and updatable live via `setClaudeBinaryOverride` — but a
+	 * change only takes effect on the *next* spawn; a CLI already running keeps its own process.
+	 */
+	private claudeBinaryOverride: string;
+
 	constructor(
 		private readonly app: App,
 		/** `PluginManifest.dir`, passed straight through to the broker. Optional in the API. */
 		pluginDir?: string,
+		claudeBinaryOverride = '',
 	) {
+		this.claudeBinaryOverride = claudeBinaryOverride;
 		// The vault root is handed over explicitly: it is the boundary PLAN §2b's whole table is
 		// written against, and it must be the *same* string the CLI is given as its cwd. When the
 		// adapter is unsupported, `resolveVaultPath` has already blocked input; the broker gets an
@@ -121,6 +130,14 @@ export class SessionManager {
 	/** Non-null when input is refused. The composer shows it and disables itself. */
 	get blocked(): string | null {
 		return this.blockedReason;
+	}
+
+	/**
+	 * Called by the settings tab on save. Only affects the *next* spawn — a CLI already running
+	 * keeps whichever binary started it.
+	 */
+	setClaudeBinaryOverride(path: string): void {
+		this.claudeBinaryOverride = path;
 	}
 
 	/** Called by the permission card. `requestId` comes off the `PermissionItem`. */
@@ -346,7 +363,7 @@ export class SessionManager {
 
 		let binaryPath: string;
 		try {
-			const resolution = await resolveClaudeBinary(CLAUDE_BINARY_OVERRIDE);
+			const resolution = await resolveClaudeBinary(this.claudeBinaryOverride);
 			binaryPath = resolution.path;
 			console.debug(`GuKi Chat: using claude at ${resolution.path} (${resolution.source})`);
 		} catch (error) {
@@ -354,13 +371,13 @@ export class SessionManager {
 				this.state.addNotice(
 					'error',
 					'Could not find the Claude Code CLI.',
-					`Looked at: ${error.attempts.join(', ')}`,
+					`Looked at: ${error.attempts.join(', ')}. You can set a path in GuKi Chat's settings.`,
 				);
 			} else {
 				this.state.addNotice(
 					'error',
 					'Could not find the Claude Code CLI.',
-					error instanceof Error ? error.message : String(error),
+					`${error instanceof Error ? error.message : String(error)} You can set a path in GuKi Chat's settings.`,
 				);
 			}
 			return false;
