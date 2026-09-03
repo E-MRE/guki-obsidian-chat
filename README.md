@@ -2,10 +2,15 @@
 
 Chat with Claude Code inside your Obsidian vault — no terminal switch needed.
 
-Opens a pinned chat panel next to your notes. It spawns the real `claude` CLI in your
-vault's root, so everything you already have set up for it (`CLAUDE.md`, hooks, skills,
-MCP servers, memory) keeps working exactly as it does in a terminal — this plugin is a
-different window onto the same CLI, not a separate assistant.
+If your vault is a second brain — notes, projects, a running memory of your own
+thinking — this is how you talk to it. Opens a pinned chat panel right next to your
+notes, so you can ask Claude to reorganize a folder, update a project note, or just
+think something through with you, without ever leaving Obsidian for a terminal.
+
+It spawns the real `claude` CLI in your vault's root, so everything you already have
+set up for it (`CLAUDE.md`, hooks, skills, MCP servers, persistent memory) keeps working
+exactly as it does in a terminal — this plugin is a different window onto the same CLI,
+not a separate assistant with its own, weaker context.
 
 ## Requirements
 
