@@ -945,13 +945,27 @@
 /* Obsidian's own `button { height: var(--input-height) }` sets this button's height (30px,
    measured PHASE6-TASK4-STATE); `var(--input-height)` is also what sizes the toolbar row and the
    circular Send button below, so all three share one baseline without hardcoding the pixel value
-   three times. */
-.guki-composer-attach {
+   three times.
+
+   Doubled selector, not `!important` (task 7 follow-up): Obsidian's own
+   `button:not(.clickable-icon)` rule (app.css 1.13.7, measured against a real extracted copy) sets
+   `background-color`/`box-shadow` at specificity (0,1,1) — one step above a plain
+   `.guki-composer-attach` at (0,1,0) — so the idle `transparent`/`none` below never actually
+   rendered; the button showed Obsidian's default button fill instead. `.guki-composer-attach.
+   guki-composer-attach` reaches (0,2,0) and wins outright, with no dependency on stylesheet
+   load order. */
+.guki-composer-attach.guki-composer-attach {
 	display: flex;
 	align-items: center;
 	justify-content: center;
 	flex: 0 0 auto;
-	padding: var(--size-4-2);
+	/* Vertical-only shrink from `var(--size-4-2)` (task 7 follow-up): the button's height is fixed
+	   at 30px border-box (Obsidian's global `* { box-sizing: border-box }`), and 8px padding on
+	   both sides plus the 16px icon (`--icon-s`) added up to 32px — 2px over the box, which is why
+	   the padding was invisible: the icon overflowed the content area instead of sitting inside
+	   visible padding. 4px top/bottom fits inside the fixed height; horizontal stays at 8px since
+	   the button's width is not fixed. */
+	padding: var(--size-4-1) var(--size-4-2);
 	border: none;
 	box-shadow: none;
 	background-color: transparent;
@@ -996,7 +1010,14 @@
    `box-sizing: border-box` is what makes that padding count *inside* `max-height` rather than
    adding to it: `scrollHeight` always includes padding regardless of box-sizing, but the ceiling
    this rule draws does not, so this had to be set explicitly rather than assumed — verified by
-   reading the box model, not by eye. */
+   reading the box model, not by eye.
+
+   Left/right padding removed (follow-up 2): `.guki-composer`'s own 8px padding already insets
+   every normal-flow child, this textarea included, so the horizontal value here was double-padding
+   it — 16px total, not 8px. The toolbar (below) is `position: absolute` and does *not* get that
+   inset for free (a parent's padding never enters an absolutely positioned descendant's offset
+   calculation — that gap is this fix's real subject), so it now carries its own horizontal
+   padding; the textarea keeps its inset from the composer alone, same as before. */
 .guki-composer-input {
 	box-sizing: border-box;
 	min-width: 0;
@@ -1014,7 +1035,12 @@
 	font-family: inherit;
 	font-size: var(--font-ui-medium);
 	line-height: var(--line-height-normal);
-	padding: var(--size-4-1) var(--size-4-2) calc(var(--input-height) + var(--size-4-2));
+	/* Bottom value is the toolbar's total footprint: its tallest child (`var(--input-height)`,
+	   30px) plus the toolbar's own `padding-bottom` (`var(--size-4-2)`, below) — the two numbers
+	   have to stay in sync or growing text will slide under the icons again (Trap 1). */
+	/*padding: var(--size-4-1) 0 calc(var(--input-height) + var(--size-4-2)) var(--size-4-2);*/
+	padding: var(--size-4-1) 0 0 var(--size-4-2);
+	margin-bottom: calc(var(--input-height) + var(--size-4-3));
 }
 
 .guki-composer-input:focus,
@@ -1030,15 +1056,28 @@
 }
 
 /* The bottom-anchored overlay: the two attach controls, the live status line, and Send, pinned to
-   `.guki-composer`'s own inner bottom edge (`position: relative` there is the anchor). `left: 0;
-   right: 0; bottom: 0` sit flush with the padding edge, so the composer's own padding is what
-   gives the row its margin from the box's visual edge — no separate inset needed. */
+   `.guki-composer`'s own inner bottom edge (`position: relative` there is the anchor).
+
+   Follow-up 2 fix, measured against the spec text, not assumed: an absolutely positioned element's
+   `left`/`right`/`bottom` offsets resolve against its containing block's *padding box*, but the
+   containing block's own padding is not itself part of that offset — `.guki-composer`'s 8px
+   padding never reached this element, so `left: 0; right: 0; bottom: 0` sat flush against the
+   composer's inner border edge, corner to corner (Emre's screenshot: the Send button at exactly
+   zero-zero). The inset has to live on the toolbar itself. Left/right are asymmetric on purpose
+   (Emre): a bit more room before the attach icon, a bit more still before the filled Send circle,
+   which reads closer to the edge than an outline shape would at the same inset.
+
+   `height` is deliberately left unset: fixing it at `var(--input-height)` while this element also
+   carries its own `padding-bottom` would squeeze the 30px-tall buttons into a shorter content box
+   — the exact bug the previous follow-up fixed on the attach buttons themselves. Left auto, this
+   box's height is its tallest child (still 30px) plus `padding-bottom`, which is what the
+   textarea's own reserved bottom space (above) now assumes. */
 .guki-composer-toolbar {
 	position: absolute;
 	left: 0;
 	right: 0;
 	bottom: 0;
-	height: var(--input-height);
+	padding: 0 var(--size-4-4) var(--size-4-3) var(--size-4-2);
 	display: flex;
 	align-items: center;
 	gap: var(--size-4-1);
