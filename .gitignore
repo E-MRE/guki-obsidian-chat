@@ -7,3 +7,12 @@ main.js
 *.js.map
 data.json
 .DS_Store
+
+# Internal dev diary — planning/measurement notes and per-task acceptance write-ups.
+# Kept locally for the workflow this project uses (fresh-agent briefs read these), but they
+# reference real local paths and aren't meant to ship in the public repo. The test harness
+# (offline-checks.ts and its fixtures) is NOT in this list — it stays public and tracked.
+/docs/PLAN.md
+/docs/RESEARCH.md
+/docs/NEXT.md
+/docs/archive/
