@@ -4821,7 +4821,7 @@ rmSync(POLICY_VAULT.base, { recursive: true, force: true });
 
 console.log("S1. projectSlug: every '/' in the vault path becomes '-'");
 eq(
-	'the real vault path, the real directory name (verified 2026-09-03)',
+	'a real vault path, the real directory name it maps to (verified 2026-09-03)',
 	projectSlug('/Users/you/Documents/YourVault'),
 	'-Users-you-Documents-YourVault',
 );
@@ -4963,39 +4963,49 @@ rmSync(SESSION_FIXTURE.dir, { recursive: true, force: true });
 
 console.log('S5. listSessions against the real ~/.claude/projects directory (environment-dependent — see report)');
 {
-	const store = new NodeTranscriptStore();
-	const sessions = await store.listSessions('/Users/you/Documents/YourVault');
-	const projectsDir = join(homedir(), '.claude', 'projects', projectSlug('/Users/you/Documents/YourVault'));
-	const rawEntries = readdirSync(projectsDir);
-	// Most tool-results directories share their owning session's UUID (75 of 77, measured
-	// 2026-09-03) — that pairing is expected, not trap 1. What trap 1 actually forbids is a
-	// directory-only entry, with no `.jsonl` counterpart at all, ever surfacing as a session; the
-	// "matching .jsonl file" check just below already proves that, since no directory-only name
-	// could pass it.
-	const jsonlBaseNames = new Set(rawEntries.filter((e) => e.endsWith('.jsonl')).map((e) => e.slice(0, -'.jsonl'.length)));
-	const orphanDirNames = rawEntries.filter((e) => !e.endsWith('.jsonl') && !jsonlBaseNames.has(e));
+	// Deliberately not a hardcoded personal path (Emre's own vault, as this used to be): that would
+	// assert against a directory that only exists on one machine, guaranteed to fail everywhere
+	// else. `process.cwd()` is this repo's own checkout — whoever runs offline-checks has, by
+	// definition, been running `claude` from here, so real transcripts exist under its own
+	// `~/.claude/projects/<slug>` the same way they did on the machine this test was written on.
+	const realVaultPath = process.cwd();
+	const projectsDir = join(homedir(), '.claude', 'projects', projectSlug(realVaultPath));
+	if (!existsSync(projectsDir)) {
+		console.log('  skip  no ~/.claude/projects directory for this checkout yet — nothing to assert');
+	} else {
+		const store = new NodeTranscriptStore();
+		const sessions = await store.listSessions(realVaultPath);
+		const rawEntries = readdirSync(projectsDir);
+		// Most tool-results directories share their owning session's UUID (75 of 77, measured
+		// 2026-09-03) — that pairing is expected, not trap 1. What trap 1 actually forbids is a
+		// directory-only entry, with no `.jsonl` counterpart at all, ever surfacing as a session; the
+		// "matching .jsonl file" check just below already proves that, since no directory-only name
+		// could pass it.
+		const jsonlBaseNames = new Set(rawEntries.filter((e) => e.endsWith('.jsonl')).map((e) => e.slice(0, -'.jsonl'.length)));
+		const orphanDirNames = rawEntries.filter((e) => !e.endsWith('.jsonl') && !jsonlBaseNames.has(e));
 
-	check('at least some sessions returned', sessions.length > 0, `got ${String(sessions.length)}`);
-	check(
-		'every returned sessionId has a matching .jsonl file in the real directory',
-		sessions.every((s) => rawEntries.includes(`${s.sessionId}.jsonl`)),
-	);
-	check(
-		'no orphan directory (no matching .jsonl at all — trap 1) is ever returned as a session',
-		sessions.every((s) => !orphanDirNames.includes(s.sessionId)),
-	);
-	check(
-		'every present title is a non-empty string pulled from a real ai-title record',
-		sessions.every((s) => s.title === undefined || (typeof s.title === 'string' && s.title.length > 0)),
-	);
-	check(
-		'every present cost is a non-negative number',
-		sessions.every((s) => s.costUsd === undefined || (typeof s.costUsd === 'number' && s.costUsd >= 0)),
-	);
-	check(
-		'sorted newest-first',
-		sessions.every((s, i) => i === 0 || (sessions[i - 1]?.startedAt ?? '') >= s.startedAt),
-	);
+		check('at least some sessions returned', sessions.length > 0, `got ${String(sessions.length)}`);
+		check(
+			'every returned sessionId has a matching .jsonl file in the real directory',
+			sessions.every((s) => rawEntries.includes(`${s.sessionId}.jsonl`)),
+		);
+		check(
+			'no orphan directory (no matching .jsonl at all — trap 1) is ever returned as a session',
+			sessions.every((s) => !orphanDirNames.includes(s.sessionId)),
+		);
+		check(
+			'every present title is a non-empty string pulled from a real ai-title record',
+			sessions.every((s) => s.title === undefined || (typeof s.title === 'string' && s.title.length > 0)),
+		);
+		check(
+			'every present cost is a non-negative number',
+			sessions.every((s) => s.costUsd === undefined || (typeof s.costUsd === 'number' && s.costUsd >= 0)),
+		);
+		check(
+			'sorted newest-first',
+			sessions.every((s, i) => i === 0 || (sessions[i - 1]?.startedAt ?? '') >= s.startedAt),
+		);
+	}
 }
 
 // --- T. Phase 6 task 8: the per-message copy button's text assembly --------
