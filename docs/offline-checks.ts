@@ -5106,21 +5106,26 @@ console.log('T5. assistantCopyVisible: hidden while the turn is still mutating, 
 
 console.log('P. AskUserQuestion parsing and merging');
 {
-	// 1. Well-formed
+	// 1. Well-formed — real measured Claude CLI payload shape (label + description, no value field)
 	const wellFormed = parseAskUserQuestionInput({
 		questions: [{
-			question: 'Favorite color?',
-			id: 'color',
+			question: 'Bu dokümanla ne yapmak istiyorsun?',
+			header: 'Doküman',
 			options: [
-				{ label: 'Red', value: 'red' },
-				{ label: 'Blue', value: 'blue', description: 'Like the sky' }
-			]
+				{ label: 'Oku', description: 'Dokümanı oku ve içeriğini göster' },
+				{ label: 'Düzenle', description: 'Dokümanda değişiklik yap' },
+				{ label: 'Sil', description: 'Dokümanı sil' }
+			],
+			multiSelect: false
 		}]
 	});
 	check('parses well-formed AskUserQuestion input', wellFormed !== null);
-	eq('extracts the question correctly', wellFormed?.[0]?.question, 'Favorite color?');
-	eq('extracts options correctly', wellFormed?.[0]?.options?.length, 2);
-	eq('extracts description correctly', wellFormed?.[0]?.options?.[1]?.description, 'Like the sky');
+	eq('extracts the question correctly', wellFormed?.[0]?.question, 'Bu dokümanla ne yapmak istiyorsun?');
+	eq('extracts header correctly', wellFormed?.[0]?.header, 'Doküman');
+	eq('extracts options correctly', wellFormed?.[0]?.options?.length, 3);
+	eq('extracts option label correctly', wellFormed?.[0]?.options?.[0]?.label, 'Oku');
+	eq('extracts option value defaulting to label', wellFormed?.[0]?.options?.[0]?.value, 'Oku');
+	eq('extracts description correctly', wellFormed?.[0]?.options?.[0]?.description, 'Dokümanı oku ve içeriğini göster');
 
 	// 2. Malformed / Missing fields
 	eq('rejects undefined input', parseAskUserQuestionInput(undefined), null);
@@ -5185,6 +5190,8 @@ console.log('P3. Fail-closed violation on malformed question');
 		empty() { this.children = []; }
 		setText(t: string) { this.text = t; }
 		addEventListener(evt: string, cb: any) { this.listeners[evt] = cb; }
+		hide() { this.addClass('guki-hidden'); }
+		show() { this.removeClass('guki-hidden'); }
 		remove() {}
 		focus() {}
 	}

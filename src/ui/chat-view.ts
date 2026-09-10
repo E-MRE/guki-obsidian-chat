@@ -327,20 +327,32 @@ export class ChatView extends ItemView {
 		this.composer?.setBlocked(this.session.blocked);
 		this.composer?.setStatusLine(this.currentStatus());
 
-		const askItem = this.session.state.items.find(
-			(i) => i.kind === 'permission' && i.toolName === 'AskUserQuestion' && i.status === 'pending'
+		const pendingPerm = this.session.state.items.find(
+			(i) => i.kind === 'permission' && i.status === 'pending'
 		) as import('../core/chat-state').PermissionItem | undefined;
-		if (askItem) {
-			this.composer?.showAskUserQuestion(askItem, (answers) => {
-				const decision = decideAskUserQuestion(askItem.input, answers);
-				this.session.decidePermission(
-					askItem.requestId,
-					decision.behavior,
-					decision.updatedInput !== undefined ? { updatedInput: decision.updatedInput } : undefined,
-				);
-			});
+
+		if (pendingPerm) {
+			if (pendingPerm.toolName === 'AskUserQuestion') {
+				this.composer?.hidePermissionCard();
+				this.composer?.showAskUserQuestion(pendingPerm, (answers) => {
+					const decision = decideAskUserQuestion(pendingPerm.input, answers);
+					this.session.decidePermission(
+						pendingPerm.requestId,
+						decision.behavior,
+						decision.updatedInput !== undefined ? { updatedInput: decision.updatedInput } : undefined,
+					);
+				});
+			} else {
+				this.composer?.hideAskUserQuestion();
+				this.composer?.showPermissionCard(pendingPerm, {
+					decide: (requestId, behavior) => {
+						this.session.decidePermission(requestId, behavior);
+					}
+				});
+			}
 		} else {
 			this.composer?.hideAskUserQuestion();
+			this.composer?.hidePermissionCard();
 		}
 	}
 

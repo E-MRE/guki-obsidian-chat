@@ -1429,3 +1429,48 @@
 .guki-ask-custom-text.guki-ask-selected {
 	border-color: var(--interactive-accent);
 }
+
+.guki-ask-tab-submit {
+	margin-left: auto;
+	padding: var(--size-2-1) var(--size-4-3);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-medium);
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border: none;
+	border-radius: var(--radius-s);
+	cursor: var(--cursor);
+	margin-top: var(--size-2-1);
+	margin-bottom: var(--size-2-1);
+	margin-right: var(--size-4-2);
+}
+
+.guki-ask-tab-submit:hover {
+	background-color: var(--interactive-accent-hover);
+}
+
+.guki-ask-actions {
+	display: flex;
+	justify-content: flex-end;
+	margin-top: var(--size-4-1);
+}
+
+.guki-ask-submit-btn {
+	padding: var(--size-4-1) var(--size-4-3);
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-medium);
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border: none;
+	border-radius: var(--radius-s);
+	cursor: var(--cursor);
+}
+
+.guki-ask-submit-btn:hover {
+	background-color: var(--interactive-accent-hover);
+}
+
+.guki-ask-submit-btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}

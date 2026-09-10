@@ -21,6 +21,13 @@ import {
 	type Attachment,
 } from '../core/attachments';
 import { AskUserQuestionInline } from './ask-user-question';
+import {
+	createPermissionCard,
+	updatePermissionCard,
+	type RenderedPermissionCard,
+	type PermissionActions,
+} from './permission-card';
+import type { PermissionItem } from '../core/chat-state';
 
 /**
  * The live status line's data. Every field `null` means "not known yet" — before the first
@@ -174,6 +181,8 @@ export class Composer {
 	 */
 	private pointerInPanel = false;
 	private askQuestionInline: AskUserQuestionInline | null = null;
+	private permissionCardSlot: RenderedPermissionCard | null = null;
+	private currentPermissionRequestId: string | null = null;
 
 	constructor(
 		containerEl: HTMLElement,
@@ -676,6 +685,8 @@ export class Composer {
 	 * documents for its own observer), so the view calls this by hand from `onClose`.
 	 */
 	destroy(): void {
+		this.hideAskUserQuestion();
+		this.hidePermissionCard();
 		this.statusResizeObserver?.disconnect();
 		this.statusResizeObserver = null;
 		if (this.pendingStatusMeasure !== null) {
@@ -757,8 +768,41 @@ export class Composer {
 			this.askQuestionInline.destroy();
 			this.askQuestionInline = null;
 			
-			// Restore the composer form
+			// Restore the composer form and focus
 			this.inputEl.parentElement?.removeClass('guki-hidden');
+			this.focus();
+		}
+	}
+
+	showPermissionCard(item: PermissionItem, actions: PermissionActions): void {
+		if (this.permissionCardSlot) {
+			if (this.currentPermissionRequestId === item.requestId) {
+				updatePermissionCard(item, this.permissionCardSlot);
+				return;
+			}
+			this.hidePermissionCard();
+		}
+		const formEl = this.inputEl.parentElement;
+		const parentEl = formEl?.parentElement;
+		if (!formEl || !parentEl) {
+			return;
+		}
+
+		formEl.addClass('guki-hidden');
+		this.currentPermissionRequestId = item.requestId;
+		this.permissionCardSlot = createPermissionCard(parentEl, this.component, item, actions);
+		updatePermissionCard(item, this.permissionCardSlot);
+	}
+
+	hidePermissionCard(): void {
+		if (this.permissionCardSlot) {
+			this.permissionCardSlot.el.remove();
+			this.permissionCardSlot = null;
+			this.currentPermissionRequestId = null;
+			
+			// Restore the composer form and focus
+			this.inputEl.parentElement?.removeClass('guki-hidden');
+			this.focus();
 		}
 	}
 }

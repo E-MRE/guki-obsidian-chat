@@ -1,4 +1,4 @@
-import { Component, setIcon } from 'obsidian';
+import { Component } from 'obsidian';
 import type { PermissionItem } from '../core/chat-state';
 import { type AskQuestionDef, parseAskUserQuestionInput } from '../core/ask-user-question';
 
@@ -17,7 +17,7 @@ export class AskUserQuestionInline {
 	private questions: AskQuestionDef[] = [];
 	
 	// Keyboard navigation state
-	private focusedItemIndex = -1; // -1 means focus is on the custom text or nothing
+	private focusedItemIndex = 0;
 	private isMalformed = false;
 	
 	constructor(
@@ -34,7 +34,7 @@ export class AskUserQuestionInline {
 		}
 		
 		this.el = this.container.createDiv({ cls: 'guki-ask-question-inline' });
-		this.el.tabIndex = -1; // To steal focus
+		this.el.tabIndex = 0;
 		
 		this.tabBarEl = this.el.createDiv({ cls: 'guki-ask-tab-bar' });
 		this.contentEl = this.el.createDiv({ cls: 'guki-ask-content' });
@@ -43,8 +43,12 @@ export class AskUserQuestionInline {
 		this.renderTabContent();
 		
 		this.component.registerDomEvent(this.el, 'keydown', (e: KeyboardEvent) => this.onKeyDown(e));
+		this.component.registerDomEvent(this.el, 'click', (e: MouseEvent) => {
+			if ((e.target as HTMLElement)?.tagName !== 'INPUT') {
+				this.el.focus();
+			}
+		});
 		
-		// Wait for next frame to focus to ensure DOM is ready
 		if (typeof window !== 'undefined' && window.requestAnimationFrame) {
 			window.requestAnimationFrame(() => {
 				this.el.focus();
@@ -56,8 +60,18 @@ export class AskUserQuestionInline {
 	
 	private renderTabBar() {
 		this.tabBarEl.empty();
-		if (this.isMalformed) {
+		if (this.isMalformed || this.questions.length <= 1) {
+			if (typeof this.tabBarEl.hide === 'function') {
+				this.tabBarEl.hide();
+			} else {
+				this.tabBarEl.addClass('guki-hidden');
+			}
 			return;
+		}
+		if (typeof this.tabBarEl.show === 'function') {
+			this.tabBarEl.show();
+		} else {
+			this.tabBarEl.removeClass('guki-hidden');
 		}
 		
 		for (let i = 0; i < this.questions.length; i++) {
@@ -82,25 +96,27 @@ export class AskUserQuestionInline {
 			});
 		}
 		
-		// Submit tab
-		const submitTab = this.tabBarEl.createDiv({ cls: 'guki-ask-tab' });
-		if (this.currentTabIndex === this.questions.length) {
-			submitTab.addClass('guki-ask-active');
-		}
-		
+		const submitBtn = this.tabBarEl.createEl('button', {
+			cls: 'guki-ask-tab-submit',
+			text: 'Submit'
+		});
 		const allAnswered = this.questions.every(q => this.isQuestionAnswered(q));
 		if (allAnswered) {
-			submitTab.addClass('guki-ask-answered');
-			setIcon(submitTab, 'check');
-		} else {
-			submitTab.setText('Submit');
+			submitBtn.addClass('guki-ask-answered');
 		}
 		
-		submitTab.addEventListener('click', () => {
-			this.currentTabIndex = this.questions.length;
-			this.focusedItemIndex = -1;
-			this.renderTabBar();
-			this.renderTabContent();
+		submitBtn.addEventListener('click', () => {
+			if (allAnswered) {
+				this.submit();
+			} else {
+				const firstUnanswered = this.questions.findIndex(q => !this.isQuestionAnswered(q));
+				if (firstUnanswered !== -1) {
+					this.currentTabIndex = firstUnanswered;
+					this.focusedItemIndex = 0;
+					this.renderTabBar();
+					this.renderTabContent();
+				}
+			}
 		});
 	}
 	
@@ -125,11 +141,6 @@ export class AskUserQuestionInline {
 			return;
 		}
 		
-		if (this.currentTabIndex >= this.questions.length) {
-			this.renderSubmitContent();
-			return;
-		}
-		
 		const q = this.questions[this.currentTabIndex];
 		if (!q) return;
 		const qId = this.getQuestionId(q);
@@ -151,6 +162,9 @@ export class AskUserQuestionInline {
 				}
 				if (this.focusedItemIndex === optionIndex) {
 					itemEl.addClass('guki-ask-focused');
+					if (typeof itemEl.scrollIntoView === 'function') {
+						itemEl.scrollIntoView({ block: 'nearest' });
+					}
 				}
 				
 				itemEl.createSpan({ text: opt.label });
@@ -191,7 +205,6 @@ export class AskUserQuestionInline {
 			otherEl.addEventListener('click', () => {
 				this.focusedItemIndex = currentIndex;
 				inputEl.focus();
-				this.renderTabContent(); // Re-render to update focus class
 			});
 			
 			inputEl.addEventListener('focus', () => {
@@ -207,7 +220,6 @@ export class AskUserQuestionInline {
 				const val = (e.target as HTMLInputElement).value;
 				this.customTexts[qId] = val;
 				
-				// Optional: auto-deselect other options if single-select
 				if (!q.multiSelect && val.length > 0) {
 					this.selections[qId] = [];
 				}
@@ -220,10 +232,32 @@ export class AskUserQuestionInline {
 				}
 			});
 			
-			// Auto focus if it's the currently focused item
 			if (this.focusedItemIndex === optionIndex) {
 				window.requestAnimationFrame(() => inputEl.focus());
 			}
+			optionIndex++;
+		}
+
+		if (q.multiSelect || q.isOther) {
+			const actionsEl = this.contentEl.createDiv({ cls: 'guki-ask-actions' });
+			const isLastQuestion = this.currentTabIndex === this.questions.length - 1;
+			const isAnswered = this.isQuestionAnswered(q);
+			const actionBtn = actionsEl.createEl('button', {
+				cls: 'guki-ask-submit-btn',
+				text: isLastQuestion ? 'Submit' : 'Next'
+			});
+			actionBtn.disabled = !isAnswered;
+			actionBtn.addEventListener('click', () => {
+				if (!isAnswered) return;
+				if (isLastQuestion) {
+					this.submit();
+				} else {
+					this.currentTabIndex++;
+					this.focusedItemIndex = 0;
+					this.renderTabBar();
+					this.renderTabContent();
+				}
+			});
 		}
 	}
 	
@@ -238,43 +272,23 @@ export class AskUserQuestionInline {
 				sels.push(value);
 			}
 			this.selections[qId] = sels;
-			
-			// Clear custom text if we select a regular option
 			this.customTexts[qId] = '';
 		} else {
 			this.selections[qId] = [value];
 			this.customTexts[qId] = '';
 			
-			// Single select advances automatically
-			if (this.currentTabIndex < this.questions.length) {
+			// Single select: advances if more questions, submits if last question
+			if (this.currentTabIndex < this.questions.length - 1) {
 				this.currentTabIndex++;
 				this.focusedItemIndex = 0;
+			} else {
+				this.submit();
+				return;
 			}
 		}
 		
 		this.renderTabBar();
 		this.renderTabContent();
-	}
-	
-	private renderSubmitContent() {
-		const allAnswered = this.questions.every(q => this.isQuestionAnswered(q));
-		
-		this.contentEl.createDiv({ 
-			cls: 'guki-ask-question', 
-			text: allAnswered ? 'Ready to submit.' : 'Please answer all questions before submitting.' 
-		});
-		
-		const submitBtn = this.contentEl.createEl('button', {
-			text: 'Submit answers'
-		});
-		
-		if (!allAnswered) {
-			submitBtn.disabled = true;
-		}
-		
-		submitBtn.addEventListener('click', () => {
-			this.submit();
-		});
 	}
 	
 	private onKeyDown(e: KeyboardEvent) {
@@ -287,66 +301,83 @@ export class AskUserQuestionInline {
 		if (this.isMalformed) {
 			return;
 		}
-		
-		if (e.key === 'Tab') {
-			e.preventDefault();
-			if (e.shiftKey) {
-				this.currentTabIndex = Math.max(0, this.currentTabIndex - 1);
-			} else {
-				this.currentTabIndex = Math.min(this.questions.length, this.currentTabIndex + 1);
-			}
-			this.focusedItemIndex = 0;
-			this.renderTabBar();
-			this.renderTabContent();
-			return;
-		}
-		
-		if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-			e.preventDefault();
-			if (e.key === 'ArrowLeft') {
-				this.currentTabIndex = Math.max(0, this.currentTabIndex - 1);
-			} else {
-				this.currentTabIndex = Math.min(this.questions.length, this.currentTabIndex + 1);
-			}
-			this.focusedItemIndex = 0;
-			this.renderTabBar();
-			this.renderTabContent();
-			return;
-		}
-		
-		if (this.currentTabIndex >= this.questions.length) {
+
+		const isInput = (e.target as HTMLElement)?.tagName === 'INPUT';
+		if (isInput) {
 			if (e.key === 'Enter') {
 				e.preventDefault();
-				this.submit();
+				(e.target as HTMLElement).blur();
+				this.el.focus();
+				if (this.currentTabIndex === this.questions.length - 1) {
+					this.submit();
+				} else {
+					this.currentTabIndex++;
+					this.focusedItemIndex = 0;
+					this.renderTabBar();
+					this.renderTabContent();
+				}
+				return;
+			}
+			if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+				(e.target as HTMLElement).blur();
+				this.el.focus();
+			} else {
+				return;
+			}
+		}
+
+		if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+			if (this.questions.length > 1) {
+				e.preventDefault();
+				if (e.key === 'ArrowLeft') {
+					this.currentTabIndex = Math.max(0, this.currentTabIndex - 1);
+				} else {
+					this.currentTabIndex = Math.min(this.questions.length - 1, this.currentTabIndex + 1);
+				}
+				this.focusedItemIndex = 0;
+				this.renderTabBar();
+				this.renderTabContent();
 			}
 			return;
 		}
-		
+
 		const q = this.questions[this.currentTabIndex];
 		if (!q) return;
 		const numOptions = (q.options ? q.options.length : 0) + (q.isOther ? 1 : 0);
-		
+
 		if (e.key === 'ArrowDown') {
 			e.preventDefault();
-			this.focusedItemIndex = Math.min(numOptions - 1, this.focusedItemIndex + 1);
-			if (this.focusedItemIndex === -1 && numOptions > 0) this.focusedItemIndex = 0;
-			this.renderTabContent();
+			if (numOptions > 0) {
+				this.focusedItemIndex = Math.min(numOptions - 1, this.focusedItemIndex + 1);
+				this.renderTabContent();
+			}
 			return;
 		}
-		
+
 		if (e.key === 'ArrowUp') {
 			e.preventDefault();
-			this.focusedItemIndex = Math.max(0, this.focusedItemIndex - 1);
-			this.renderTabContent();
+			if (numOptions > 0) {
+				this.focusedItemIndex = Math.max(0, this.focusedItemIndex - 1);
+				this.renderTabContent();
+			}
 			return;
 		}
-		
+
 		if (e.key === 'Enter') {
-			// If we are currently focusing an input field, let the default enter behavior happen
-			if (this.focusedItemIndex >= 0 && this.focusedItemIndex < (q.options ? q.options.length : 0)) {
-				e.preventDefault();
-				const opt = q.options![this.focusedItemIndex]!;
+			e.preventDefault();
+			const isLastQuestion = this.currentTabIndex === this.questions.length - 1;
+			if (q.options && this.focusedItemIndex >= 0 && this.focusedItemIndex < q.options.length) {
+				const opt = q.options[this.focusedItemIndex]!;
 				this.toggleOption(q, opt.value);
+				return;
+			}
+			if (q.isOther && this.focusedItemIndex === (q.options ? q.options.length : 0)) {
+				const inputEl = this.contentEl.querySelector('input');
+				inputEl?.focus();
+				return;
+			}
+			if (isLastQuestion && this.isQuestionAnswered(q)) {
+				this.submit();
 			}
 		}
 	}

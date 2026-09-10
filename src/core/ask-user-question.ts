@@ -61,10 +61,10 @@ export function parseAskUserQuestionInput(input: unknown): AskQuestionDef[] | nu
 			for (const opt of qObj.options) {
 				if (opt && typeof opt === 'object') {
 					const o = opt as Record<string, unknown>;
-					if (typeof o.label === 'string' && typeof o.value === 'string') {
+					if (typeof o.label === 'string') {
 						const optObj: AskQuestionOption = {
 							label: o.label,
-							value: o.value
+							value: typeof o.value === 'string' ? o.value : o.label
 						};
 						if (typeof o.description === 'string') {
 							optObj.description = o.description;

@@ -25,11 +25,9 @@ import {
 	type UserItem,
 } from '../core/chat-state';
 import { renderChatMarkdown } from './markdown';
-import {
-	createPermissionCard,
-	updatePermissionCard,
-	type PermissionActions,
-	type RenderedPermissionCard,
+import type {
+	PermissionActions,
+	RenderedPermissionCard,
 } from './permission-card';
 import { createToolCard, updateToolCard, type RenderedToolCard } from './tool-card';
 
@@ -494,23 +492,18 @@ export class MessageList {
 	 * the request id the card was created for.
 	 */
 	private updatePermission(item: PermissionItem, entry: RenderedItem): boolean {
-		if (item.toolName === 'AskUserQuestion') {
-			if (item.status === 'pending') {
-				entry.bodyEl.empty();
-				entry.metaEl.setText('Waiting for your response…');
-			} else {
-				entry.el.hide();
-			}
-			return true;
+		if (item.status === 'pending') {
+			entry.bodyEl.empty();
+			entry.metaEl.setText(
+				item.toolName === 'AskUserQuestion'
+					? 'Waiting for your response…'
+					: 'Waiting for approval…'
+			);
+			entry.el.show();
+		} else {
+			entry.el.hide();
 		}
-
-		entry.permissionCard ??= createPermissionCard(
-			entry.bodyEl,
-			this.component,
-			item,
-			this.permissionActions,
-		);
-		return updatePermissionCard(item, entry.permissionCard);
+		return true;
 	}
 
 	// --- notices ------------------------------------------------------------
