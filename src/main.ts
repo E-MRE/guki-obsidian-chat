@@ -1,5 +1,5 @@
 import { Plugin, WorkspaceLeaf } from 'obsidian';
-import { VIEW_TYPE_GUKI_CHAT } from './constants';
+import { CHAT_VIEW_ICON, CHAT_VIEW_TITLE, VIEW_TYPE_GUKI_CHAT } from './constants';
 import { SessionManager } from './core/session-manager';
 import { ChatView } from './ui/chat-view';
 import { DEFAULT_SETTINGS, GukiSettingTab, type GukiChatSettings } from './ui/settings-tab';
@@ -20,6 +20,10 @@ export default class GukiChatPlugin extends Plugin {
 		this.addSettingTab(new GukiSettingTab(this.app, this));
 
 		this.registerView(VIEW_TYPE_GUKI_CHAT, (leaf) => new ChatView(leaf, session));
+
+		this.addRibbonIcon(CHAT_VIEW_ICON, CHAT_VIEW_TITLE, () => {
+			void this.activateView();
+		});
 
 		// Obsidian's quit path does not guarantee onunload, and a surviving subprocess would
 		// outlive the app (RESEARCH C). Both routes call dispose(), which is idempotent.
@@ -74,7 +78,10 @@ export default class GukiChatPlugin extends Plugin {
 		let leaf: WorkspaceLeaf | undefined = existing[0];
 
 		if (!leaf) {
-			leaf = workspace.getLeaf(true);
+			// The right sidebar, not a main-area tab: the panel's narrow layout
+			// (`NARROW_BREAKPOINT_PX`) is built for this width, and a sidebar leaf
+			// doesn't compete with note tabs the way a main-area one does.
+			leaf = workspace.getRightLeaf(false) ?? workspace.getLeaf(true);
 			await leaf.setViewState({
 				type: VIEW_TYPE_GUKI_CHAT,
 				active: true,
