@@ -124,6 +124,10 @@ export class MessageList {
 		let changed = false;
 
 		for (const item of items) {
+			// Permission cards mount in the composer slot; tool cards already render in the assistant bubble.
+			if (item.kind === 'permission') {
+				continue;
+			}
 			seen.add(item.id);
 			const existing = this.rendered.get(item.id);
 			const entry = existing ?? this.createItem(item);

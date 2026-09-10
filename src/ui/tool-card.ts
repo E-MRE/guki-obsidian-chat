@@ -214,10 +214,7 @@ function renderBody(block: MessageBlock, card: RenderedToolCard): void {
 		// "No output." and read as though something had gone wrong.
 		body.createDiv({
 			cls: 'guki-tool-empty',
-			text:
-				block.toolPending === true
-					? 'Waiting for your approval on the card below.'
-					: 'Shown on the approval card below.',
+			text: toolPermissionBodyText(block),
 		});
 	} else if (block.toolInput !== undefined) {
 		const args = formatInput(block.toolInput);
@@ -240,6 +237,24 @@ function renderBody(block: MessageBlock, card: RenderedToolCard): void {
 	if (body.childElementCount === 0) {
 		body.createDiv({ cls: 'guki-tool-empty', text: 'No output.' });
 	}
+}
+
+/**
+ * What a bridged tool call displays in its body while waiting or once resolved.
+ * Permission cards mount in the composer slot, never inline below the tool card.
+ */
+export function toolPermissionBodyText(block: MessageBlock): string {
+	if (block.toolPending === true) {
+		return block.toolName === 'AskUserQuestion'
+			? 'Waiting for your response in the composer.'
+			: 'Waiting for your approval in the composer.';
+	}
+	if (block.toolDenied === true) {
+		return 'Denied in the composer.';
+	}
+	return block.toolName === 'AskUserQuestion'
+		? 'Answered in the composer.'
+		: 'Handled in the composer.';
 }
 
 /**

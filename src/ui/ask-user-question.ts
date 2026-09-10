@@ -182,83 +182,103 @@ export class AskUserQuestionInline {
 			}
 		}
 		
-		if (q.isOther) {
-			const otherEl = optionsList.createDiv({ cls: 'guki-ask-custom-text' });
-			if (this.focusedItemIndex === optionIndex) {
-				otherEl.addClass('guki-ask-focused');
+		// Free-text ("Other") row is always rendered for every question
+		const otherIndex = optionIndex;
+		const otherEl = optionsList.createDiv({ cls: 'guki-ask-custom-text' });
+		if (this.focusedItemIndex === otherIndex) {
+			otherEl.addClass('guki-ask-focused');
+			if (typeof otherEl.scrollIntoView === 'function') {
+				otherEl.scrollIntoView({ block: 'nearest' });
 			}
-			
-			const inputEl = otherEl.createEl('input', {
-				attr: {
-					type: q.isSecret ? 'password' : 'text',
-					placeholder: 'Other...'
-				}
-			});
-			
-			const currentText = this.customTexts[qId] || '';
-			inputEl.value = currentText;
-			if (currentText.length > 0) {
-				otherEl.addClass('guki-ask-selected');
-			}
-			
-			const currentIndex = optionIndex;
-			otherEl.addEventListener('click', () => {
-				this.focusedItemIndex = currentIndex;
-				inputEl.focus();
-			});
-			
-			inputEl.addEventListener('focus', () => {
-				this.focusedItemIndex = currentIndex;
-				otherEl.addClass('guki-ask-focused');
-			});
-			
-			inputEl.addEventListener('blur', () => {
-				otherEl.removeClass('guki-ask-focused');
-			});
-			
-			inputEl.addEventListener('input', (e) => {
-				const val = (e.target as HTMLInputElement).value;
-				this.customTexts[qId] = val;
-				
-				if (!q.multiSelect && val.length > 0) {
-					this.selections[qId] = [];
-				}
-				
-				this.renderTabBar();
-				if (val.length > 0) {
-					otherEl.addClass('guki-ask-selected');
-				} else {
-					otherEl.removeClass('guki-ask-selected');
-				}
-			});
-			
-			if (this.focusedItemIndex === optionIndex) {
-				window.requestAnimationFrame(() => inputEl.focus());
-			}
-			optionIndex++;
 		}
+		
+		const currentText = this.customTexts[qId] || '';
+		if (currentText.trim().length > 0) {
+			otherEl.addClass('guki-ask-selected');
+		}
+		
+		const inputEl = otherEl.createEl('input', {
+			attr: {
+				type: q.isSecret ? 'password' : 'text',
+				placeholder: 'Other…'
+			}
+		});
+		inputEl.value = currentText;
 
-		if (q.multiSelect || q.isOther) {
-			const actionsEl = this.contentEl.createDiv({ cls: 'guki-ask-actions' });
-			const isLastQuestion = this.currentTabIndex === this.questions.length - 1;
-			const isAnswered = this.isQuestionAnswered(q);
-			const actionBtn = actionsEl.createEl('button', {
-				cls: 'guki-ask-submit-btn',
-				text: isLastQuestion ? 'Submit' : 'Next'
-			});
-			actionBtn.disabled = !isAnswered;
-			actionBtn.addEventListener('click', () => {
-				if (!isAnswered) return;
-				if (isLastQuestion) {
-					this.submit();
-				} else {
-					this.currentTabIndex++;
-					this.focusedItemIndex = 0;
-					this.renderTabBar();
-					this.renderTabContent();
+		let actionBtn: HTMLButtonElement | undefined;
+
+		const clearOptionSelections = () => {
+			if (!q.multiSelect) {
+				this.selections[qId] = [];
+				optionsList.querySelectorAll('.guki-ask-item.guki-ask-selected').forEach(el => {
+					el.removeClass('guki-ask-selected');
+				});
+				this.renderTabBar();
+				if (actionBtn) {
+					actionBtn.disabled = !this.isQuestionAnswered(q);
 				}
-			});
-		}
+			}
+		};
+		
+		otherEl.addEventListener('click', (e) => {
+			this.focusedItemIndex = otherIndex;
+			clearOptionSelections();
+			if ((e.target as HTMLElement) !== inputEl) {
+				inputEl.focus();
+			}
+		});
+		
+		inputEl.addEventListener('focus', () => {
+			this.focusedItemIndex = otherIndex;
+			clearOptionSelections();
+			otherEl.addClass('guki-ask-focused');
+		});
+		
+		inputEl.addEventListener('blur', () => {
+			otherEl.removeClass('guki-ask-focused');
+		});
+		
+		inputEl.addEventListener('input', (e) => {
+			const val = (e.target as HTMLInputElement).value;
+			this.customTexts[qId] = val;
+			
+			if (!q.multiSelect) {
+				this.selections[qId] = [];
+				optionsList.querySelectorAll('.guki-ask-item.guki-ask-selected').forEach(el => {
+					el.removeClass('guki-ask-selected');
+				});
+			}
+			
+			this.renderTabBar();
+			if (val.trim().length > 0) {
+				otherEl.addClass('guki-ask-selected');
+			} else {
+				otherEl.removeClass('guki-ask-selected');
+			}
+			if (actionBtn) {
+				actionBtn.disabled = !this.isQuestionAnswered(q);
+			}
+		});
+
+		const actionsEl = this.contentEl.createDiv({ cls: 'guki-ask-actions' });
+		const isLastQuestion = this.currentTabIndex === this.questions.length - 1;
+		const isAnswered = this.isQuestionAnswered(q);
+		actionBtn = actionsEl.createEl('button', {
+			cls: 'guki-ask-submit-btn',
+			text: isLastQuestion ? 'Submit' : 'Next'
+		});
+		actionBtn.disabled = !isAnswered;
+		actionBtn.addEventListener('click', () => {
+			if (!this.isQuestionAnswered(q)) return;
+			if (isLastQuestion) {
+				this.submit();
+			} else {
+				this.currentTabIndex++;
+				this.focusedItemIndex = 0;
+				this.renderTabBar();
+				this.renderTabContent();
+			}
+		});
 	}
 	
 	private toggleOption(q: AskQuestionDef, value: string) {
@@ -272,7 +292,6 @@ export class AskUserQuestionInline {
 				sels.push(value);
 			}
 			this.selections[qId] = sels;
-			this.customTexts[qId] = '';
 		} else {
 			this.selections[qId] = [value];
 			this.customTexts[qId] = '';
@@ -306,6 +325,17 @@ export class AskUserQuestionInline {
 		if (isInput) {
 			if (e.key === 'Enter') {
 				e.preventDefault();
+				const q = this.questions[this.currentTabIndex];
+				if (!q) return;
+				const qId = this.getQuestionId(q);
+				const custom = (this.customTexts[qId] || '').trim();
+				// Fail-closed: empty custom answer is not submittable
+				if (custom.length === 0) {
+					return;
+				}
+				if (!this.isQuestionAnswered(q)) {
+					return;
+				}
 				(e.target as HTMLElement).blur();
 				this.el.focus();
 				if (this.currentTabIndex === this.questions.length - 1) {
@@ -321,6 +351,13 @@ export class AskUserQuestionInline {
 			if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
 				(e.target as HTMLElement).blur();
 				this.el.focus();
+				const q = this.questions[this.currentTabIndex];
+				const optCount = q?.options ? q.options.length : 0;
+				if (e.key === 'ArrowUp') {
+					this.focusedItemIndex = Math.max(0, optCount - 1);
+					this.renderTabContent();
+				}
+				return;
 			} else {
 				return;
 			}
@@ -343,7 +380,8 @@ export class AskUserQuestionInline {
 
 		const q = this.questions[this.currentTabIndex];
 		if (!q) return;
-		const numOptions = (q.options ? q.options.length : 0) + (q.isOther ? 1 : 0);
+		const optCount = q.options ? q.options.length : 0;
+		const numOptions = optCount + 1; // options + Other
 
 		if (e.key === 'ArrowDown') {
 			e.preventDefault();
@@ -366,12 +404,17 @@ export class AskUserQuestionInline {
 		if (e.key === 'Enter') {
 			e.preventDefault();
 			const isLastQuestion = this.currentTabIndex === this.questions.length - 1;
-			if (q.options && this.focusedItemIndex >= 0 && this.focusedItemIndex < q.options.length) {
-				const opt = q.options[this.focusedItemIndex]!;
+			if (this.focusedItemIndex >= 0 && this.focusedItemIndex < optCount) {
+				const opt = q.options![this.focusedItemIndex]!;
 				this.toggleOption(q, opt.value);
 				return;
 			}
-			if (q.isOther && this.focusedItemIndex === (q.options ? q.options.length : 0)) {
+			if (this.focusedItemIndex === optCount) {
+				const qId = this.getQuestionId(q);
+				if (!q.multiSelect) {
+					this.selections[qId] = [];
+					this.renderTabBar();
+				}
 				const inputEl = this.contentEl.querySelector('input');
 				inputEl?.focus();
 				return;
@@ -390,17 +433,19 @@ export class AskUserQuestionInline {
 		for (const q of this.questions) {
 			const qId = this.getQuestionId(q);
 			const sels = this.selections[qId] || [];
-			const custom = this.customTexts[qId] || '';
+			const custom = (this.customTexts[qId] || '').trim();
 			
 			if (q.multiSelect) {
 				const ans = [...sels];
-				if (custom.trim().length > 0) ans.push(custom);
+				if (custom.length > 0) ans.push(custom);
 				finalAnswers[qId] = ans;
 			} else {
-				if (custom.trim().length > 0) {
+				if (custom.length > 0) {
 					finalAnswers[qId] = custom;
+				} else if (sels.length > 0) {
+					finalAnswers[qId] = sels[0]!;
 				} else {
-					finalAnswers[qId] = sels[0] || '';
+					return; // Fail-closed
 				}
 			}
 		}

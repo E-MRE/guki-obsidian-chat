@@ -89,10 +89,10 @@ import {
 } from '../src/cli/events';
 import { startsExpanded, toolCategory, toolResultText, toolSummary } from '../src/core/tool-policy';
 import { diffFromToolInput, diffStats, emptyPaneText } from '../src/ui/diff-view';
-import { toolResultTitle, toolStatusText } from '../src/ui/tool-card';
+import { toolPermissionBodyText, toolResultTitle, toolStatusText } from '../src/ui/tool-card';
 import { permissionDiff } from '../src/ui/permission-card';
 import { renderQuotaBar } from '../src/ui/composer';
-import { formatTurnMeta, withTurnMeta } from '../src/ui/message-list';
+import { formatTurnMeta, MessageList, withTurnMeta } from '../src/ui/message-list';
 import { containsPath, permissionVerdict } from '../src/core/permission-policy';
 import { tokenizeCommand } from '../src/core/bash-whitelist';
 import { createVaultPaths } from '../src/core/vault-path-resolver';
@@ -5169,38 +5169,80 @@ console.log('P2. Permission bypass on cancel');
 	check('cancellation (answers = null) sends deny, not allow', decision.behavior === 'deny');
 }
 
+class FakeElement {
+	children: any[] = [];
+	classList = new Set<string>();
+	listeners: Record<string, any> = {};
+	text: string = '';
+	value: string = '';
+	disabled: boolean = false;
+	tag: string = 'div';
+	tagName: string = 'DIV';
+	scrollTop: number = 0;
+	scrollHeight: number = 0;
+	clientHeight: number = 0;
+	childElementCount: number = 0;
+
+	createDiv(opts?: any) { return this.createEl('div', opts); }
+	createSpan(opts?: any) { return this.createEl('span', opts); }
+	createEl(tag: string, opts?: any) {
+		const el = new FakeElement();
+		el.tag = tag;
+		el.tagName = tag.toUpperCase();
+		if (opts?.cls) opts.cls.split(' ').forEach((c: string) => el.addClass(c));
+		if (opts?.text) el.text = opts.text;
+		this.children.push(el);
+		this.childElementCount = this.children.length;
+		return el;
+	}
+	addClass(c: string) { this.classList.add(c); }
+	removeClass(c: string) { this.classList.delete(c); }
+	empty() {
+		this.children = [];
+		this.childElementCount = 0;
+	}
+	setText(t: string) { this.text = t; }
+	addEventListener(evt: string, cb: any) { this.listeners[evt] = cb; }
+	hide() { this.addClass('guki-hidden'); }
+	show() { this.removeClass('guki-hidden'); }
+	remove() {}
+	focus() {
+		if (this.listeners['focus']) this.listeners['focus']();
+	}
+	blur() {
+		if (this.listeners['blur']) this.listeners['blur']();
+	}
+	scrollIntoView() {}
+	querySelector(sel: string): any {
+		const findNode = (node: any): any => {
+			if (sel === 'input' && node.tag === 'input') return node;
+			if (sel.startsWith('.') && node.classList.has(sel.slice(1))) return node;
+			for (const child of node.children) {
+				const found = findNode(child);
+				if (found) return found;
+			}
+			return null;
+		};
+		return findNode(this);
+	}
+	querySelectorAll(sel: string): any[] {
+		const results: any[] = [];
+		const walk = (node: any) => {
+			if (sel.startsWith('.') && node.classList.has(sel.slice(1).split('.')[0])) {
+				results.push(node);
+			}
+			for (const child of node.children) walk(child);
+		};
+		walk(this);
+		return results;
+	}
+}
+
 console.log('P3. Fail-closed violation on malformed question');
 {
-	class FakeElement {
-		children: any[] = [];
-		classList = new Set<string>();
-		listeners: Record<string, any> = {};
-		text: string = '';
-		createDiv(opts: any) { return this.createEl('div', opts); }
-		createSpan(opts: any) { return this.createEl('span', opts); }
-		createEl(tag: string, opts: any) {
-			const el = new FakeElement();
-			if (opts?.cls) opts.cls.split(' ').forEach((c: string) => el.addClass(c));
-			if (opts?.text) el.text = opts.text;
-			this.children.push(el);
-			return el;
-		}
-		addClass(c: string) { this.classList.add(c); }
-		removeClass(c: string) { this.classList.delete(c); }
-		empty() { this.children = []; }
-		setText(t: string) { this.text = t; }
-		addEventListener(evt: string, cb: any) { this.listeners[evt] = cb; }
-		hide() { this.addClass('guki-hidden'); }
-		show() { this.removeClass('guki-hidden'); }
-		remove() {}
-		focus() {}
-	}
-	
 	(global as any).window = { requestAnimationFrame: (cb: any) => cb() };
 	const container = new FakeElement() as any;
 	let decision: any = 'no-decision-yet';
-	// Must require it since we can't import dynamically at the top easily without altering the whole file structure
-	
 	
 	const ask = new AskUserQuestionInline(
 		container,
@@ -5215,6 +5257,162 @@ console.log('P3. Fail-closed violation on malformed question');
 	// Simulate user pressing Escape
 	ask.el.listeners['keydown']({ key: 'Escape', preventDefault: () => {} });
 	check('user can escape malformed question, resulting in deny (null)', decision === null);
+}
+
+console.log('P4. Free-text ("Other") option row exists for payload with no isOther field');
+{
+	const container = new FakeElement() as any;
+	let decision: any = 'no-decision-yet';
+	new AskUserQuestionInline(
+		container,
+		{ registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any,
+		{
+			input: {
+				questions: [{
+					question: 'What do you want to do?',
+					options: [{ label: 'Read' }, { label: 'Write' }]
+				}]
+			}
+		} as any,
+		(answers: any) => decision = answers
+	);
+	const inputEl = container.querySelector('input');
+	check('free-text input exists even when isOther was not sent by CLI', inputEl !== null);
+	eq('not submitted on mount', decision, 'no-decision-yet');
+}
+
+console.log('P5. Empty custom answer is not submittable (fail-closed)');
+{
+	const container = new FakeElement() as any;
+	let decision: any = 'no-decision-yet';
+	const ask = new AskUserQuestionInline(
+		container,
+		{ registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any,
+		{
+			input: {
+				questions: [{
+					question: 'What do you want to do?',
+					options: [{ label: 'Read' }, { label: 'Write' }]
+				}]
+			}
+		} as any,
+		(answers: any) => decision = answers
+	);
+	// ArrowDown to option 1, then option 2, then Other row (index 2)
+	ask.el.listeners['keydown']({ key: 'ArrowDown', preventDefault: () => {} });
+	ask.el.listeners['keydown']({ key: 'ArrowDown', preventDefault: () => {} });
+	// Press Enter on Other row -> moves focus into input
+	ask.el.listeners['keydown']({ key: 'Enter', preventDefault: () => {} });
+	eq('not submitted upon selecting Other row', decision, 'no-decision-yet');
+	
+	// User presses Enter inside empty input
+	const inputEl = container.querySelector('input');
+	ask.el.listeners['keydown']({ key: 'Enter', target: inputEl, preventDefault: () => {} });
+	eq('pressing Enter in empty custom input does not submit (fail-closed)', decision, 'no-decision-yet');
+}
+
+console.log('P6. Typed custom answer reaches updatedInput correctly');
+{
+	// Single-select: custom text replaces choice
+	const container = new FakeElement() as any;
+	let decision: any = 'no-decision-yet';
+	const inputPayload = {
+		questions: [{
+			id: 'action_q',
+			question: 'What do you want to do?',
+			options: [{ label: 'Read' }, { label: 'Write' }],
+			multiSelect: false
+		}]
+	};
+	const ask = new AskUserQuestionInline(
+		container,
+		{ registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any,
+		{ input: inputPayload } as any,
+		(answers: any) => {
+			decision = decideAskUserQuestion(inputPayload, answers);
+		}
+	);
+	const inputEl = container.querySelector('input');
+	inputEl.listeners['focus']?.();
+	inputEl.listeners['input']?.({ target: { value: 'Custom format note' } });
+	ask.el.listeners['keydown']({ key: 'Enter', target: inputEl, preventDefault: () => {} });
+	check('submits allow on non-empty custom answer', decision.behavior === 'allow');
+	eq('single-select payload keys custom string into answers map', decision.updatedInput?.answers?.['action_q'], 'Custom format note');
+}
+
+{
+	// Multi-select: custom text combines with choices
+	const container = new FakeElement() as any;
+	let decision: any = 'no-decision-yet';
+	const inputPayload = {
+		questions: [{
+			id: 'pref_q',
+			question: 'Select preferences',
+			options: [{ label: 'Option A', value: 'optA' }, { label: 'Option B', value: 'optB' }],
+			multiSelect: true
+		}]
+	};
+	const ask = new AskUserQuestionInline(
+		container,
+		{ registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any,
+		{ input: inputPayload } as any,
+		(answers: any) => {
+			decision = decideAskUserQuestion(inputPayload, answers);
+		}
+	);
+	// Toggle option A
+	ask.el.listeners['keydown']({ key: 'Enter', preventDefault: () => {} });
+	// Type custom answer
+	const inputEl = container.querySelector('input');
+	inputEl.listeners['focus']?.();
+	inputEl.listeners['input']?.({ target: { value: 'Custom C' } });
+	// Submit via Enter inside input
+	ask.el.listeners['keydown']({ key: 'Enter', target: inputEl, preventDefault: () => {} });
+	check('submits allow on multi-select with custom text', decision.behavior === 'allow');
+	const answers = decision.updatedInput?.answers?.['pref_q'];
+	check('answers is an array in multi-select', Array.isArray(answers));
+	eq('combines selected option and custom text', JSON.stringify(answers), JSON.stringify(['optA', 'Custom C']));
+}
+
+console.log('P7. toolPermissionBodyText for bridged calls mounted in composer slot');
+{
+	const askPending = { index: 0, kind: 'tool_use', text: '', final: false, toolName: 'AskUserQuestion', toolPending: true, toolPermissionRequested: true } as const;
+	eq('pending AskUserQuestion says waiting for response in composer', toolPermissionBodyText(askPending), 'Waiting for your response in the composer.');
+
+	const askDenied = { index: 0, kind: 'tool_use', text: '', final: true, toolName: 'AskUserQuestion', toolPending: false, toolPermissionRequested: true, toolDenied: true } as const;
+	eq('denied AskUserQuestion says denied in composer', toolPermissionBodyText(askDenied), 'Denied in the composer.');
+
+	const askAnswered = { index: 0, kind: 'tool_use', text: '', final: true, toolName: 'AskUserQuestion', toolPending: false, toolPermissionRequested: true } as const;
+	eq('answered AskUserQuestion says answered in composer', toolPermissionBodyText(askAnswered), 'Answered in the composer.');
+
+	const writePending = { index: 0, kind: 'tool_use', text: '', final: false, toolName: 'Write', toolPending: true, toolPermissionRequested: true } as const;
+	eq('pending Write says waiting for approval in composer', toolPermissionBodyText(writePending), 'Waiting for your approval in the composer.');
+
+	const writeDenied = { index: 0, kind: 'tool_use', text: '', final: true, toolName: 'Write', toolPending: false, toolPermissionRequested: true, toolDenied: true } as const;
+	eq('denied Write says denied in composer', toolPermissionBodyText(writeDenied), 'Denied in the composer.');
+
+	const writeHandled = { index: 0, kind: 'tool_use', text: '', final: true, toolName: 'Write', toolPending: false, toolPermissionRequested: true } as const;
+	eq('handled Write says handled in composer', toolPermissionBodyText(writeHandled), 'Handled in the composer.');
+}
+
+console.log('P8. MessageList.sync skips PermissionItem to avoid duplicate empty card');
+{
+	const dummyWrapper = new FakeElement() as any;
+	const dummyApp = {} as any;
+	const dummyComponent = { registerDomEvent: () => {} } as any;
+	const dummyActions = { decide: () => {} } as any;
+	const list = new MessageList(dummyApp, dummyWrapper, dummyComponent, dummyActions);
+	const permItem: PermissionItem = {
+		id: 'perm-1',
+		kind: 'permission',
+		requestId: 'req-1',
+		toolName: 'AskUserQuestion',
+		input: {},
+		status: 'pending',
+		createdAt: 1000,
+	};
+	list.sync([permItem]);
+	eq('no element rendered for PermissionItem in message list', (list as any).rendered.size, 0);
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
