@@ -18,6 +18,7 @@ import {
 } from '../core/attachment-resolver';
 import type { Attachment } from '../core/attachments';
 import { formatModelName } from '../cli/events';
+import { decideAskUserQuestion } from '../core/ask-user-question';
 import type { SessionManager } from '../core/session-manager';
 import { Composer, type ComposerStatus } from './composer';
 import { MessageList } from './message-list';
@@ -331,9 +332,12 @@ export class ChatView extends ItemView {
 		) as import('../core/chat-state').PermissionItem | undefined;
 		if (askItem) {
 			this.composer?.showAskUserQuestion(askItem, (answers) => {
-				this.session.decidePermission(askItem.requestId, 'allow', {
-					updatedInput: { ...(askItem.input as object), answers },
-				});
+				const decision = decideAskUserQuestion(askItem.input, answers);
+				this.session.decidePermission(
+					askItem.requestId,
+					decision.behavior,
+					decision.updatedInput !== undefined ? { updatedInput: decision.updatedInput } : undefined,
+				);
 			});
 		} else {
 			this.composer?.hideAskUserQuestion();

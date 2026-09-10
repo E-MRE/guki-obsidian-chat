@@ -125,7 +125,7 @@ import { pasteBelongsToComposer } from '../src/ui/composer';
 import { projectSlug, scanSessionsDir } from '../src/data/session-index';
 import { NodeTranscriptStore } from '../src/data/transcript-store';
 import { FileSystemAdapter, TFile } from 'obsidian';
-import { parseAskUserQuestionInput } from '../src/core/ask-user-question';
+import { parseAskUserQuestionInput, decideAskUserQuestion } from '../src/core/ask-user-question';
 import { AskUserQuestionInline } from '../src/ui/ask-user-question';
 
 
@@ -5159,27 +5159,9 @@ console.log('P. AskUserQuestion parsing and merging');
 
 console.log('P2. Permission bypass on cancel');
 {
-	let decisionBehavior: string | null = null;
-	const dummyManager = new SessionManager({ vault: { adapter: sharedVaultAdapter } } as never);
-	(dummyManager as any).broker = {
-		decide: (id: string, behavior: string, reason: string | undefined, payload: any) => {
-			decisionBehavior = behavior;
-		}
-	};
-	// We simulate the ChatView logic directly
 	const askItem = { requestId: 'req-1', input: { questions: [] } };
-	const onAnswers = (answers: any) => {
-		if (answers === null) {
-			dummyManager.decidePermission(askItem.requestId, 'deny');
-		} else {
-			const input = typeof askItem.input === 'object' && askItem.input !== null ? askItem.input : {};
-			dummyManager.decidePermission(askItem.requestId, 'allow', {
-				updatedInput: { ...input, answers },
-			});
-		}
-	};
-	onAnswers(null);
-	check('cancellation (answers = null) sends deny, not allow', decisionBehavior === 'deny');
+	const decision = decideAskUserQuestion(askItem.input, null);
+	check('cancellation (answers = null) sends deny, not allow', decision.behavior === 'deny');
 }
 
 console.log('P3. Fail-closed violation on malformed question');

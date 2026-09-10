@@ -731,13 +731,18 @@ export class Composer {
 		if (this.askQuestionInline) {
 			return; // already showing
 		}
-		
+		const formEl = this.inputEl.parentElement;
+		const parentEl = formEl?.parentElement;
+		if (!formEl || !parentEl) {
+			return;
+		}
+
 		// Hide the composer form
-		this.inputEl.parentElement?.addClass('guki-hidden');
-		
+		formEl.addClass('guki-hidden');
+
 		this.askQuestionInline = new AskUserQuestionInline(
 			// Append to the parent wrapper (footer), which is containerEl
-			this.inputEl.parentElement?.parentElement as HTMLElement,
+			parentEl,
 			this.component,
 			item,
 			(answers) => {

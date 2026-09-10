@@ -1,3 +1,5 @@
+import type { PermissionBehavior } from './permission-broker';
+
 export interface AskQuestionOption {
 	label: string;
 	description?: string;
@@ -80,4 +82,30 @@ export function parseAskUserQuestionInput(input: unknown): AskQuestionDef[] | nu
 	}
 	
 	return result.length > 0 ? result : null;
+}
+
+export interface AskUserQuestionDecision {
+	behavior: PermissionBehavior;
+	updatedInput?: Record<string, unknown>;
+}
+
+/**
+ * Resolves the permission verdict and payload for AskUserQuestion.
+ * Fail-closed: unreadable socket input or reader cancellation (answers === null)
+ * must produce 'deny', never a silent or unconditional 'allow'.
+ */
+export function decideAskUserQuestion(
+	input: unknown,
+	answers: Record<string, string | string[]> | null,
+): AskUserQuestionDecision {
+	if (answers === null) {
+		return { behavior: 'deny' };
+	}
+	if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+		return { behavior: 'deny' };
+	}
+	return {
+		behavior: 'allow',
+		updatedInput: { ...(input as Record<string, unknown>), answers },
+	};
 }
