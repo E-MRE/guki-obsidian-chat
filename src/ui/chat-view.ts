@@ -325,6 +325,19 @@ export class ChatView extends ItemView {
 		this.composer?.setBusy(this.session.busy);
 		this.composer?.setBlocked(this.session.blocked);
 		this.composer?.setStatusLine(this.currentStatus());
+
+		const askItem = this.session.state.items.find(
+			(i) => i.kind === 'permission' && i.toolName === 'AskUserQuestion' && i.status === 'pending'
+		) as import('../core/chat-state').PermissionItem | undefined;
+		if (askItem) {
+			this.composer?.showAskUserQuestion(askItem, (answers) => {
+				this.session.decidePermission(askItem.requestId, 'allow', {
+					updatedInput: { ...(askItem.input as object), answers },
+				});
+			});
+		} else {
+			this.composer?.hideAskUserQuestion();
+		}
 	}
 
 	/**

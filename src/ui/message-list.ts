@@ -494,6 +494,16 @@ export class MessageList {
 	 * the request id the card was created for.
 	 */
 	private updatePermission(item: PermissionItem, entry: RenderedItem): boolean {
+		if (item.toolName === 'AskUserQuestion') {
+			if (item.status === 'pending') {
+				entry.bodyEl.empty();
+				entry.metaEl.setText('Waiting for your response…');
+			} else {
+				entry.el.hide();
+			}
+			return true;
+		}
+
 		entry.permissionCard ??= createPermissionCard(
 			entry.bodyEl,
 			this.component,

@@ -141,11 +141,12 @@ export class SessionManager {
 	}
 
 	/** Called by the permission card. `requestId` comes off the `PermissionItem`. */
-	decidePermission(requestId: string, behavior: PermissionBehavior): void {
+	decidePermission(requestId: string, behavior: PermissionBehavior, payload?: { updatedInput: unknown }): void {
 		this.broker.decide(
 			requestId,
 			behavior,
 			behavior === 'deny' ? 'The user denied this tool call in Obsidian.' : undefined,
+			payload,
 		);
 	}
 

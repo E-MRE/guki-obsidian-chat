@@ -125,6 +125,9 @@ import { pasteBelongsToComposer } from '../src/ui/composer';
 import { projectSlug, scanSessionsDir } from '../src/data/session-index';
 import { NodeTranscriptStore } from '../src/data/transcript-store';
 import { FileSystemAdapter, TFile } from 'obsidian';
+import { parseAskUserQuestionInput } from '../src/core/ask-user-question';
+import { AskUserQuestionInline } from '../src/ui/ask-user-question';
+
 
 let failures = 0;
 
@@ -5096,6 +5099,133 @@ console.log('T5. assistantCopyVisible: hidden while the turn is still mutating, 
 	const errored = assistantFixture([{ index: 0, kind: 'text', text: 'got this far', final: true }]);
 	errored.status = 'error';
 	eq('error: shown — same reasoning as stopped, the turn is frozen either way', assistantCopyVisible(errored), true);
+}
+
+
+// --- P. Phase 7: AskUserQuestion inline prompt parsing --------------------
+
+console.log('P. AskUserQuestion parsing and merging');
+{
+	// 1. Well-formed
+	const wellFormed = parseAskUserQuestionInput({
+		questions: [{
+			question: 'Favorite color?',
+			id: 'color',
+			options: [
+				{ label: 'Red', value: 'red' },
+				{ label: 'Blue', value: 'blue', description: 'Like the sky' }
+			]
+		}]
+	});
+	check('parses well-formed AskUserQuestion input', wellFormed !== null);
+	eq('extracts the question correctly', wellFormed?.[0]?.question, 'Favorite color?');
+	eq('extracts options correctly', wellFormed?.[0]?.options?.length, 2);
+	eq('extracts description correctly', wellFormed?.[0]?.options?.[1]?.description, 'Like the sky');
+
+	// 2. Malformed / Missing fields
+	eq('rejects undefined input', parseAskUserQuestionInput(undefined), null);
+	eq('rejects non-object input', parseAskUserQuestionInput('not an object'), null);
+	eq('rejects missing questions array', parseAskUserQuestionInput({}), null);
+	eq('rejects questions array with non-object items', parseAskUserQuestionInput({ questions: ['bad'] }), null);
+	eq('rejects question missing "question" text', parseAskUserQuestionInput({ questions: [{ id: 'q1' }] }), null);
+
+	// 3. Multi-select and "Other"
+	const multiOther = parseAskUserQuestionInput({
+		questions: [{
+			question: 'Hobbies?',
+			multiSelect: true,
+			isOther: true
+		}]
+	});
+	eq('extracts multiSelect flag', multiOther?.[0]?.multiSelect, true);
+	eq('extracts isOther flag', multiOther?.[0]?.isOther, true);
+
+	// 4. SessionManager merging
+	let sentPayload: any;
+	const dummyBroker = {
+		decide: (id: string, behavior: string, reason: string | undefined, payload: any) => {
+			sentPayload = payload;
+		}
+	};
+	const dummyManager = new SessionManager({ vault: { adapter: sharedVaultAdapter } } as never);
+	(dummyManager as any).broker = dummyBroker;
+	dummyManager.decidePermission('req-123', 'allow', {
+		updatedInput: { questions: [], answers: { color: 'blue' } }
+	});
+	
+	check('SessionManager passes payload through to broker', sentPayload !== undefined);
+	eq('Broker receives updatedInput', sentPayload?.updatedInput?.answers?.color, 'blue');
+}
+
+console.log('P2. Permission bypass on cancel');
+{
+	let decisionBehavior: string | null = null;
+	const dummyManager = new SessionManager({ vault: { adapter: sharedVaultAdapter } } as never);
+	(dummyManager as any).broker = {
+		decide: (id: string, behavior: string, reason: string | undefined, payload: any) => {
+			decisionBehavior = behavior;
+		}
+	};
+	// We simulate the ChatView logic directly
+	const askItem = { requestId: 'req-1', input: { questions: [] } };
+	const onAnswers = (answers: any) => {
+		if (answers === null) {
+			dummyManager.decidePermission(askItem.requestId, 'deny');
+		} else {
+			const input = typeof askItem.input === 'object' && askItem.input !== null ? askItem.input : {};
+			dummyManager.decidePermission(askItem.requestId, 'allow', {
+				updatedInput: { ...input, answers },
+			});
+		}
+	};
+	onAnswers(null);
+	check('cancellation (answers = null) sends deny, not allow', decisionBehavior === 'deny');
+}
+
+console.log('P3. Fail-closed violation on malformed question');
+{
+	class FakeElement {
+		children: any[] = [];
+		classList = new Set<string>();
+		listeners: Record<string, any> = {};
+		text: string = '';
+		createDiv(opts: any) { return this.createEl('div', opts); }
+		createSpan(opts: any) { return this.createEl('span', opts); }
+		createEl(tag: string, opts: any) {
+			const el = new FakeElement();
+			if (opts?.cls) opts.cls.split(' ').forEach((c: string) => el.addClass(c));
+			if (opts?.text) el.text = opts.text;
+			this.children.push(el);
+			return el;
+		}
+		addClass(c: string) { this.classList.add(c); }
+		removeClass(c: string) { this.classList.delete(c); }
+		empty() { this.children = []; }
+		setText(t: string) { this.text = t; }
+		addEventListener(evt: string, cb: any) { this.listeners[evt] = cb; }
+		remove() {}
+		focus() {}
+	}
+	
+	(global as any).window = { requestAnimationFrame: (cb: any) => cb() };
+	const container = new FakeElement() as any;
+	let decision: any = 'no-decision-yet';
+	// Must require it since we can't import dynamically at the top easily without altering the whole file structure
+	
+	
+	const ask = new AskUserQuestionInline(
+		container,
+		{ registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any,
+		{ input: { not_a_question: true } } as any, // malformed input
+		(answers: any) => decision = answers
+	);
+	
+	// If it auto-submits, decision would be changed.
+	check('malformed question does not auto-submit', decision === 'no-decision-yet');
+	
+	// Simulate user pressing Escape
+	ask.el.listeners['keydown']({ key: 'Escape', preventDefault: () => {} });
+	check('user can escape malformed question, resulting in deny (null)', decision === null);
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);

@@ -20,6 +20,7 @@ import {
 	imageSummary,
 	type Attachment,
 } from '../core/attachments';
+import { AskUserQuestionInline } from './ask-user-question';
 
 /**
  * The live status line's data. Every field `null` means "not known yet" — before the first
@@ -172,6 +173,7 @@ export class Composer {
 	 * was aimed here — see `registerPasteTarget`.
 	 */
 	private pointerInPanel = false;
+	private askQuestionInline: AskUserQuestionInline | null = null;
 
 	constructor(
 		containerEl: HTMLElement,
@@ -181,7 +183,7 @@ export class Composer {
 		 */
 		private readonly panelEl: HTMLElement,
 		/** The view, so the key handler is detached with it. */
-		component: Component,
+		private readonly component: Component,
 		private readonly options: ComposerOptions,
 	) {
 		const form = containerEl.createDiv({ cls: 'guki-composer' });
@@ -723,5 +725,35 @@ export class Composer {
 
 	focus(): void {
 		this.inputEl.focus();
+	}
+
+	showAskUserQuestion(item: import('../core/chat-state').PermissionItem, onDecide: (answers: Record<string, string | string[]> | null) => void): void {
+		if (this.askQuestionInline) {
+			return; // already showing
+		}
+		
+		// Hide the composer form
+		this.inputEl.parentElement?.addClass('guki-hidden');
+		
+		this.askQuestionInline = new AskUserQuestionInline(
+			// Append to the parent wrapper (footer), which is containerEl
+			this.inputEl.parentElement?.parentElement as HTMLElement,
+			this.component,
+			item,
+			(answers) => {
+				onDecide(answers);
+				this.hideAskUserQuestion();
+			}
+		);
+	}
+
+	hideAskUserQuestion(): void {
+		if (this.askQuestionInline) {
+			this.askQuestionInline.destroy();
+			this.askQuestionInline = null;
+			
+			// Restore the composer form
+			this.inputEl.parentElement?.removeClass('guki-hidden');
+		}
 	}
 }

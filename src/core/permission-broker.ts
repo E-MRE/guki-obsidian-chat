@@ -431,7 +431,12 @@ export class PermissionBroker {
 	 * falls back to the original when it is missing, but echoing it is the path Phase 0 proved, so
 	 * that is the one taken (RESEARCH B5).
 	 */
-	decide(requestId: string, behavior: PermissionBehavior, message?: string): void {
+	decide(
+		requestId: string,
+		behavior: PermissionBehavior,
+		message?: string,
+		payload?: { updatedInput: unknown },
+	): void {
 		const entry = this.pending.get(requestId);
 		if (!entry) {
 			return;
@@ -449,7 +454,12 @@ export class PermissionBroker {
 			type: 'decision',
 			id: requestId,
 			behavior,
-			updatedInput: behavior === 'allow' ? entry.item.input : undefined,
+			updatedInput:
+				payload && payload.updatedInput !== undefined
+					? payload.updatedInput
+					: behavior === 'allow'
+						? entry.item.input
+						: undefined,
 			message: behavior === 'deny' ? (message ?? 'Denied in Obsidian.') : undefined,
 		});
 		this.state.emitChange();
