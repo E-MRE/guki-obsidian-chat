@@ -199,7 +199,7 @@ export class AskUserQuestionInline {
 		
 		const inputEl = otherEl.createEl('input', {
 			attr: {
-				type: q.isSecret ? 'password' : 'text',
+				type: 'text',
 				placeholder: 'Other…'
 			}
 		});

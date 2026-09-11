@@ -13,7 +13,6 @@ export interface AskQuestionDef {
 	options?: AskQuestionOption[];
 	multiSelect?: boolean;
 	isOther?: boolean;
-	isSecret?: boolean;
 }
 
 export function parseAskUserQuestionInput(input: unknown): AskQuestionDef[] | null {
@@ -51,9 +50,6 @@ export function parseAskUserQuestionInput(input: unknown): AskQuestionDef[] | nu
 		}
 		if (typeof qObj.isOther === 'boolean') {
 			def.isOther = qObj.isOther;
-		}
-		if (typeof qObj.isSecret === 'boolean') {
-			def.isSecret = qObj.isSecret;
 		}
 		
 		if (Array.isArray(qObj.options)) {
