@@ -38,3 +38,16 @@ export class ItemView {}
 export class Notice {}
 export class WorkspaceLeaf {}
 export class MarkdownRenderer {}
+
+// Phase 7 task 3 round C: `settings-tab.ts` defines `GukiSettingTab extends PluginSettingTab`
+// and instantiates `new Setting(containerEl)`. Stubs allow offline checks to import pure helpers.
+export class PluginSettingTab {}
+export class Setting {
+	setName() { return this; }
+	setDesc() { return this; }
+	setHeading() { return this; }
+	addText() { return this; }
+	addDropdown() { return this; }
+	addToggle() { return this; }
+	addButton() { return this; }
+}

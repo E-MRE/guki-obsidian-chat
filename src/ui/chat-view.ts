@@ -345,9 +345,13 @@ export class ChatView extends ItemView {
 			} else {
 				this.composer?.hideAskUserQuestion();
 				this.composer?.showPermissionCard(pendingPerm, {
-					decide: (requestId, behavior) => {
-						this.session.decidePermission(requestId, behavior);
-					}
+					decide: (requestId, behavior, remember) => {
+						if (remember && behavior === 'allow') {
+							void this.session.rememberPermission(requestId);
+						} else {
+							this.session.decidePermission(requestId, behavior);
+						}
+					},
 				});
 			}
 		} else {

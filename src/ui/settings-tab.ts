@@ -3,7 +3,12 @@
  * (`resolveClaudeBinary`'s normal search order, RESEARCH C).
  */
 import { App, PluginSettingTab, Setting } from 'obsidian';
-import { DEFAULT_PERMISSION_SETTINGS, type PermissionSettings } from '../core/permission-policy';
+import {
+	DEFAULT_PERMISSION_SETTINGS,
+	type CategorySetting,
+	type PermissionSettings,
+	type RememberedDecision,
+} from '../core/permission-policy';
 import type GukiChatPlugin from '../main';
 
 export interface GukiChatSettings extends PermissionSettings {
@@ -14,6 +19,44 @@ export const DEFAULT_SETTINGS: GukiChatSettings = {
 	claudeBinaryPath: '',
 	...DEFAULT_PERMISSION_SETTINGS,
 };
+
+export function formatRememberedDecision(d: RememberedDecision): { title: string; detail: string } {
+	if (d.category === 'command') {
+		const cmd = d.argv ? d.argv.join(' ') : (d.description ?? 'Command');
+		const cwd = d.cwd ? `Directory: ${d.cwd}` : '';
+		return {
+			title: `Bash: ${cmd}`,
+			detail: cwd,
+		};
+	}
+	if (d.category === 'write') {
+		const path = d.path ?? 'unknown path';
+		const state = typeof d.existedOnGrant === 'boolean'
+			? ` (${d.existedOnGrant ? 'existing file' : 'new file'})`
+			: '';
+		return {
+			title: `Write: ${path}`,
+			detail: `File write${state}`,
+		};
+	}
+	return {
+		title: `Read: ${d.path ?? 'unknown path'}`,
+		detail: 'File or directory read',
+	};
+}
+
+export function removeRememberedDecision(settings: PermissionSettings, id: string): boolean {
+	const idx = settings.rememberedDecisions.findIndex((d) => d.id === id);
+	if (idx === -1) {
+		return false;
+	}
+	settings.rememberedDecisions.splice(idx, 1);
+	return true;
+}
+
+export function clearRememberedDecisions(settings: PermissionSettings): void {
+	settings.rememberedDecisions = [];
+}
 
 export class GukiSettingTab extends PluginSettingTab {
 	constructor(
@@ -43,5 +86,115 @@ export class GukiSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					}),
 			);
+
+		new Setting(containerEl).setHeading().setName('Permissions outside the vault');
+
+		new Setting(containerEl)
+			.setName('Read outside the vault')
+			.setDesc('Reading files or listing directories located outside the vault.')
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption('always ask', 'Always ask')
+					.addOption('auto-allow', 'Auto-allow')
+					.setValue(this.plugin.settings.readOutsideVault)
+					.onChange(async (value) => {
+						this.plugin.settings.readOutsideVault = value as CategorySetting;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Write outside the vault')
+			.setDesc('Creating or editing files located outside the vault.')
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption('always ask', 'Always ask')
+					.addOption('auto-allow', 'Auto-allow')
+					.setValue(this.plugin.settings.writeOutsideVault)
+					.onChange(async (value) => {
+						this.plugin.settings.writeOutsideVault = value as CategorySetting;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Run commands')
+			.setDesc('Executing shell commands via bash.')
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption('always ask', 'Always ask')
+					.addOption('auto-allow', 'Auto-allow')
+					.setValue(this.plugin.settings.runCommands)
+					.onChange(async (value) => {
+						this.plugin.settings.runCommands = value as CategorySetting;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl).setHeading().setName('Allow everything mode');
+
+		new Setting(containerEl)
+			.setName('Allow everything (high risk)')
+			.setDesc(
+				`Automatically allows every request without prompting, except writes into ${this.app.vault.configDir}/ ` +
+					'and malformed requests. Danger: the model can read, write, and execute commands ' +
+					'anywhere on your system without your approval.',
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.allowEverything)
+					.onChange(async (value) => {
+						this.plugin.settings.allowEverything = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl).setHeading().setName('Remembered permissions');
+
+		const listContainer = containerEl.createDiv({ cls: 'guki-remembered-list' });
+		this.renderRememberedList(listContainer);
+	}
+
+	private renderRememberedList(container: HTMLElement): void {
+		container.empty();
+
+		const decisions = this.plugin.settings.rememberedDecisions;
+
+		const headerSetting = new Setting(container)
+			.setName('Stored decisions')
+			.setDesc(
+				decisions.length === 0
+					? 'No remembered permissions. When you approve a request with "don\'t ask again", it will appear here.'
+					: `${String(decisions.length)} remembered decision${decisions.length === 1 ? '' : 's'}.`,
+			);
+
+		if (decisions.length > 0) {
+			headerSetting.addButton((btn) =>
+				btn
+					.setButtonText('Clear all')
+					.setWarning()
+					.onClick(async () => {
+						clearRememberedDecisions(this.plugin.settings);
+						await this.plugin.saveSettings();
+						this.renderRememberedList(container);
+					}),
+			);
+
+			for (const decision of decisions) {
+				const { title, detail } = formatRememberedDecision(decision);
+				new Setting(container)
+					.setName(title)
+					.setDesc(detail)
+					.addButton((btn) =>
+						btn
+							.setButtonText('Remove')
+							.onClick(async () => {
+								removeRememberedDecision(this.plugin.settings, decision.id);
+								await this.plugin.saveSettings();
+								this.renderRememberedList(container);
+							}),
+					);
+			}
+		}
 	}
 }

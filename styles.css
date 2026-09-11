@@ -731,10 +731,33 @@
 
 .guki-perm-actions {
 	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
 	justify-content: flex-end;
 	gap: var(--size-4-2);
 	padding: var(--size-4-2);
 	border-top: 1px solid var(--background-modifier-border);
+}
+
+.guki-perm-remember {
+	order: 0;
+	width: 100%;
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	font-size: var(--font-smallest);
+	color: var(--text-muted);
+	user-select: none;
+	cursor: pointer;
+}
+
+.guki-perm-remember-checkbox {
+	cursor: pointer;
+	margin: 0;
+}
+
+.guki-perm-remember-label {
+	cursor: pointer;
 }
 
 /* Deny is first in the DOM so a tab lands on the safer choice first; `order` puts Allow on the

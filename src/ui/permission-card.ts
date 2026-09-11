@@ -22,7 +22,7 @@ import { toolIcon, toolSummary } from '../core/tool-policy';
 import { diffFromToolInput, renderDiff, type DiffInput } from './diff-view';
 
 export interface PermissionActions {
-	decide(requestId: string, behavior: PermissionBehavior): void;
+	decide(requestId: string, behavior: PermissionBehavior, remember?: boolean): void;
 }
 
 export interface RenderedPermissionCard {
@@ -34,11 +34,34 @@ export interface RenderedPermissionCard {
 	actionsEl: HTMLElement;
 	allowEl: HTMLButtonElement;
 	denyEl: HTMLButtonElement;
+	rememberEl?: HTMLElement;
+	rememberCheckbox?: HTMLInputElement;
 	statusEl: HTMLElement;
 	/** Everything the rendered card depends on, so an unchanged card is not touched. */
 	renderKey: string;
 	/** Whether the body has been filled. The arguments never change after the request arrives. */
 	bodyRendered: boolean;
+}
+
+/**
+ * Gating predicate: only ordinary tool permission requests offer "don't ask again".
+ * AskUserQuestion must NEVER offer it because questions cannot be meaningfully pre-answered.
+ */
+export function canRememberPermission(item: PermissionItem): boolean {
+	return item.toolName !== 'AskUserQuestion';
+}
+
+/**
+ * Exact wording for the "don't ask again" affordance.
+ * For Bash: explicitly scoped to this exact command in this directory.
+ * For files: explicitly scoped to this exact path.
+ * Neither implies a broader scope than what round B stores.
+ */
+export function rememberLabelText(toolName: string): string {
+	if (toolName === 'Bash') {
+		return 'Always allow this exact command in this directory';
+	}
+	return 'Always allow this exact path';
 }
 
 export function createPermissionCard(
@@ -60,6 +83,23 @@ export function createPermissionCard(
 	// Deny first in the DOM but ordered second by CSS, so a keyboard tab lands on the safer choice
 	// first while the eye still reads Allow on the left.
 	const denyEl = actionsEl.createEl('button', { cls: 'guki-perm-deny', text: 'Deny' });
+
+	let rememberEl: HTMLElement | undefined;
+	let rememberCheckbox: HTMLInputElement | undefined;
+	if (canRememberPermission(item)) {
+		rememberEl = actionsEl.createDiv({ cls: 'guki-perm-remember' });
+		const checkboxId = `guki-perm-rem-${item.requestId}`;
+		rememberCheckbox = rememberEl.createEl('input', {
+			cls: 'guki-perm-remember-checkbox',
+			attr: { type: 'checkbox', id: checkboxId },
+		});
+		rememberEl.createEl('label', {
+			cls: 'guki-perm-remember-label',
+			text: rememberLabelText(item.toolName),
+			attr: { for: checkboxId },
+		});
+	}
+
 	const allowEl = actionsEl.createEl('button', { cls: 'guki-perm-allow', text: 'Allow' });
 
 	const statusEl = el.createDiv({ cls: 'guki-perm-status' });
@@ -73,6 +113,8 @@ export function createPermissionCard(
 		actionsEl,
 		allowEl,
 		denyEl,
+		rememberEl,
+		rememberCheckbox,
 		statusEl,
 		renderKey: '',
 		bodyRendered: false,
@@ -85,8 +127,9 @@ export function createPermissionCard(
 		if (allowEl.disabled) {
 			return;
 		}
+		const remember = rememberCheckbox?.checked ?? false;
 		setActionsEnabled(card, false);
-		actions.decide(item.requestId, 'allow');
+		actions.decide(item.requestId, 'allow', remember);
 	});
 	component.registerDomEvent(denyEl, 'click', () => {
 		if (denyEl.disabled) {
@@ -95,6 +138,28 @@ export function createPermissionCard(
 		setActionsEnabled(card, false);
 		actions.decide(item.requestId, 'deny');
 	});
+	if (rememberCheckbox) {
+		component.registerDomEvent(rememberCheckbox, 'keydown', (event: KeyboardEvent) => {
+			if (event.key === 'Enter') {
+				event.preventDefault();
+				if (allowEl.disabled) {
+					return;
+				}
+				rememberCheckbox.checked = true;
+				setActionsEnabled(card, false);
+				actions.decide(item.requestId, 'allow', true);
+			}
+		});
+	}
+	component.registerDomEvent(el, 'keydown', (event: KeyboardEvent) => {
+		if (event.key === 'Escape') {
+			if (denyEl.disabled) {
+				return;
+			}
+			setActionsEnabled(card, false);
+			actions.decide(item.requestId, 'deny');
+		}
+	});
 
 	return card;
 }
@@ -102,6 +167,9 @@ export function createPermissionCard(
 function setActionsEnabled(card: RenderedPermissionCard, enabled: boolean): void {
 	card.allowEl.disabled = !enabled;
 	card.denyEl.disabled = !enabled;
+	if (card.rememberCheckbox) {
+		card.rememberCheckbox.disabled = !enabled;
+	}
 }
 
 /** Returns true when it touched the DOM — the jump-to-bottom hint keys off that. */

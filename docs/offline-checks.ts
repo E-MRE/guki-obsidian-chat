@@ -92,7 +92,8 @@ import {
 import { startsExpanded, toolCategory, toolResultText, toolSummary } from '../src/core/tool-policy';
 import { diffFromToolInput, diffStats, emptyPaneText } from '../src/ui/diff-view';
 import { toolPermissionBodyText, toolResultTitle, toolStatusText } from '../src/ui/tool-card';
-import { permissionDiff } from '../src/ui/permission-card';
+import { canRememberPermission, permissionDiff, rememberLabelText } from '../src/ui/permission-card';
+import { clearRememberedDecisions, formatRememberedDecision, removeRememberedDecision } from '../src/ui/settings-tab';
 import { renderQuotaBar } from '../src/ui/composer';
 import { formatTurnMeta, MessageList, withTurnMeta } from '../src/ui/message-list';
 import {
@@ -5974,6 +5975,177 @@ console.log('W2. Allow everything mode vs destructive edits and absolute floors'
 	eq('with allow everything on, malformed missing path prompts', permissionVerdict('Write', { content: 'hello' }, vaultPaths, allowEverything), 'ask');
 	eq('with allow everything on, unresolvable path prompts', permissionVerdict('Read', { file_path: '~/.ssh/id_rsa' }, vaultPaths, allowEverything), 'ask');
 	eq('with allow everything on, unrecognised tool prompts', permissionVerdict('mcp__unknown', {}, vaultPaths, allowEverything), 'ask');
+}
+
+// --- X. Phase 7 task 3 round C: UI seams for permissions and settings -------------------------
+
+console.log('X1. Gating predicate for AskUserQuestion vs ordinary tools');
+{
+	eq('AskUserQuestion does not offer remember affordance', canRememberPermission({ toolName: 'AskUserQuestion', id: '1', kind: 'permission', turnId: 't1', requestId: 'r1', status: 'pending', input: {} }), false);
+	eq('Read offers remember affordance', canRememberPermission({ toolName: 'Read', id: '2', kind: 'permission', turnId: 't1', requestId: 'r2', status: 'pending', input: {} }), true);
+	eq('Write offers remember affordance', canRememberPermission({ toolName: 'Write', id: '3', kind: 'permission', turnId: 't1', requestId: 'r3', status: 'pending', input: {} }), true);
+	eq('Bash offers remember affordance', canRememberPermission({ toolName: 'Bash', id: '4', kind: 'permission', turnId: 't1', requestId: 'r4', status: 'pending', input: {} }), true);
+}
+
+console.log('X2. Exact match key stored on remember (not broader)');
+{
+	// Read: exact canonical path
+	const testFile = join(tmpdir(), 'guki-x2-test.txt');
+	writeFileSync(testFile, 'hello');
+	const canonicalTestFile = realpathSync(testFile).normalize('NFC');
+
+	const mockSettings: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: false,
+		rememberedDecisions: [],
+	};
+
+	let saved = false;
+	const state = new ChatState();
+	const broker = new PermissionBroker(
+		brokerApp([]),
+		state,
+		POLICY_VAULT.root,
+		undefined,
+		mockSettings,
+	);
+	broker.setSettings(mockSettings);
+	broker.setOnSaveSettings(async () => { saved = true; });
+	(broker as unknown as { policyPaths: unknown }).policyPaths = vaultPaths;
+
+	// Simulate pending Read
+	const readItem: PermissionItem = {
+		id: 'perm-read-1',
+		kind: 'permission',
+		turnId: 'turn-1',
+		toolName: 'Read',
+		input: { file_path: testFile },
+		requestId: 'req-read-1',
+		status: 'pending',
+	};
+	(broker as unknown as { pending: Map<string, unknown> }).pending.set('req-read-1', {
+		item: readItem,
+		socket: { write: () => {} },
+	});
+
+	await broker.remember('req-read-1');
+	eq('remember saved settings', saved, true);
+	eq('one decision stored for Read', broker.getSettings().rememberedDecisions.length, 1);
+	const readStored = broker.getSettings().rememberedDecisions[0];
+	eq('stored Read category is read', readStored?.category, 'read');
+	eq('stored Read path is exact canonical path', readStored?.path, canonicalTestFile);
+	// Prove it does NOT match a sibling or subdirectory path
+	const siblingPath = join(tmpdir(), 'guki-x2-test-other.txt');
+	eq('remembered Read does NOT match sibling path', permissionVerdict('Read', { file_path: siblingPath }, vaultPaths, broker.getSettings()), 'ask');
+	eq('remembered Read DOES match exact canonical path', permissionVerdict('Read', { file_path: testFile }, vaultPaths, broker.getSettings()), 'allow');
+
+	// Bash: exact argv tokens and exact cwd
+	const dirBash = mkdtempSync(join(tmpdir(), 'guki-x2-bash-'));
+	const canonicalDir = realpathSync(dirBash).normalize('NFC');
+	const bashItem: PermissionItem = {
+		id: 'perm-bash-1',
+		kind: 'permission',
+		turnId: 'turn-1',
+		toolName: 'Bash',
+		input: { command: 'npm test --filter=foo', cwd: dirBash },
+		requestId: 'req-bash-1',
+		status: 'pending',
+	};
+	(broker as unknown as { pending: Map<string, unknown> }).pending.set('req-bash-1', {
+		item: bashItem,
+		socket: { write: () => {} },
+	});
+
+	await broker.remember('req-bash-1');
+	eq('two decisions stored now', broker.getSettings().rememberedDecisions.length, 2);
+	const bashStored = broker.getSettings().rememberedDecisions[1];
+	eq('stored Bash category is command', bashStored?.category, 'command');
+	eq('stored Bash argv is exact tokens', bashStored?.argv?.join(' '), 'npm test --filter=foo');
+	eq('stored Bash cwd is exact directory', bashStored?.cwd, canonicalDir);
+
+	// Prove it does NOT match broader command or different directory
+	eq('remembered Bash does NOT match different arguments', permissionVerdict('Bash', { command: 'npm test', cwd: dirBash }, vaultPaths, broker.getSettings()), 'ask');
+	eq('remembered Bash does NOT match different directory', permissionVerdict('Bash', { command: 'npm test --filter=foo', cwd: tmpdir() }, vaultPaths, broker.getSettings()), 'ask');
+	eq('remembered Bash DOES match exact command in exact directory', permissionVerdict('Bash', { command: 'npm test --filter=foo', cwd: dirBash }, vaultPaths, broker.getSettings()), 'allow');
+
+	rmSync(testFile, { force: true });
+	rmSync(dirBash, { recursive: true, force: true });
+}
+
+console.log('X3. Remembered decisions list: individual removal and clear all');
+{
+	const settings: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: false,
+		rememberedDecisions: [
+			{ id: 'rem-1', category: 'read', path: '/a/b/c' },
+			{ id: 'rem-2', category: 'command', argv: ['ls'], cwd: '/tmp' },
+			{ id: 'rem-3', category: 'write', path: '/d/e/f', existedOnGrant: true },
+		],
+	};
+
+	// Remove middle entry
+	const removed = removeRememberedDecision(settings, 'rem-2');
+	eq('removeRememberedDecision returned true for existing id', removed, true);
+	eq('two entries remain after removing rem-2', settings.rememberedDecisions.length, 2);
+	eq('first entry is still rem-1', settings.rememberedDecisions[0]?.id, 'rem-1');
+	eq('second entry is still rem-3', settings.rememberedDecisions[1]?.id, 'rem-3');
+
+	// Removing non-existent id returns false
+	const removedNonExistent = removeRememberedDecision(settings, 'rem-missing');
+	eq('removeRememberedDecision returned false for unknown id', removedNonExistent, false);
+	eq('still two entries remain', settings.rememberedDecisions.length, 2);
+
+	// Clear all empties the store
+	clearRememberedDecisions(settings);
+	eq('clearRememberedDecisions emptied the list', settings.rememberedDecisions.length, 0);
+	eq('rememberedDecisions is empty array', Array.isArray(settings.rememberedDecisions), true);
+}
+
+console.log('X4. Category toggling and settings persistence round-trip');
+{
+	const freshSettings: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS };
+	eq('fresh readOutsideVault is always ask', freshSettings.readOutsideVault, 'always ask');
+	eq('fresh writeOutsideVault is always ask', freshSettings.writeOutsideVault, 'always ask');
+	eq('fresh runCommands is always ask', freshSettings.runCommands, 'always ask');
+	eq('fresh allowEverything is false', freshSettings.allowEverything, false);
+
+	// Toggle categories
+	freshSettings.readOutsideVault = 'auto-allow';
+	freshSettings.writeOutsideVault = 'auto-allow';
+	freshSettings.runCommands = 'auto-allow';
+	freshSettings.allowEverything = true;
+
+	// Simulate persistence round-trip (JSON serialize -> deserialize -> normalize)
+	const serialized = JSON.stringify(freshSettings);
+	const deserialized = JSON.parse(serialized);
+	const roundTripped = normalizePermissionSettings(deserialized);
+
+	eq('round-tripped readOutsideVault is auto-allow', roundTripped.readOutsideVault, 'auto-allow');
+	eq('round-tripped writeOutsideVault is auto-allow', roundTripped.writeOutsideVault, 'auto-allow');
+	eq('round-tripped runCommands is auto-allow', roundTripped.runCommands, 'auto-allow');
+	eq('round-tripped allowEverything is true', roundTripped.allowEverything, true);
+}
+
+console.log('X5. Human-readable formatting of remembered decisions');
+{
+	const readFmt = formatRememberedDecision({ id: '1', category: 'read', path: '/var/log/syslog' });
+	eq('read format title shows tool and path', readFmt.title, 'Read: /var/log/syslog');
+
+	const writeExistingFmt = formatRememberedDecision({ id: '2', category: 'write', path: '/home/note.md', existedOnGrant: true });
+	eq('write format title shows tool and path', writeExistingFmt.title, 'Write: /home/note.md');
+	eq('write format detail indicates existing file', writeExistingFmt.detail.includes('existing file'), true);
+
+	const writeNewFmt = formatRememberedDecision({ id: '3', category: 'write', path: '/home/new.md', existedOnGrant: false });
+	eq('write format detail indicates new file', writeNewFmt.detail.includes('new file'), true);
+
+	const bashFmt = formatRememberedDecision({ id: '4', category: 'command', argv: ['npm', 'run', 'build'], cwd: '/home/project' });
+	eq('bash format title shows command', bashFmt.title, 'Bash: npm run build');
+	eq('bash format detail shows directory', bashFmt.detail, 'Directory: /home/project');
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
