@@ -371,7 +371,10 @@ export function validateEditFloor(
 		return false;
 	}
 	const canonicalPath = resolved.normalize('NFC');
-	return !canonicalPath.split('/').some((segment) => PROTECTED_SEGMENTS.has(segment.toLowerCase()));
+	return (
+		!raw.normalize('NFC').split(/[/\\]/).some((segment) => PROTECTED_SEGMENTS.has(segment.toLowerCase())) &&
+		!canonicalPath.split('/').some((segment) => PROTECTED_SEGMENTS.has(segment.toLowerCase()))
+	);
 }
 
 export function evaluateEditCandidate(
