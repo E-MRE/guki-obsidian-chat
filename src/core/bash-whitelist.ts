@@ -215,13 +215,31 @@ export function hasProtectedSegment(pathOrToken: string): boolean {
  *
  * Returns the parsed tokens if the floor passes, or null if vetoed / malformed (fail-closed).
  */
-export function validateBashFloor(command: unknown): string[] | null {
+export function validateBashFloor(
+	command: unknown,
+	rawCwd?: unknown,
+	paths?: VaultPaths,
+): string[] | null {
 	if (typeof command !== 'string') {
 		return null;
 	}
 	const raw = command.trim();
 	if (raw.length === 0) {
 		return null;
+	}
+
+	// Cwd floor: if working directory is inside a protected segment (.obsidian or .git),
+	// relative writes or commands executed inside that directory are vetoed.
+	if (typeof rawCwd === 'string' && rawCwd.trim().length > 0) {
+		if (hasProtectedSegment(rawCwd)) {
+			return null;
+		}
+		if (paths) {
+			const resolved = paths.resolve(rawCwd);
+			if (resolved !== null && hasProtectedSegment(resolved)) {
+				return null;
+			}
+		}
 	}
 
 	// Step 1: Metacharacter veto — on the raw string, before anything is interpreted.
@@ -244,15 +262,27 @@ export function validateBashFloor(command: unknown): string[] | null {
 }
 
 /**
- * Evaluates allow rules for commands that have cleared validateBashFloor.
- * Structured as a separate function so no allow rule can bypass validateBashFloor by construction.
+ * Evaluates candidate allow rules for commands.
+ * Returns a candidate verdict ('allow' | 'ask').
+ * This is an allow candidate ONLY: no branch can return a final 'allow' directly
+ * without passing through validateBashFloor in bashVerdict / enforceFloor.
  */
-function evaluateBashAllow(
-	tokens: string[],
+export function evaluateBashCandidate(
+	command: unknown,
 	paths: VaultPaths,
 	settings?: PermissionSettings,
 	rawCwd?: unknown,
 ): PermissionVerdict {
+	if (typeof command !== 'string' || command.trim().length === 0) {
+		return 'ask';
+	}
+
+	const raw = command.trim();
+	const tokens = tokenizeCommand(raw);
+	if (tokens === null || tokens.length === 0) {
+		return 'ask';
+	}
+
 	if (settings?.allowEverything || settings?.runCommands === 'auto-allow') {
 		return 'allow';
 	}
@@ -286,11 +316,9 @@ function evaluateBashAllow(
 }
 
 /**
- * The gate. `command` is `unknown` because it arrives off the wire inside the tool's `input`; a
- * non-string is malformed and malformed is `ask`.
- *
- * Enforces absolute security floor first via validateBashFloor. If the floor rejects the command,
- * it returns 'ask' immediately. Allow rules in evaluateBashAllow can never bypass the floor.
+ * The Bash gate.
+ * Evaluates allow rules as a candidate verdict, which must pass through validateBashFloor.
+ * No branch in evaluateBashCandidate can return 'allow' directly to the caller.
  */
 export function bashVerdict(
 	command: unknown,
@@ -298,11 +326,11 @@ export function bashVerdict(
 	settings?: PermissionSettings,
 	rawCwd?: unknown,
 ): PermissionVerdict {
-	const tokens = validateBashFloor(command);
-	if (tokens === null) {
+	const candidate = evaluateBashCandidate(command, paths, settings, rawCwd);
+	if (candidate !== 'allow') {
 		return 'ask';
 	}
 
-	return evaluateBashAllow(tokens, paths, settings, rawCwd);
+	return validateBashFloor(command, rawCwd, paths) !== null ? 'allow' : 'ask';
 }
 

@@ -21,7 +21,8 @@
  * - this is a **safety net, not the only defence** — the CLI resolves some low-risk calls itself and
  *   they never reach the bridge at all (RESEARCH B5).
  */
-import { bashVerdict, PROTECTED_SEGMENTS, resolveBashCwd, validateBashFloor } from './bash-whitelist';
+import { evaluateBashCandidate, PROTECTED_SEGMENTS, resolveBashCwd, validateBashFloor } from './bash-whitelist';
+export { bashVerdict } from './bash-whitelist';
 
 export type PermissionVerdict = 'allow' | 'ask';
 
@@ -356,13 +357,30 @@ function isDestructiveEdit(toolName: string, input: unknown): boolean {
 	return false;
 }
 
-function editVerdict(
+export function validateEditFloor(
+	input: unknown,
+	pathField: string,
+	paths: VaultPaths,
+): boolean {
+	const raw = stringField(input, pathField);
+	if (raw === null) {
+		return false;
+	}
+	const resolved = paths.resolve(raw);
+	if (resolved === null) {
+		return false;
+	}
+	const canonicalPath = resolved.normalize('NFC');
+	return !canonicalPath.split('/').some((segment) => PROTECTED_SEGMENTS.has(segment.toLowerCase()));
+}
+
+export function evaluateEditCandidate(
 	toolName: string,
 	input: unknown,
 	pathField: string,
 	paths: VaultPaths,
 	settings: PermissionSettings,
-): PermissionVerdict {
+): CandidateVerdict {
 	const raw = stringField(input, pathField);
 	if (raw === null) {
 		return 'ask';
@@ -372,9 +390,6 @@ function editVerdict(
 		return 'ask';
 	}
 	const canonicalPath = resolved.normalize('NFC');
-	if (canonicalPath.split('/').some((segment) => PROTECTED_SEGMENTS.has(segment.toLowerCase()))) {
-		return 'ask';
-	}
 	if (paths.isInside(raw)) {
 		if (isDestructiveEdit(toolName, input)) {
 			return settings.allowEverything ? 'allow' : 'ask';
@@ -393,6 +408,20 @@ function editVerdict(
 		return 'allow';
 	}
 	return 'ask';
+}
+
+export function editVerdict(
+	toolName: string,
+	input: unknown,
+	pathField: string,
+	paths: VaultPaths,
+	settings: PermissionSettings,
+): PermissionVerdict {
+	const candidate = evaluateEditCandidate(toolName, input, pathField, paths, settings);
+	if (candidate !== 'allow') {
+		return 'ask';
+	}
+	return validateEditFloor(input, pathField, paths) ? 'allow' : 'ask';
 }
 
 function webFetchVerdict(input: unknown): PermissionVerdict {
@@ -465,7 +494,7 @@ export function buildRememberedDecision(
 	}
 
 	if (toolName === 'Bash') {
-		const tokens = validateBashFloor(field(input, 'command'));
+		const tokens = validateBashFloor(field(input, 'command'), field(input, 'cwd'), paths);
 		if (tokens === null) {
 			return null;
 		}
@@ -484,23 +513,26 @@ export function buildRememberedDecision(
 	return null;
 }
 
+export type CandidateVerdict = 'allow' | 'ask';
+
 /**
- * The table. `toolName` and `input` are both `unknown` because they arrive straight off the socket
- * (`RequestMessage`), and every read of them is guarded — a malformed request is `ask`, like an
- * unrecognised one.
+ * Evaluates whether a tool request qualifies for an allow decision.
+ * Returns only a CandidateVerdict ('allow' | 'ask').
+ * This is an allow candidate ONLY: no branch can return a final 'allow' directly
+ * without passing through enforceFloor in permissionVerdict.
  */
-export function permissionVerdict(
+export function evaluateCandidateVerdict(
 	toolName: unknown,
 	input: unknown,
 	paths: VaultPaths,
 	settings: PermissionSettings = DEFAULT_PERMISSION_SETTINGS,
-): PermissionVerdict {
+): CandidateVerdict {
 	if (typeof toolName !== 'string' || toolName.length === 0) {
 		return 'ask';
 	}
 
 	if (toolName === 'Bash') {
-		return bashVerdict(field(input, 'command'), paths, settings, field(input, 'cwd'));
+		return evaluateBashCandidate(field(input, 'command'), paths, settings, field(input, 'cwd'));
 	}
 
 	if (NO_SIDE_EFFECT_TOOLS.has(toolName)) {
@@ -518,9 +550,62 @@ export function permissionVerdict(
 
 	const editField = EDIT_TOOLS.get(toolName);
 	if (editField !== undefined) {
-		return editVerdict(toolName, input, editField, paths, settings);
+		return evaluateEditCandidate(toolName, input, editField, paths, settings);
 	}
 
-	// Unknown, including every `mcp__*` tool. Fail closed.
 	return 'ask';
+}
+
+/**
+ * Structural security floor: the single exit point that produces a final 'allow' verdict.
+ * Every tool's evaluation returns only a CandidateVerdict. No allow evaluation can return
+ * an allow verdict directly; all candidate allows must pass through this floor enforcer.
+ */
+export function enforceFloor(
+	candidate: CandidateVerdict,
+	toolName: unknown,
+	input: unknown,
+	paths: VaultPaths,
+): PermissionVerdict {
+	if (candidate !== 'allow') {
+		return 'ask';
+	}
+
+	if (toolName === 'Bash') {
+		return validateBashFloor(field(input, 'command'), field(input, 'cwd'), paths) !== null
+			? 'allow'
+			: 'ask';
+	}
+
+	if (typeof toolName === 'string' && EDIT_TOOLS.has(toolName)) {
+		const editField = EDIT_TOOLS.get(toolName)!;
+		return validateEditFloor(input, editField, paths) ? 'allow' : 'ask';
+	}
+
+	if (
+		typeof toolName === 'string' &&
+		(READ_ONLY_TOOLS.has(toolName) || NO_SIDE_EFFECT_TOOLS.has(toolName) || toolName === 'WebFetch')
+	) {
+		return 'allow';
+	}
+
+	return 'ask';
+}
+
+/**
+ * The table. `toolName` and `input` are both `unknown` because they arrive straight off the socket
+ * (`RequestMessage`), and every read of them is guarded — a malformed request is `ask`, like an
+ * unrecognised one.
+ *
+ * Structural floor: evaluateCandidateVerdict determines if the request would be allowed by policy,
+ * and enforceFloor gates every candidate allow through the absolute floor before returning.
+ */
+export function permissionVerdict(
+	toolName: unknown,
+	input: unknown,
+	paths: VaultPaths,
+	settings: PermissionSettings = DEFAULT_PERMISSION_SETTINGS,
+): PermissionVerdict {
+	const candidate = evaluateCandidateVerdict(toolName, input, paths, settings);
+	return enforceFloor(candidate, toolName, input, paths);
 }

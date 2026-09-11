@@ -52,13 +52,33 @@ export function canRememberPermission(item: PermissionItem): boolean {
 }
 
 /**
- * Exact wording for the "don't ask again" affordance.
- * For Bash: explicitly scoped to this exact command in this directory.
- * For files: explicitly scoped to this exact path.
- * Neither implies a broader scope than what round B stores.
+ * Shortens a directory path for display on the permission card label,
+ * keeping the meaningful end visible (shortened at the front if longer than maxLen).
  */
-export function rememberLabelText(toolName: string): string {
+export function shortenPathForLabel(path: string, maxLen = 35): string {
+	const norm = path.normalize('NFC');
+	if (norm.length <= maxLen) {
+		return norm;
+	}
+	const slice = norm.slice(norm.length - (maxLen - 1));
+	const slashIdx = slice.indexOf('/');
+	if (slashIdx !== -1 && slashIdx < 10) {
+		return `…${slice.slice(slashIdx)}`;
+	}
+	return `…${slice}`;
+}
+
+/**
+ * Exact wording for the "don't ask again" affordance.
+ * For Bash: explicitly names the directory (shortened if long) so the user sees what they agree to.
+ * For files: explicitly scoped to this exact path.
+ * The sentence and what is stored stay in agreement.
+ */
+export function rememberLabelText(toolName: string, directory?: string): string {
 	if (toolName === 'Bash') {
+		if (typeof directory === 'string' && directory.trim().length > 0) {
+			return `Always allow this exact command in ${shortenPathForLabel(directory.trim())}`;
+		}
 		return 'Always allow this exact command in this directory';
 	}
 	return 'Always allow this exact path';
@@ -93,9 +113,14 @@ export function createPermissionCard(
 			cls: 'guki-perm-remember-checkbox',
 			attr: { type: 'checkbox', id: checkboxId },
 		});
+		const directory =
+			item.cwd ??
+			(typeof item.input === 'object' && item.input !== null
+				? ((item.input as Record<string, unknown>).cwd as string | undefined)
+				: undefined);
 		rememberEl.createEl('label', {
 			cls: 'guki-perm-remember-label',
-			text: rememberLabelText(item.toolName),
+			text: rememberLabelText(item.toolName, directory),
 			attr: { for: checkboxId },
 		});
 	}

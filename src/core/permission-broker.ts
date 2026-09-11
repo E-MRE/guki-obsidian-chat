@@ -368,10 +368,16 @@ export class PermissionBroker {
 			return;
 		}
 
+		const rawCwd =
+			typeof (message.input as Record<string, unknown>)?.cwd === 'string'
+				? ((message.input as Record<string, unknown>).cwd as string)
+				: this.policyPaths?.root;
+
 		const item = this.state.addPermissionRequest({
 			requestId: id,
 			toolName: typeof message.tool_name === 'string' ? message.tool_name : 'Unknown tool',
 			input: message.input,
+			cwd: rawCwd,
 			toolUseId: typeof message.tool_use_id === 'string' ? message.tool_use_id : undefined,
 			// Read **now**, before the item exists, so the card is never on screen showing a Before
 			// pane the reader could act on and that a later read would contradict.

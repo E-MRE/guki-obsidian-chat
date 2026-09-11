@@ -92,8 +92,8 @@ import {
 import { startsExpanded, toolCategory, toolResultText, toolSummary } from '../src/core/tool-policy';
 import { diffFromToolInput, diffStats, emptyPaneText } from '../src/ui/diff-view';
 import { toolPermissionBodyText, toolResultTitle, toolStatusText } from '../src/ui/tool-card';
-import { canRememberPermission, createPermissionCard, permissionDiff, rememberLabelText, type PermissionActions } from '../src/ui/permission-card';
-import { clearRememberedDecisions, DEFAULT_SETTINGS, formatRememberedDecision, removeRememberedDecision } from '../src/ui/settings-tab';
+import { canRememberPermission, createPermissionCard, permissionDiff, rememberLabelText, shortenPathForLabel, type PermissionActions } from '../src/ui/permission-card';
+import { clearRememberedDecisions, DEFAULT_SETTINGS, formatRememberedDecision, removeRememberedDecision, truncateMiddle } from '../src/ui/settings-tab';
 import GukiChatPlugin from '../src/main';
 import { renderQuotaBar } from '../src/ui/composer';
 import { formatTurnMeta, MessageList, withTurnMeta } from '../src/ui/message-list';
@@ -101,14 +101,19 @@ import {
 	buildRememberedDecision,
 	containsPath,
 	DEFAULT_PERMISSION_SETTINGS,
+	editVerdict,
+	enforceFloor,
+	evaluateCandidateVerdict,
+	evaluateEditCandidate,
 	normalizePermissionSettings,
 	permissionVerdict,
+	validateEditFloor,
 	type CategorySetting,
 	type PermissionCategory,
 	type PermissionSettings,
 	type RememberedDecision,
 } from '../src/core/permission-policy';
-import { tokenizeCommand } from '../src/core/bash-whitelist';
+import { bashVerdict, evaluateBashCandidate, tokenizeCommand, validateBashFloor } from '../src/core/bash-whitelist';
 import { createVaultPaths } from '../src/core/vault-path-resolver';
 import {
 	addAttachment,
@@ -6673,6 +6678,315 @@ console.log('Z2. Defect 0 end-to-end chain check: Bash without cwd in request sc
 
 	rmSync(e2eBaseZ, { recursive: true, force: true });
 	rmSync(otherDirZ, { recursive: true, force: true });
+}
+
+// --- AA. Phase 7 task 3 round F: Structural floor, cd-relative evasion, and formatting --------
+
+console.log('AA1. Structural floor: candidate verdict allows, wrapper and final verdict floor to ask');
+{
+	const aaBase = realpathSync(mkdtempSync(join(tmpdir(), 'guki-aa-floor-')));
+	const aaVault = join(aaBase, 'vault');
+	mkdirSync(join(aaVault, '.obsidian', 'plugins', 'plugin-x'), { recursive: true });
+	const aaPaths = await createVaultPaths(aaVault);
+	const targetObsidianFile = join(aaVault, '.obsidian', 'plugins', 'plugin-x', 'main.js');
+	const allowAllSettings: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, allowEverything: true };
+
+	// 1. Edit path: evaluateCandidateVerdict / evaluateEditCandidate returns allow, but permissionVerdict / editVerdict floors it to ask
+	eq(
+		'AA1.1: evaluateEditCandidate returns allow candidate under allowEverything',
+		evaluateEditCandidate('Write', { file_path: targetObsidianFile, content: 'evil' }, 'file_path', aaPaths, allowAllSettings),
+		'allow',
+	);
+	eq(
+		'AA1.2: editVerdict floors candidate allow to ask',
+		editVerdict('Write', { file_path: targetObsidianFile, content: 'evil' }, 'file_path', aaPaths, allowAllSettings),
+		'ask',
+	);
+	eq(
+		'AA1.3: evaluateCandidateVerdict returns allow candidate for Write under allowEverything',
+		evaluateCandidateVerdict('Write', { file_path: targetObsidianFile, content: 'evil' }, aaPaths, allowAllSettings),
+		'allow',
+	);
+	eq(
+		'AA1.4: permissionVerdict floors candidate allow to ask for Write into .obsidian',
+		permissionVerdict('Write', { file_path: targetObsidianFile, content: 'evil' }, aaPaths, allowAllSettings),
+		'ask',
+	);
+
+	// 2. Bash path: evaluateBashCandidate returns allow, but bashVerdict and permissionVerdict floor it to ask
+	const bashEchoCmd = `echo evil > ${targetObsidianFile}`;
+	eq(
+		'AA1.5: evaluateBashCandidate returns allow candidate under allowEverything',
+		evaluateBashCandidate(bashEchoCmd, aaPaths, allowAllSettings),
+		'allow',
+	);
+	eq(
+		'AA1.6: bashVerdict floors candidate allow to ask for Bash into .obsidian',
+		bashVerdict(bashEchoCmd, aaPaths, allowAllSettings),
+		'ask',
+	);
+	eq(
+		'AA1.7: evaluateCandidateVerdict returns allow candidate for Bash under allowEverything',
+		evaluateCandidateVerdict('Bash', { command: bashEchoCmd }, aaPaths, allowAllSettings),
+		'allow',
+	);
+	eq(
+		'AA1.8: permissionVerdict floors candidate allow to ask for Bash into .obsidian',
+		permissionVerdict('Bash', { command: bashEchoCmd }, aaPaths, allowAllSettings),
+		'ask',
+	);
+
+	// 3. Metacharacter under allowEverything: candidate returns allow, floor returns ask
+	const bashMetaCmd = 'echo hello; rm -rf /';
+	eq(
+		'AA1.9: evaluateBashCandidate returns allow candidate for metacharacter under allowEverything',
+		evaluateBashCandidate(bashMetaCmd, aaPaths, allowAllSettings),
+		'allow',
+	);
+	eq(
+		'AA1.10: bashVerdict floors metacharacter candidate allow to ask',
+		bashVerdict(bashMetaCmd, aaPaths, allowAllSettings),
+		'ask',
+	);
+	eq(
+		'AA1.11: permissionVerdict floors metacharacter candidate allow to ask',
+		permissionVerdict('Bash', { command: bashMetaCmd }, aaPaths, allowAllSettings),
+		'ask',
+	);
+
+	rmSync(aaBase, { recursive: true, force: true });
+}
+
+console.log('AA2. Full floor matrix after restructure: 42 cells all prompt');
+{
+	const aaBase2 = realpathSync(mkdtempSync(join(tmpdir(), 'guki-aa-matrix-')));
+	const aaVault2 = join(aaBase2, 'vault');
+	mkdirSync(join(aaVault2, '.obsidian', 'plugins', 'test-plugin'), { recursive: true });
+	const paths2 = await createVaultPaths(aaVault2);
+	const targetFile2 = join(aaVault2, '.obsidian', 'plugins', 'test-plugin', 'main.js');
+
+	const defaultS: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS };
+	const readAutoS: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, readOutsideVault: 'auto-allow' };
+	const writeAutoS: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, writeOutsideVault: 'auto-allow' };
+	const cmdAutoS: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, runCommands: 'auto-allow' };
+	const allAutoS: PermissionSettings = {
+		readOutsideVault: 'auto-allow',
+		writeOutsideVault: 'auto-allow',
+		runCommands: 'auto-allow',
+		allowEverything: false,
+		rememberedDecisions: [],
+	};
+	const allowAllS: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, allowEverything: true };
+
+	const matrixTools = [
+		{
+			name: 'Write',
+			fn: (s: PermissionSettings) => permissionVerdict('Write', { file_path: targetFile2, content: 'payload' }, paths2, s),
+			remSettings: {
+				...DEFAULT_PERMISSION_SETTINGS,
+				rememberedDecisions: [{ id: 'rem-w', category: 'write' as const, path: targetFile2, existedOnGrant: false }],
+			},
+		},
+		{
+			name: 'Bash echo >',
+			fn: (s: PermissionSettings) => permissionVerdict('Bash', { command: `echo payload > ${targetFile2}` }, paths2, s),
+			remSettings: {
+				...DEFAULT_PERMISSION_SETTINGS,
+				rememberedDecisions: [{ id: 'rem-e', category: 'command' as const, argv: ['echo', 'payload', '>', targetFile2], cwd: paths2.root }],
+			},
+		},
+		{
+			name: 'Bash cp',
+			fn: (s: PermissionSettings) => permissionVerdict('Bash', { command: `cp /tmp/source.js ${targetFile2}` }, paths2, s),
+			remSettings: {
+				...DEFAULT_PERMISSION_SETTINGS,
+				rememberedDecisions: [{ id: 'rem-cp', category: 'command' as const, argv: ['cp', '/tmp/source.js', targetFile2], cwd: paths2.root }],
+			},
+		},
+		{
+			name: 'Bash tee',
+			fn: (s: PermissionSettings) => permissionVerdict('Bash', { command: `tee ${targetFile2}` }, paths2, s),
+			remSettings: {
+				...DEFAULT_PERMISSION_SETTINGS,
+				rememberedDecisions: [{ id: 'rem-tee', category: 'command' as const, argv: ['tee', targetFile2], cwd: paths2.root }],
+			},
+		},
+		{
+			name: 'Bash mv',
+			fn: (s: PermissionSettings) => permissionVerdict('Bash', { command: `mv /tmp/source.js ${targetFile2}` }, paths2, s),
+			remSettings: {
+				...DEFAULT_PERMISSION_SETTINGS,
+				rememberedDecisions: [{ id: 'rem-mv', category: 'command' as const, argv: ['mv', '/tmp/source.js', targetFile2], cwd: paths2.root }],
+			},
+		},
+		{
+			name: 'Bash echo >>',
+			fn: (s: PermissionSettings) => permissionVerdict('Bash', { command: `echo payload >> ${targetFile2}` }, paths2, s),
+			remSettings: {
+				...DEFAULT_PERMISSION_SETTINGS,
+				rememberedDecisions: [{ id: 'rem-app', category: 'command' as const, argv: ['echo', 'payload', '>>', targetFile2], cwd: paths2.root }],
+			},
+		},
+	];
+
+	const matrixModes = [
+		{ name: 'default', getS: (t: typeof matrixTools[0]) => defaultS },
+		{ name: 'readOutsideVault: auto-allow', getS: (t: typeof matrixTools[0]) => readAutoS },
+		{ name: 'writeOutsideVault: auto-allow', getS: (t: typeof matrixTools[0]) => writeAutoS },
+		{ name: 'runCommands: auto-allow', getS: (t: typeof matrixTools[0]) => cmdAutoS },
+		{ name: 'all 3 auto-allow', getS: (t: typeof matrixTools[0]) => allAutoS },
+		{ name: 'allowEverything: true', getS: (t: typeof matrixTools[0]) => allowAllS },
+		{ name: 'remembered decision', getS: (t: typeof matrixTools[0]) => t.remSettings },
+	];
+
+	let matrixTotal = 0;
+	for (const tool of matrixTools) {
+		for (const mode of matrixModes) {
+			matrixTotal += 1;
+			const v = tool.fn(mode.getS(tool));
+			eq(`AA2: ${tool.name} under ${mode.name} prompts`, v, 'ask');
+		}
+	}
+	eq('AA2: exactly 42 matrix cells tested', matrixTotal, 42);
+
+	rmSync(aaBase2, { recursive: true, force: true });
+}
+
+console.log('AA3. cd-then-relative evasions and harmless cases');
+{
+	const aaBase3 = realpathSync(mkdtempSync(join(tmpdir(), 'guki-aa-evasions-')));
+	const aaVault3 = join(aaBase3, 'vault');
+	const pluginDir = join(aaVault3, '.obsidian', 'plugins', 'test-plugin');
+	mkdirSync(pluginDir, { recursive: true });
+	const paths3 = await createVaultPaths(aaVault3);
+	const allowAllS: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, allowEverything: true };
+
+	// 1. cd-then-relative write from inside .obsidian cwd (tokens do NOT mention .obsidian)
+	eq(
+		'AA3.1: relative cp from cwd inside .obsidian prompts under allowEverything',
+		permissionVerdict('Bash', { command: 'cp /tmp/source.js main.js', cwd: pluginDir }, paths3, allowAllS),
+		'ask',
+	);
+	eq(
+		'AA3.2: relative tee from cwd inside .obsidian prompts under allowEverything',
+		permissionVerdict('Bash', { command: 'tee main.js', cwd: pluginDir }, paths3, allowAllS),
+		'ask',
+	);
+	eq(
+		'AA3.3: relative cat from cwd inside .obsidian prompts under allowEverything',
+		permissionVerdict('Bash', { command: 'cat main.js', cwd: pluginDir }, paths3, allowAllS),
+		'ask',
+	);
+
+	// 2. cd in compound command
+	eq(
+		'AA3.4: cd into .obsidian with && prompts under allowEverything',
+		permissionVerdict('Bash', { command: `cd ${pluginDir} && echo x > main.js` }, paths3, allowAllS),
+		'ask',
+	);
+	eq(
+		'AA3.5: cd .obsidian token prompts under allowEverything',
+		permissionVerdict('Bash', { command: 'cd .obsidian' }, paths3, allowAllS),
+		'ask',
+	);
+
+	// 3. Shell variable and escapes
+	eq(
+		'AA3.6: path from shell variable prompts under allowEverything',
+		permissionVerdict('Bash', { command: 'echo $DIR/main.js' }, paths3, allowAllS),
+		'ask',
+	);
+	eq(
+		'AA3.7: backslash escaped .obsidian prompts under allowEverything',
+		permissionVerdict('Bash', { command: 'cat .\\obsidian/config.json' }, paths3, allowAllS),
+		'ask',
+	);
+	eq(
+		'AA3.8: double quoted .obsidian prompts under allowEverything',
+		permissionVerdict('Bash', { command: 'cat ".obsidian/config.json"' }, paths3, allowAllS),
+		'ask',
+	);
+	eq(
+		'AA3.9: concatenated quotes .ob\'sidian\' prompts under allowEverything',
+		permissionVerdict('Bash', { command: "cat .ob'sidian'/config.json" }, paths3, allowAllS),
+		'ask',
+	);
+
+	// 4. Harmless non-prompts (must NOT over-prompt)
+	eq(
+		'AA3.10: note containing obsidian in filename is allowed under allowEverything',
+		permissionVerdict('Bash', { command: 'cat my-obsidian-notes.md' }, paths3, allowAllS),
+		'allow',
+	);
+	eq(
+		'AA3.11: note containing .obsidian. in filename is allowed under allowEverything',
+		permissionVerdict('Bash', { command: 'cat notes/reading-about-.obsidian.md' }, paths3, allowAllS),
+		'allow',
+	);
+	eq(
+		'AA3.12: echo text containing obsidian is allowed under allowEverything',
+		permissionVerdict('Bash', { command: 'echo "I love obsidian"' }, paths3, allowAllS),
+		'allow',
+	);
+
+	// 5. Harmless exact token / flag (documented over-prompt on safe side)
+	eq(
+		'AA3.13: echo bare .obsidian prompts (safe over-prompt)',
+		permissionVerdict('Bash', { command: 'echo .obsidian' }, paths3, allowAllS),
+		'ask',
+	);
+
+	rmSync(aaBase3, { recursive: true, force: true });
+}
+
+console.log('AA4. Label and list formatting: directory displayed, distinguishable renderings');
+{
+	// 1. Card label names directory and shortens long paths
+	eq(
+		'AA4.1: short directory is shown verbatim',
+		rememberLabelText('Bash', '/Users/alice/vault'),
+		'Always allow this exact command in /Users/alice/vault',
+	);
+	eq(
+		'AA4.2: long directory is shortened at front keeping meaningful tail',
+		rememberLabelText('Bash', '/Users/emregultekir/Documents/otherprojects/guki-obsidian-chat'),
+		'Always allow this exact command in …/otherprojects/guki-obsidian-chat',
+	);
+	eq(
+		'AA4.3: missing directory falls back safely',
+		rememberLabelText('Bash'),
+		'Always allow this exact command in this directory',
+	);
+	eq(
+		'AA4.4: Write label remains unchanged',
+		rememberLabelText('Write'),
+		'Always allow this exact path',
+	);
+
+	// 2. Settings list: long commands shortened with ellipsis and distinguishable
+	const cmdA = 'git log --oneline --graph --all --decorate --stat --max-count=100 --author=Alice';
+	const cmdB = 'git log --oneline --graph --all --decorate --stat --max-count=100 --author=Bob';
+	const fmtCmdA = formatRememberedDecision({ id: 'rem-cmd-a', category: 'command', argv: cmdA.split(' '), cwd: '/repo' });
+	const fmtCmdB = formatRememberedDecision({ id: 'rem-cmd-b', category: 'command', argv: cmdB.split(' '), cwd: '/repo' });
+	check('AA4.5: long command A is shortened with ellipsis', fmtCmdA.title.includes('…') && fmtCmdA.title.length < cmdA.length + 6);
+	check('AA4.6: long command B is shortened with ellipsis', fmtCmdB.title.includes('…') && fmtCmdB.title.length < cmdB.length + 6);
+	check('AA4.7: two long commands differing at end remain distinguishable', fmtCmdA.title !== fmtCmdB.title);
+
+	// 3. Settings list: long paths shortened with ellipsis and distinguishable
+	const pathA = '/Users/alice/projects/work/client/subproject/deep/directory/very-long-filename-version-1.0.0.md';
+	const pathB = '/Users/alice/projects/work/client/subproject/deep/directory/very-long-filename-version-2.0.0.md';
+	const fmtPathA = formatRememberedDecision({ id: 'rem-w-a', category: 'write', path: pathA, existedOnGrant: true });
+	const fmtPathB = formatRememberedDecision({ id: 'rem-w-b', category: 'write', path: pathB, existedOnGrant: true });
+	check('AA4.8: long path A is shortened with ellipsis', fmtPathA.title.includes('…') && fmtPathA.title.length < pathA.length + 7);
+	check('AA4.9: long path B is shortened with ellipsis', fmtPathB.title.includes('…') && fmtPathB.title.length < pathB.length + 7);
+	check('AA4.10: two long paths differing at end remain distinguishable', fmtPathA.title !== fmtPathB.title);
+
+	// 4. Settings list: long paths differing at root remain distinguishable
+	const rootA = '/Volumes/ExternalBackupDrive/2026/documents/archive/project/overview.md';
+	const rootB = '/Users/emregultekir/documents/archive/project/overview.md';
+	const fmtRootA = formatRememberedDecision({ id: 'rem-r-a', category: 'read', path: rootA });
+	const fmtRootB = formatRememberedDecision({ id: 'rem-r-b', category: 'read', path: rootB });
+	check('AA4.11: two long paths differing at start remain distinguishable', fmtRootA.title !== fmtRootB.title);
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);

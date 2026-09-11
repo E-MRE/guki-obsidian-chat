@@ -178,6 +178,7 @@ export interface PermissionItem {
 	toolName: string;
 	/** The tool's arguments, straight off the wire. `unknown`: every read of it is guarded. */
 	input: unknown;
+	cwd?: string;
 	/** Matches the `tool_use` block in the `assistant` event (RESEARCH B5). Unused in 5a. */
 	toolUseId?: string;
 	/**
@@ -288,6 +289,7 @@ export class ChatState {
 		requestId: string;
 		toolName: string;
 		input: unknown;
+		cwd?: string;
 		toolUseId?: string;
 		priorContent?: PriorContent;
 	}): PermissionItem {
@@ -297,6 +299,7 @@ export class ChatState {
 			requestId: request.requestId,
 			toolName: request.toolName,
 			input: request.input,
+			cwd: request.cwd,
 			toolUseId: request.toolUseId,
 			priorContent: request.priorContent,
 			status: 'pending',
