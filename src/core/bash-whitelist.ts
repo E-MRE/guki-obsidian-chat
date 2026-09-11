@@ -214,6 +214,19 @@ export function hasProtectedSegment(pathOrToken: string): boolean {
  * 4. Protected segment check (.obsidian, .git in tokens)
  *
  * Returns the parsed tokens if the floor passes, or null if vetoed / malformed (fail-closed).
+ *
+ * Evasion boundary of the command-string heuristic:
+ * Caught:
+ *   - cd-then-relative writes inside a protected cwd (via rawCwd protected segment check)
+ *   - in-command cd into protected segments
+ *   - path assembled from shell variable expansion ($)
+ *   - backslash-escaped and quoted spellings of .obsidian or .git
+ * Open limits (deliberately not closed — inspecting payloads/runtimes is out of scope):
+ *   - paths built at runtime by an invoked binary
+ *   - commands extracting or applying payloads whose target paths live inside the payload
+ *     rather than in the command string, e.g. `tar -xf archive.tar` or `patch -p0 -i patchfile`
+ *   - pre-existing symlinks pointing into a protected directory
+ *   - pre-exported environment variables
  */
 export function validateBashFloor(
 	command: unknown,

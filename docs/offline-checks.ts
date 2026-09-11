@@ -93,7 +93,7 @@ import { startsExpanded, toolCategory, toolResultText, toolSummary } from '../sr
 import { diffFromToolInput, diffStats, emptyPaneText } from '../src/ui/diff-view';
 import { toolPermissionBodyText, toolResultTitle, toolStatusText } from '../src/ui/tool-card';
 import { canRememberPermission, createPermissionCard, permissionDiff, rememberLabelText, shortenPathForLabel, type PermissionActions } from '../src/ui/permission-card';
-import { clearRememberedDecisions, DEFAULT_SETTINGS, formatRememberedDecision, removeRememberedDecision, truncateMiddle } from '../src/ui/settings-tab';
+import { clearRememberedDecisions, DEFAULT_SETTINGS, formatRememberedDecision, removeRememberedDecision } from '../src/ui/settings-tab';
 import GukiChatPlugin from '../src/main';
 import { renderQuotaBar } from '../src/ui/composer';
 import { formatTurnMeta, MessageList, withTurnMeta } from '../src/ui/message-list';
@@ -6963,22 +6963,22 @@ console.log('AA4. Label and list formatting: directory displayed, distinguishabl
 		'Always allow this exact path',
 	);
 
-	// 2. Settings list: long commands shortened with ellipsis and distinguishable
+	// 2. Settings list: long commands are fully represented and distinguishable
 	const cmdA = 'git log --oneline --graph --all --decorate --stat --max-count=100 --author=Alice';
 	const cmdB = 'git log --oneline --graph --all --decorate --stat --max-count=100 --author=Bob';
 	const fmtCmdA = formatRememberedDecision({ id: 'rem-cmd-a', category: 'command', argv: cmdA.split(' '), cwd: '/repo' });
 	const fmtCmdB = formatRememberedDecision({ id: 'rem-cmd-b', category: 'command', argv: cmdB.split(' '), cwd: '/repo' });
-	check('AA4.5: long command A is shortened with ellipsis', fmtCmdA.title.includes('…') && fmtCmdA.title.length < cmdA.length + 6);
-	check('AA4.6: long command B is shortened with ellipsis', fmtCmdB.title.includes('…') && fmtCmdB.title.length < cmdB.length + 6);
+	eq('AA4.5: long command A is fully represented', fmtCmdA.title, `Bash: ${cmdA}`);
+	eq('AA4.6: long command B is fully represented', fmtCmdB.title, `Bash: ${cmdB}`);
 	check('AA4.7: two long commands differing at end remain distinguishable', fmtCmdA.title !== fmtCmdB.title);
 
-	// 3. Settings list: long paths shortened with ellipsis and distinguishable
+	// 3. Settings list: long paths are fully represented and distinguishable
 	const pathA = '/Users/alice/projects/work/client/subproject/deep/directory/very-long-filename-version-1.0.0.md';
 	const pathB = '/Users/alice/projects/work/client/subproject/deep/directory/very-long-filename-version-2.0.0.md';
 	const fmtPathA = formatRememberedDecision({ id: 'rem-w-a', category: 'write', path: pathA, existedOnGrant: true });
 	const fmtPathB = formatRememberedDecision({ id: 'rem-w-b', category: 'write', path: pathB, existedOnGrant: true });
-	check('AA4.8: long path A is shortened with ellipsis', fmtPathA.title.includes('…') && fmtPathA.title.length < pathA.length + 7);
-	check('AA4.9: long path B is shortened with ellipsis', fmtPathB.title.includes('…') && fmtPathB.title.length < pathB.length + 7);
+	eq('AA4.8: long path A is fully represented', fmtPathA.title, `Write: ${pathA}`);
+	eq('AA4.9: long path B is fully represented', fmtPathB.title, `Write: ${pathB}`);
 	check('AA4.10: two long paths differing at end remain distinguishable', fmtPathA.title !== fmtPathB.title);
 
 	// 4. Settings list: long paths differing at root remain distinguishable
@@ -6987,6 +6987,27 @@ console.log('AA4. Label and list formatting: directory displayed, distinguishabl
 	const fmtRootA = formatRememberedDecision({ id: 'rem-r-a', category: 'read', path: rootA });
 	const fmtRootB = formatRememberedDecision({ id: 'rem-r-b', category: 'read', path: rootB });
 	check('AA4.11: two long paths differing at start remain distinguishable', fmtRootA.title !== fmtRootB.title);
+
+	// 5. Collision cases that previously failed: entries differing only in the middle
+	const revCmd1 = 'git log --oneline --graph --all --author=Alice --decorate --max-count=100 --stat!';
+	const revCmd2 = 'git log --oneline --graph --all --author=Bob --decorate --max-count=100 --stat!';
+	const fmtRevCmd1 = formatRememberedDecision({ id: 'rem-rev-cmd-1', category: 'command', argv: revCmd1.split(' ') });
+	const fmtRevCmd2 = formatRememberedDecision({ id: 'rem-rev-cmd-2', category: 'command', argv: revCmd2.split(' ') });
+	check('AA4.12: reviewer command pair differing only in middle render as different strings', fmtRevCmd1.title !== fmtRevCmd2.title);
+	eq('AA4.13: reviewer command 1 is fully represented', fmtRevCmd1.title, `Bash: ${revCmd1}`);
+	eq('AA4.14: reviewer command 2 is fully represented', fmtRevCmd2.title, `Bash: ${revCmd2}`);
+
+	const revPath1 = '/Users/alice/projects/work/subfolder-alpha/very/deep/directory/notes/file-target.txt';
+	const revPath2 = '/Users/alice/projects/work/subfolder-beta/very/deep/directory/notes/file-target.txt';
+	const fmtRevPath1 = formatRememberedDecision({ id: 'rem-rev-p-1', category: 'write', path: revPath1, existedOnGrant: true });
+	const fmtRevPath2 = formatRememberedDecision({ id: 'rem-rev-p-2', category: 'write', path: revPath2, existedOnGrant: true });
+	check('AA4.15: path pair differing only in middle render as different strings', fmtRevPath1.title !== fmtRevPath2.title);
+	eq('AA4.16: path 1 is fully represented', fmtRevPath1.title, `Write: ${revPath1}`);
+	eq('AA4.17: path 2 is fully represented', fmtRevPath2.title, `Write: ${revPath2}`);
+
+	const revCwd = '/Users/alice/projects/work/client/subproject/deep/directory/subfolder';
+	const fmtRevCmdCwd = formatRememberedDecision({ id: 'rem-rev-cmd-cwd', category: 'command', argv: ['ls'], cwd: revCwd });
+	eq('AA4.18: directory path in command detail is fully represented without middle truncation', fmtRevCmdCwd.detail, `Directory: ${revCwd}`);
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);

@@ -20,45 +20,28 @@ export const DEFAULT_SETTINGS: GukiChatSettings = {
 	...DEFAULT_PERMISSION_SETTINGS,
 };
 
-/**
- * Shortens long text by keeping head and tail with an ellipsis in the middle.
- * Preserves both prefix (e.g. command verb, directory root) and suffix (e.g. filename, arguments),
- * ensuring two similar-but-different entries remain easily distinguishable.
- */
-export function truncateMiddle(text: string, maxLen = 60, headLen = 32, tailLen = 24): string {
-	if (text.length <= maxLen) {
-		return text;
-	}
-	const head = text.slice(0, headLen).trimEnd();
-	const tail = text.slice(text.length - tailLen).trimStart();
-	return `${head} … ${tail}`;
-}
-
 export function formatRememberedDecision(d: RememberedDecision): { title: string; detail: string } {
 	if (d.category === 'command') {
 		const rawCmd = d.argv ? d.argv.join(' ') : (d.description ?? 'Command');
-		const cmd = truncateMiddle(rawCmd, 60, 32, 24);
-		const cwd = d.cwd ? `Directory: ${truncateMiddle(d.cwd, 60, 24, 32)}` : '';
+		const cwd = d.cwd ? `Directory: ${d.cwd}` : '';
 		return {
-			title: `Bash: ${cmd}`,
+			title: `Bash: ${rawCmd}`,
 			detail: cwd,
 		};
 	}
 	if (d.category === 'write') {
 		const rawPath = d.path ?? 'unknown path';
-		const path = truncateMiddle(rawPath, 60, 24, 32);
 		const state = typeof d.existedOnGrant === 'boolean'
 			? ` (${d.existedOnGrant ? 'existing file' : 'new file'})`
 			: '';
 		return {
-			title: `Write: ${path}`,
+			title: `Write: ${rawPath}`,
 			detail: `File write${state}`,
 		};
 	}
 	const rawPath = d.path ?? 'unknown path';
-	const path = truncateMiddle(rawPath, 60, 24, 32);
 	return {
-		title: `Read: ${path}`,
+		title: `Read: ${rawPath}`,
 		detail: 'File or directory read',
 	};
 }
@@ -200,18 +183,24 @@ export class GukiSettingTab extends PluginSettingTab {
 
 			for (const decision of decisions) {
 				const { title, detail } = formatRememberedDecision(decision);
-				new Setting(container)
+				const setting = new Setting(container)
 					.setName(title)
-					.setDesc(detail)
-					.addButton((btn) =>
-						btn
-							.setButtonText('Remove')
-							.onClick(async () => {
-								removeRememberedDecision(this.plugin.settings, decision.id);
-								await this.plugin.saveSettings();
-								this.renderRememberedList(container);
-							}),
-					);
+					.setDesc(detail);
+				if (setting.nameEl) {
+					setting.nameEl.title = title;
+				}
+				if (setting.descEl && detail) {
+					setting.descEl.title = detail;
+				}
+				setting.addButton((btn) =>
+					btn
+						.setButtonText('Remove')
+						.onClick(async () => {
+							removeRememberedDecision(this.plugin.settings, decision.id);
+							await this.plugin.saveSettings();
+							this.renderRememberedList(container);
+						}),
+				);
 			}
 		}
 	}

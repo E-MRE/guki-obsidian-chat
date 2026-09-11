@@ -1519,3 +1519,21 @@
 	opacity: 0.5;
 	cursor: not-allowed;
 }
+
+/* --- settings tab: remembered permissions list ------------------------ */
+
+.guki-remembered-list .setting-item-info {
+	min-width: 0;
+}
+
+.guki-remembered-list .setting-item-name,
+.guki-remembered-list .setting-item-description {
+	overflow-wrap: anywhere;
+	word-break: break-word;
+	white-space: normal;
+}
+
+.guki-remembered-list .setting-item-control {
+	flex-shrink: 0;
+}
+
