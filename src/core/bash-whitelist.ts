@@ -14,7 +14,7 @@
  * Anything else is `ask`. Pure: the only outside knowledge is `VaultPaths`, so every case here is
  * exercisable from a fixture (`docs/offline-checks.ts` §N).
  */
-import type { PermissionVerdict, VaultPaths } from './permission-policy';
+import type { PermissionSettings, PermissionVerdict, VaultPaths } from './permission-policy';
 
 /**
  * Step 1. Presence is enough — no escaping analysis, no "is it really quoted?", because deciding
@@ -165,13 +165,21 @@ function argumentsStayInsideVault(tokens: string[], paths: VaultPaths): boolean 
  * The gate. `command` is `unknown` because it arrives off the wire inside the tool's `input`; a
  * non-string is malformed and malformed is `ask`.
  */
-export function bashVerdict(command: unknown, paths: VaultPaths): PermissionVerdict {
+export function bashVerdict(
+	command: unknown,
+	paths: VaultPaths,
+	settings?: PermissionSettings,
+): PermissionVerdict {
 	if (typeof command !== 'string') {
 		return 'ask';
 	}
 	const raw = command.trim();
 	if (raw.length === 0) {
 		return 'ask';
+	}
+
+	if (settings?.allowEverything || settings?.runCommands === 'auto-allow') {
+		return 'allow';
 	}
 
 	// Step 1, on the raw string, before anything is interpreted.
@@ -181,7 +189,23 @@ export function bashVerdict(command: unknown, paths: VaultPaths): PermissionVerd
 
 	// Step 2.
 	const tokens = tokenizeCommand(raw);
-	if (tokens === null || tokens.length === 0 || !matchesWhitelist(tokens)) {
+	if (tokens === null || tokens.length === 0) {
+		return 'ask';
+	}
+
+	if (
+		settings?.rememberedDecisions?.some(
+			(d) =>
+				d.category === 'command' &&
+				Array.isArray(d.argv) &&
+				d.argv.length === tokens.length &&
+				d.argv.every((token, i) => token === tokens[i]),
+		)
+	) {
+		return 'allow';
+	}
+
+	if (!matchesWhitelist(tokens)) {
 		return 'ask';
 	}
 

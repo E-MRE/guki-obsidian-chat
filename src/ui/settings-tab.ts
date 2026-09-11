@@ -3,14 +3,16 @@
  * (`resolveClaudeBinary`'s normal search order, RESEARCH C).
  */
 import { App, PluginSettingTab, Setting } from 'obsidian';
+import { DEFAULT_PERMISSION_SETTINGS, type PermissionSettings } from '../core/permission-policy';
 import type GukiChatPlugin from '../main';
 
-export interface GukiChatSettings {
+export interface GukiChatSettings extends PermissionSettings {
 	claudeBinaryPath: string;
 }
 
 export const DEFAULT_SETTINGS: GukiChatSettings = {
 	claudeBinaryPath: '',
+	...DEFAULT_PERMISSION_SETTINGS,
 };
 
 export class GukiSettingTab extends PluginSettingTab {

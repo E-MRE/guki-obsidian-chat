@@ -21,9 +21,112 @@
  * - this is a **safety net, not the only defence** — the CLI resolves some low-risk calls itself and
  *   they never reach the bridge at all (RESEARCH B5).
  */
-import { bashVerdict } from './bash-whitelist';
+import { BASH_METACHARACTERS, bashVerdict, tokenizeCommand } from './bash-whitelist';
 
 export type PermissionVerdict = 'allow' | 'ask';
+
+export type CategorySetting = 'always ask' | 'auto-allow';
+
+export type PermissionCategory = 'read' | 'write' | 'command';
+
+export interface RememberedDecision {
+	id: string;
+	category: PermissionCategory;
+	path?: string;
+	existedOnGrant?: boolean;
+	argv?: string[];
+	description?: string;
+	createdAt?: number;
+}
+
+export interface PermissionSettings {
+	readOutsideVault: CategorySetting;
+	writeOutsideVault: CategorySetting;
+	runCommands: CategorySetting;
+	allowEverything: boolean;
+	rememberedDecisions: RememberedDecision[];
+}
+
+export const DEFAULT_PERMISSION_SETTINGS: PermissionSettings = {
+	readOutsideVault: 'always ask',
+	writeOutsideVault: 'always ask',
+	runCommands: 'always ask',
+	allowEverything: false,
+	rememberedDecisions: [],
+};
+
+/**
+ * Normalises settings loaded from disk. Missing, partial or malformed values fall back
+ * to the safe default ('always ask', allowEverything false, empty rememberedDecisions).
+ */
+export function normalizePermissionSettings(raw: unknown): PermissionSettings {
+	if (typeof raw !== 'object' || raw === null) {
+		return { ...DEFAULT_PERMISSION_SETTINGS, rememberedDecisions: [] };
+	}
+	const r = raw as Record<string, unknown>;
+
+	const readOutsideVault: CategorySetting =
+		r.readOutsideVault === 'auto-allow' ? 'auto-allow' : 'always ask';
+	const writeOutsideVault: CategorySetting =
+		r.writeOutsideVault === 'auto-allow' ? 'auto-allow' : 'always ask';
+	const runCommands: CategorySetting =
+		r.runCommands === 'auto-allow' ? 'auto-allow' : 'always ask';
+	const allowEverything = r.allowEverything === true;
+
+	const rememberedDecisions: RememberedDecision[] = [];
+	if (Array.isArray(r.rememberedDecisions)) {
+		for (const item of r.rememberedDecisions) {
+			if (typeof item !== 'object' || item === null) {
+				continue;
+			}
+			const entry = item as Record<string, unknown>;
+			if (typeof entry.id !== 'string' || entry.id.length === 0) {
+				continue;
+			}
+
+			if (entry.category === 'read') {
+				if (typeof entry.path === 'string' && entry.path.length > 0) {
+					rememberedDecisions.push({
+						id: entry.id,
+						category: 'read',
+						path: entry.path.normalize('NFC'),
+						description: typeof entry.description === 'string' ? entry.description : undefined,
+						createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : undefined,
+					});
+				}
+			} else if (entry.category === 'write') {
+				if (typeof entry.path === 'string' && entry.path.length > 0 && typeof entry.existedOnGrant === 'boolean') {
+					rememberedDecisions.push({
+						id: entry.id,
+						category: 'write',
+						path: entry.path.normalize('NFC'),
+						existedOnGrant: entry.existedOnGrant,
+						description: typeof entry.description === 'string' ? entry.description : undefined,
+						createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : undefined,
+					});
+				}
+			} else if (entry.category === 'command') {
+				if (Array.isArray(entry.argv) && entry.argv.length > 0 && entry.argv.every((t) => typeof t === 'string')) {
+					rememberedDecisions.push({
+						id: entry.id,
+						category: 'command',
+						argv: entry.argv,
+						description: typeof entry.description === 'string' ? entry.description : undefined,
+						createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : undefined,
+					});
+				}
+			}
+		}
+	}
+
+	return {
+		readOutsideVault,
+		writeOutsideVault,
+		runCommands,
+		allowEverything,
+		rememberedDecisions,
+	};
+}
 
 /**
  * The filesystem, as much of it as the policy is allowed to know.
@@ -41,6 +144,7 @@ export interface VaultPaths {
 	readonly root: string;
 	resolve(raw: string): string | null;
 	isInside(raw: string): boolean;
+	exists?(rawOrResolved: string): boolean;
 }
 
 /**
@@ -161,7 +265,13 @@ function globEscapes(input: unknown, name: string): boolean {
 	return pattern.startsWith('/') || pattern.includes('..');
 }
 
-function readOnlyVerdict(toolName: string, input: unknown, rule: PathRule, paths: VaultPaths): PermissionVerdict {
+function readOnlyVerdict(
+	toolName: string,
+	input: unknown,
+	rule: PathRule,
+	paths: VaultPaths,
+	settings: PermissionSettings,
+): PermissionVerdict {
 	if (!pathVerdict(input, rule)) {
 		return 'ask';
 	}
@@ -176,7 +286,21 @@ function readOnlyVerdict(toolName: string, input: unknown, rule: PathRule, paths
 		// The optional case: no path argument, so the target is the CLI's cwd — the vault root.
 		return 'allow';
 	}
-	return paths.isInside(raw) ? 'allow' : 'ask';
+	if (paths.isInside(raw)) {
+		return 'allow';
+	}
+	const resolved = paths.resolve(raw);
+	if (resolved === null) {
+		return 'ask';
+	}
+	const canonicalPath = resolved.normalize('NFC');
+	if (settings.rememberedDecisions.some((d) => d.category === 'read' && d.path === canonicalPath)) {
+		return 'allow';
+	}
+	if (settings.allowEverything || settings.readOutsideVault === 'auto-allow') {
+		return 'allow';
+	}
+	return 'ask';
 }
 
 /**
@@ -225,22 +349,43 @@ function isDestructiveEdit(toolName: string, input: unknown): boolean {
 	return false;
 }
 
-function editVerdict(toolName: string, input: unknown, pathField: string, paths: VaultPaths): PermissionVerdict {
+function editVerdict(
+	toolName: string,
+	input: unknown,
+	pathField: string,
+	paths: VaultPaths,
+	settings: PermissionSettings,
+): PermissionVerdict {
 	const raw = stringField(input, pathField);
 	if (raw === null) {
 		return 'ask';
 	}
-	if (!paths.isInside(raw)) {
-		return 'ask';
-	}
-	if (isDestructiveEdit(toolName, input)) {
-		return 'ask';
-	}
 	const resolved = paths.resolve(raw);
-	if (resolved === null || resolved.split('/').some((segment) => PROTECTED_SEGMENTS.has(segment.normalize('NFC').toLowerCase()))) {
+	if (resolved === null) {
 		return 'ask';
 	}
-	return 'allow';
+	const canonicalPath = resolved.normalize('NFC');
+	if (canonicalPath.split('/').some((segment) => PROTECTED_SEGMENTS.has(segment.toLowerCase()))) {
+		return 'ask';
+	}
+	if (paths.isInside(raw)) {
+		if (isDestructiveEdit(toolName, input)) {
+			return 'ask';
+		}
+		return 'allow';
+	}
+	const currentlyExists = paths.exists ? paths.exists(resolved) : false;
+	if (
+		settings.rememberedDecisions.some(
+			(d) => d.category === 'write' && d.path === canonicalPath && d.existedOnGrant === currentlyExists,
+		)
+	) {
+		return 'allow';
+	}
+	if (settings.allowEverything || settings.writeOutsideVault === 'auto-allow') {
+		return 'allow';
+	}
+	return 'ask';
 }
 
 function webFetchVerdict(input: unknown): PermissionVerdict {
@@ -253,17 +398,108 @@ function webFetchVerdict(input: unknown): PermissionVerdict {
 }
 
 /**
+ * Builds a remembered decision from a tool request, enforcing all security invariants:
+ * - Read: exact canonical absolute path.
+ * - Write: exact canonical absolute path plus whether target existed on grant. Writes to .obsidian/ or .git are rejected.
+ * - Bash: exact normalised argv token sequence. Metacharacters are vetoed.
+ * Any malformed input, unresolvable path, or unrecognised tool returns null (fail-closed).
+ */
+export function buildRememberedDecision(
+	toolName: string,
+	input: unknown,
+	paths: VaultPaths,
+): Omit<RememberedDecision, 'id' | 'createdAt'> | null {
+	if (READ_ONLY_TOOLS.has(toolName)) {
+		const rule = READ_ONLY_TOOLS.get(toolName)!;
+		if (!pathVerdict(input, rule)) {
+			return null;
+		}
+		if (toolName === 'Glob' && globEscapes(input, 'pattern')) {
+			return null;
+		}
+		if (toolName === 'Grep' && globEscapes(input, 'glob')) {
+			return null;
+		}
+		const raw = field(input, rule.field);
+		const targetRaw = typeof raw === 'string' ? raw : paths.root;
+		const resolved = paths.resolve(targetRaw);
+		if (resolved === null) {
+			return null;
+		}
+		const canonicalPath = resolved.normalize('NFC');
+		return {
+			category: 'read',
+			path: canonicalPath,
+			description: `Read ${canonicalPath}`,
+		};
+	}
+
+	if (EDIT_TOOLS.has(toolName)) {
+		const pathField = EDIT_TOOLS.get(toolName)!;
+		const raw = stringField(input, pathField);
+		if (raw === null) {
+			return null;
+		}
+		const resolved = paths.resolve(raw);
+		if (resolved === null) {
+			return null;
+		}
+		const canonicalPath = resolved.normalize('NFC');
+		if (canonicalPath.split('/').some((segment) => PROTECTED_SEGMENTS.has(segment.toLowerCase()))) {
+			return null;
+		}
+		const existedOnGrant = paths.exists ? paths.exists(resolved) : false;
+		return {
+			category: 'write',
+			path: canonicalPath,
+			existedOnGrant,
+			description: `Write ${canonicalPath} (${existedOnGrant ? 'existing' : 'new'})`,
+		};
+	}
+
+	if (toolName === 'Bash') {
+		const cmd = field(input, 'command');
+		if (typeof cmd !== 'string') {
+			return null;
+		}
+		const raw = cmd.trim();
+		if (raw.length === 0) {
+			return null;
+		}
+		if (BASH_METACHARACTERS.some((meta) => raw.includes(meta))) {
+			return null;
+		}
+		const tokens = tokenizeCommand(raw);
+		if (tokens === null || tokens.length === 0) {
+			return null;
+		}
+		return {
+			category: 'command',
+			argv: tokens,
+			description: `Bash: ${tokens.join(' ')}`,
+		};
+	}
+
+	return null;
+}
+
+/**
  * The table. `toolName` and `input` are both `unknown` because they arrive straight off the socket
  * (`RequestMessage`), and every read of them is guarded — a malformed request is `ask`, like an
  * unrecognised one.
  */
-export function permissionVerdict(toolName: unknown, input: unknown, paths: VaultPaths): PermissionVerdict {
+export function permissionVerdict(
+	toolName: unknown,
+	input: unknown,
+	paths: VaultPaths,
+	settings: PermissionSettings = DEFAULT_PERMISSION_SETTINGS,
+): PermissionVerdict {
 	if (typeof toolName !== 'string' || toolName.length === 0) {
 		return 'ask';
 	}
 
 	if (toolName === 'Bash') {
-		return bashVerdict(field(input, 'command'), paths);
+		return bashVerdict(field(input, 'command'), paths, settings);
 	}
 
 	if (NO_SIDE_EFFECT_TOOLS.has(toolName)) {
@@ -276,12 +512,12 @@ export function permissionVerdict(toolName: unknown, input: unknown, paths: Vaul
 
 	const readRule = READ_ONLY_TOOLS.get(toolName);
 	if (readRule !== undefined) {
-		return readOnlyVerdict(toolName, input, readRule, paths);
+		return readOnlyVerdict(toolName, input, readRule, paths, settings);
 	}
 
 	const editField = EDIT_TOOLS.get(toolName);
 	if (editField !== undefined) {
-		return editVerdict(toolName, input, editField, paths);
+		return editVerdict(toolName, input, editField, paths, settings);
 	}
 
 	// Unknown, including every `mcp__*` tool. Fail closed.

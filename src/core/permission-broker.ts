@@ -36,7 +36,14 @@ import {
 } from '../cli/node-api';
 import { MCP_SERVER_NAME, PERMISSION_PROMPT_TOOL, PERMISSION_SERVER_FILE, PLUGIN_ID } from '../constants';
 import type { ChatState, PermissionItem, PriorContent } from './chat-state';
-import { permissionVerdict, type VaultPaths } from './permission-policy';
+import {
+	buildRememberedDecision,
+	DEFAULT_PERMISSION_SETTINGS,
+	permissionVerdict,
+	type PermissionSettings,
+	type RememberedDecision,
+	type VaultPaths,
+} from './permission-policy';
 import { toolSummary } from './tool-policy';
 import { createPriorContentReader, createVaultPaths } from './vault-path-resolver';
 
@@ -121,6 +128,9 @@ export class PermissionBroker {
 	onRequested: ((toolUseId: string) => void) | null = null;
 	onDenied: ((toolUseId: string) => void) | null = null;
 
+	private settings: PermissionSettings;
+	private onSaveSettings: (() => Promise<void>) | null = null;
+
 	constructor(
 		private readonly app: App,
 		private readonly state: ChatState,
@@ -137,7 +147,13 @@ export class PermissionBroker {
 		 * API, so it is optional here; `readServerSource` falls back to rebuilding it.
 		 */
 		private readonly pluginDir?: string,
-	) {}
+		initialSettings: PermissionSettings = DEFAULT_PERMISSION_SETTINGS,
+	) {
+		this.settings = {
+			...initialSettings,
+			rememberedDecisions: [...initialSettings.rememberedDecisions],
+		};
+	}
 
 	/**
 	 * Prepares everything the CLI needs and starts listening. Must complete **before** the CLI is
@@ -382,10 +398,86 @@ export class PermissionBroker {
 			return 'ask';
 		}
 		try {
-			return permissionVerdict(message.tool_name, message.input, this.policyPaths);
+			return permissionVerdict(message.tool_name, message.input, this.policyPaths, this.settings);
 		} catch (error) {
 			console.warn('GuKi Chat: the permission policy threw; asking instead', error);
 			return 'ask';
+		}
+	}
+
+	setSettings(settings: PermissionSettings): void {
+		this.settings = {
+			...settings,
+			rememberedDecisions: [...settings.rememberedDecisions],
+		};
+	}
+
+	setOnSaveSettings(callback: () => Promise<void>): void {
+		this.onSaveSettings = callback;
+	}
+
+	getSettings(): PermissionSettings {
+		return this.settings;
+	}
+
+	/**
+	 * Remember a decision and allow the pending request.
+	 * Consulted before prompting; stored in plugin persisted settings.
+	 */
+	async remember(requestId: string, payload?: { updatedInput: unknown }): Promise<void> {
+		const entry = this.pending.get(requestId);
+		if (!entry) {
+			return;
+		}
+
+		if (this.policyPaths !== null) {
+			const candidate = buildRememberedDecision(
+				entry.item.toolName,
+				payload?.updatedInput ?? entry.item.input,
+				this.policyPaths,
+			);
+			if (candidate !== null) {
+				const decision: RememberedDecision = {
+					id: randomToken(),
+					...candidate,
+					createdAt: Date.now(),
+				};
+				this.settings.rememberedDecisions.push(decision);
+				if (this.onSaveSettings) {
+					try {
+						await this.onSaveSettings();
+					} catch (error) {
+						console.warn('GuKi Chat: could not save remembered decision', error);
+					}
+				}
+			}
+		}
+
+		this.decide(requestId, 'allow', undefined, payload);
+	}
+
+	async forgetDecision(id: string): Promise<void> {
+		const idx = this.settings.rememberedDecisions.findIndex((d) => d.id === id);
+		if (idx !== -1) {
+			this.settings.rememberedDecisions.splice(idx, 1);
+			if (this.onSaveSettings) {
+				try {
+					await this.onSaveSettings();
+				} catch (error) {
+					console.warn('GuKi Chat: could not save settings after forgetting decision', error);
+				}
+			}
+		}
+	}
+
+	async clearRememberedDecisions(): Promise<void> {
+		this.settings.rememberedDecisions = [];
+		if (this.onSaveSettings) {
+			try {
+				await this.onSaveSettings();
+			} catch (error) {
+				console.warn('GuKi Chat: could not save settings after clearing decisions', error);
+			}
 		}
 	}
 
@@ -436,7 +528,12 @@ export class PermissionBroker {
 		behavior: PermissionBehavior,
 		message?: string,
 		payload?: { updatedInput: unknown },
+		remember?: boolean,
 	): void {
+		if (remember && behavior === 'allow') {
+			void this.remember(requestId, payload);
+			return;
+		}
 		const entry = this.pending.get(requestId);
 		if (!entry) {
 			return;

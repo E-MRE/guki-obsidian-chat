@@ -1,6 +1,7 @@
 import { Plugin, WorkspaceLeaf } from 'obsidian';
 import { CHAT_VIEW_ICON, CHAT_VIEW_TITLE, VIEW_TYPE_GUKI_CHAT } from './constants';
 import { SessionManager } from './core/session-manager';
+import { normalizePermissionSettings } from './core/permission-policy';
 import { ChatView } from './ui/chat-view';
 import { DEFAULT_SETTINGS, GukiSettingTab, type GukiChatSettings } from './ui/settings-tab';
 
@@ -14,7 +15,15 @@ export default class GukiChatPlugin extends Plugin {
 		// The session outlives any single view; the view only subscribes to its state.
 		// `manifest.dir` is how the permission server's own source is located at runtime; it is
 		// optional in the API, and the broker falls back to rebuilding the path when it is absent.
-		const session = new SessionManager(this.app, this.manifest.dir, this.settings.claudeBinaryPath);
+		const session = new SessionManager(
+			this.app,
+			this.manifest.dir,
+			this.settings.claudeBinaryPath,
+			this.settings,
+		);
+		session.setOnSaveSettings(async () => {
+			await this.saveSettings();
+		});
 		this.session = session;
 
 		this.addSettingTab(new GukiSettingTab(this.app, this));
@@ -57,13 +66,19 @@ export default class GukiChatPlugin extends Plugin {
 
 	private async loadSettings(): Promise<void> {
 		const data = (await this.loadData()) as Partial<GukiChatSettings> | null;
-		this.settings = { ...DEFAULT_SETTINGS, ...data };
+		const permissions = normalizePermissionSettings(data);
+		this.settings = {
+			...DEFAULT_SETTINGS,
+			...(data ?? {}),
+			...permissions,
+		};
 	}
 
 	/** Called by the settings tab on every change; takes effect on the next session start. */
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
 		this.session?.setClaudeBinaryOverride(this.settings.claudeBinaryPath);
+		this.session?.setPermissionSettings(this.settings);
 	}
 
 	// No onunload leaf teardown on purpose: unregistering the view type is enough for

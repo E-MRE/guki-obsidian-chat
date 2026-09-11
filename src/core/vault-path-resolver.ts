@@ -125,6 +125,14 @@ export async function createVaultPaths(vaultRoot: string): Promise<VaultPaths> {
 		 * silent allow, which is the direction this whole file is biased in.
 		 */
 		isInside: (raw: string) => containsPath(root, resolve(raw)),
+		exists: (rawOrResolved: string): boolean => {
+			try {
+				const target = path.isAbsolute(rawOrResolved) ? rawOrResolved : (resolve(rawOrResolved) ?? rawOrResolved);
+				return fs.existsSync(target);
+			} catch {
+				return false;
+			}
+		},
 	};
 }
 

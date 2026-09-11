@@ -25,7 +25,7 @@ import {
 } from './attachments';
 import { ChatState, type AssistantItem } from './chat-state';
 import { PermissionBroker, type PermissionBehavior } from './permission-broker';
-import type { VaultPaths } from './permission-policy';
+import type { PermissionSettings, VaultPaths } from './permission-policy';
 import { StreamReducer } from './stream-reducer';
 import { createVaultPaths } from './vault-path-resolver';
 
@@ -82,6 +82,7 @@ export class SessionManager {
 		/** `PluginManifest.dir`, passed straight through to the broker. Optional in the API. */
 		pluginDir?: string,
 		claudeBinaryOverride = '',
+		permissionSettings?: PermissionSettings,
 	) {
 		this.claudeBinaryOverride = claudeBinaryOverride;
 		// The vault root is handed over explicitly: it is the boundary PLAN §2b's whole table is
@@ -89,7 +90,13 @@ export class SessionManager {
 		// adapter is unsupported, `resolveVaultPath` has already blocked input; the broker gets an
 		// inert placeholder because `start()` on it is now unreachable — `send` refuses before any
 		// turn can reach `ensureProcess`.
-		this.broker = new PermissionBroker(app, this.state, this.resolveVaultPath() ?? '', pluginDir);
+		this.broker = new PermissionBroker(
+			app,
+			this.state,
+			this.resolveVaultPath() ?? '',
+			pluginDir,
+			permissionSettings,
+		);
 		// The broker knows requests and verdicts; the reducer knows blocks. Joining them here is
 		// what keeps a denial from painting the tool card red — the wire reports our own denial as
 		// `is_error: true`, indistinguishable from a tool that really failed.
@@ -148,6 +155,18 @@ export class SessionManager {
 			behavior === 'deny' ? 'The user denied this tool call in Obsidian.' : undefined,
 			payload,
 		);
+	}
+
+	setPermissionSettings(settings: PermissionSettings): void {
+		this.broker.setSettings(settings);
+	}
+
+	setOnSaveSettings(callback: () => Promise<void>): void {
+		this.broker.setOnSaveSettings(callback);
+	}
+
+	async rememberPermission(requestId: string, payload?: { updatedInput: unknown }): Promise<void> {
+		await this.broker.remember(requestId, payload);
 	}
 
 	/** True while a turn is in flight or waiting. Drives the composer's Send/Stop swap. */

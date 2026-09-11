@@ -95,7 +95,17 @@ import { toolPermissionBodyText, toolResultTitle, toolStatusText } from '../src/
 import { permissionDiff } from '../src/ui/permission-card';
 import { renderQuotaBar } from '../src/ui/composer';
 import { formatTurnMeta, MessageList, withTurnMeta } from '../src/ui/message-list';
-import { containsPath, permissionVerdict } from '../src/core/permission-policy';
+import {
+	buildRememberedDecision,
+	containsPath,
+	DEFAULT_PERMISSION_SETTINGS,
+	normalizePermissionSettings,
+	permissionVerdict,
+	type CategorySetting,
+	type PermissionCategory,
+	type PermissionSettings,
+	type RememberedDecision,
+} from '../src/core/permission-policy';
 import { tokenizeCommand } from '../src/core/bash-whitelist';
 import { createVaultPaths } from '../src/core/vault-path-resolver';
 import {
@@ -5465,6 +5475,404 @@ console.log('U2. Unicode path normalisation: composed and decomposed paths match
 	eq('NFD child inside NFC root', containsPath(nfcRoot, nfdChild), true);
 	eq('NFC root equals NFD root', containsPath(nfdRoot, nfcRoot), true);
 	eq('NFD root equals NFC root', containsPath(nfcRoot, nfdRoot), true);
+}
+
+// --- V. Phase 7 task 3 round B: permission model decision logic ----------
+
+/*
+ * Round B of the permission model redesign:
+ * - Three permission categories in settings: read outside vault, write outside vault, run commands.
+ * - Remembered decisions ("don't ask again") stored and matched per category contracts:
+ *   * Read-type tools: exact canonical absolute path.
+ *   * Write-type tools: exact canonical absolute path plus whether target existed on grant.
+ *   * Bash: exact normalised argv token sequence. Metacharacter veto always applies.
+ * - "Allow everything" mode: allows programmatically through active bridge while preserving
+ *   the .obsidian/ floor and fail-closed behaviour on malformed input.
+ */
+
+console.log('V1. .obsidian floor under allow everything and all categories auto-allow');
+{
+	const pluginJs = join(POLICY_VAULT.root, '.obsidian', 'plugins', 'x', 'main.js');
+	const upperPluginJs = join(POLICY_VAULT.root, '.Obsidian', 'plugins', 'x', 'main.js');
+
+	const allAutoAllow: PermissionSettings = {
+		readOutsideVault: 'auto-allow',
+		writeOutsideVault: 'auto-allow',
+		runCommands: 'auto-allow',
+		allowEverything: false,
+		rememberedDecisions: [],
+	};
+
+	const allowEverything: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: true,
+		rememberedDecisions: [],
+	};
+
+	const allAndEverything: PermissionSettings = {
+		readOutsideVault: 'auto-allow',
+		writeOutsideVault: 'auto-allow',
+		runCommands: 'auto-allow',
+		allowEverything: true,
+		rememberedDecisions: [],
+	};
+
+	const forgedRemembered: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: false,
+		rememberedDecisions: [
+			{
+				id: 'forged-1',
+				category: 'write',
+				path: pluginJs.normalize('NFC'),
+				existedOnGrant: false,
+			},
+		],
+	};
+
+	// Writes to .obsidian/ NEVER auto-allowed, in every mode:
+	eq('Write into .obsidian under all categories auto-allow prompts', permissionVerdict('Write', { file_path: pluginJs, content: 'code' }, vaultPaths, allAutoAllow), 'ask');
+	eq('Write into .obsidian under allow everything prompts', permissionVerdict('Write', { file_path: pluginJs, content: 'code' }, vaultPaths, allowEverything), 'ask');
+	eq('Write into .obsidian under all auto-allow and allow everything prompts', permissionVerdict('Write', { file_path: pluginJs, content: 'code' }, vaultPaths, allAndEverything), 'ask');
+	eq('Edit inside .obsidian under allow everything prompts', permissionVerdict('Edit', { file_path: pluginJs, old_string: 'a', new_string: 'b' }, vaultPaths, allowEverything), 'ask');
+	eq('Write into .Obsidian (differently-cased) under allow everything prompts', permissionVerdict('Write', { file_path: upperPluginJs, content: 'code' }, vaultPaths, allowEverything), 'ask');
+	eq('Write into .obsidian with matching remembered decision still prompts', permissionVerdict('Write', { file_path: pluginJs, content: 'code' }, vaultPaths, forgedRemembered), 'ask');
+}
+
+console.log('V2. Category toggle isolation: each toggle affects only its own category');
+{
+	const outsideFile = join(tmpdir(), 'guki-v2-outside-test.txt');
+	writeFileSync(outsideFile, 'outside content');
+
+	const readOnlyAuto: PermissionSettings = {
+		readOutsideVault: 'auto-allow',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: false,
+		rememberedDecisions: [],
+	};
+
+	const writeOnlyAuto: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'auto-allow',
+		runCommands: 'always ask',
+		allowEverything: false,
+		rememberedDecisions: [],
+	};
+
+	const bashOnlyAuto: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'auto-allow',
+		allowEverything: false,
+		rememberedDecisions: [],
+	};
+
+	// 1. When readOutsideVault is auto-allow: read is allowed, write and bash prompt
+	eq('read auto-allow allows Read outside vault', permissionVerdict('Read', { file_path: outsideFile }, vaultPaths, readOnlyAuto), 'allow');
+	eq('read auto-allow does not allow Write outside vault', permissionVerdict('Write', { file_path: outsideFile, content: 'new' }, vaultPaths, readOnlyAuto), 'ask');
+	eq('read auto-allow does not allow Bash command', permissionVerdict('Bash', { command: 'npm test' }, vaultPaths, readOnlyAuto), 'ask');
+
+	// 2. When writeOutsideVault is auto-allow: write is allowed, read and bash prompt
+	eq('write auto-allow allows Write outside vault', permissionVerdict('Write', { file_path: outsideFile, content: 'new' }, vaultPaths, writeOnlyAuto), 'allow');
+	eq('write auto-allow does not allow Read outside vault', permissionVerdict('Read', { file_path: outsideFile }, vaultPaths, writeOnlyAuto), 'ask');
+	eq('write auto-allow does not allow Bash command', permissionVerdict('Bash', { command: 'npm test' }, vaultPaths, writeOnlyAuto), 'ask');
+
+	// 3. When runCommands is auto-allow: bash is allowed, read and write prompt
+	eq('bash auto-allow allows Bash command', permissionVerdict('Bash', { command: 'npm test' }, vaultPaths, bashOnlyAuto), 'allow');
+	eq('bash auto-allow does not allow Read outside vault', permissionVerdict('Read', { file_path: outsideFile }, vaultPaths, bashOnlyAuto), 'ask');
+	eq('bash auto-allow does not allow Write outside vault', permissionVerdict('Write', { file_path: outsideFile, content: 'new' }, vaultPaths, bashOnlyAuto), 'ask');
+
+	// Clean up temp file
+	rmSync(outsideFile, { force: true });
+}
+
+console.log('V3. Settings normalisation: defaults on fresh install, pre-existing, and malformed inputs');
+{
+	const fresh = normalizePermissionSettings(null);
+	eq('fresh install readOutsideVault is always ask', fresh.readOutsideVault, 'always ask');
+	eq('fresh install writeOutsideVault is always ask', fresh.writeOutsideVault, 'always ask');
+	eq('fresh install runCommands is always ask', fresh.runCommands, 'always ask');
+	eq('fresh install allowEverything is false', fresh.allowEverything, false);
+	eq('fresh install rememberedDecisions is empty', fresh.rememberedDecisions.length, 0);
+
+	const emptyObj = normalizePermissionSettings({});
+	eq('empty settings readOutsideVault is always ask', emptyObj.readOutsideVault, 'always ask');
+	eq('empty settings writeOutsideVault is always ask', emptyObj.writeOutsideVault, 'always ask');
+	eq('empty settings runCommands is always ask', emptyObj.runCommands, 'always ask');
+
+	const preExisting = normalizePermissionSettings({ claudeBinaryPath: '/usr/local/bin/claude' });
+	eq('pre-existing install readOutsideVault is always ask', preExisting.readOutsideVault, 'always ask');
+	eq('pre-existing install writeOutsideVault is always ask', preExisting.writeOutsideVault, 'always ask');
+	eq('pre-existing install runCommands is always ask', preExisting.runCommands, 'always ask');
+
+	const malformed = normalizePermissionSettings({
+		readOutsideVault: 'auto_allow',
+		writeOutsideVault: true,
+		runCommands: 42,
+		allowEverything: 'yes',
+		rememberedDecisions: 'not an array',
+	});
+	eq('malformed readOutsideVault falls back to always ask', malformed.readOutsideVault, 'always ask');
+	eq('malformed writeOutsideVault falls back to always ask', malformed.writeOutsideVault, 'always ask');
+	eq('malformed runCommands falls back to always ask', malformed.runCommands, 'always ask');
+	eq('malformed allowEverything falls back to false', malformed.allowEverything, false);
+	eq('malformed rememberedDecisions falls back to empty array', malformed.rememberedDecisions.length, 0);
+
+	const validRead = normalizePermissionSettings({ readOutsideVault: 'auto-allow' });
+	eq('valid auto-allow preserved for read', validRead.readOutsideVault, 'auto-allow');
+	eq('missing other categories stay always ask', validRead.writeOutsideVault, 'always ask');
+}
+
+console.log('V4. Remembered read decisions: exact canonical path matching, no directory or sibling widening');
+{
+	const dir = mkdtempSync(join(tmpdir(), 'guki-read-test-'));
+	const targetFile = join(dir, 'target.md');
+	const siblingFile = join(dir, 'sibling.md');
+	const backupFile = join(dir, 'target.md.bak');
+	writeFileSync(targetFile, 'target');
+	writeFileSync(siblingFile, 'sibling');
+	writeFileSync(backupFile, 'backup');
+
+	const settings: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: false,
+		rememberedDecisions: [
+			{
+				id: 'rem-read-1',
+				category: 'read',
+				path: realpathSync(targetFile).normalize('NFC'),
+			},
+		],
+	};
+
+	eq('exact remembered read path is allowed', permissionVerdict('Read', { file_path: targetFile }, vaultPaths, settings), 'allow');
+	eq('sibling path in same directory prompts', permissionVerdict('Read', { file_path: siblingFile }, vaultPaths, settings), 'ask');
+	eq('directory itself prompts', permissionVerdict('LS', { path: dir }, vaultPaths, settings), 'ask');
+	eq('name prefix match prompts', permissionVerdict('Read', { file_path: backupFile }, vaultPaths, settings), 'ask');
+
+	rmSync(dir, { recursive: true, force: true });
+}
+
+console.log('V5. Remembered write decisions: target state invariant (creation vs overwrite)');
+{
+	const dir = mkdtempSync(join(tmpdir(), 'guki-write-test-'));
+	const newPath = join(dir, 'new-file.md');
+	const existingPath = join(dir, 'existing-file.md');
+	writeFileSync(existingPath, 'existing');
+
+	const canonicalNewPath = vaultPaths.resolve(newPath)!;
+	const canonicalExistingPath = vaultPaths.resolve(existingPath)!;
+
+	// Decision 1 granted for non-existent target (creation)
+	const grantForCreation: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: false,
+		rememberedDecisions: [
+			{
+				id: 'rem-write-new',
+				category: 'write',
+				path: canonicalNewPath,
+				existedOnGrant: false,
+			},
+		],
+	};
+
+	// While target does NOT exist: allowed
+	eq('write for creation target when not existing is allowed', permissionVerdict('Write', { file_path: newPath, content: 'created' }, vaultPaths, grantForCreation), 'allow');
+
+	// Now file is created on disk
+	writeFileSync(newPath, 'now exists');
+	// Once target exists: must NOT match creation approval -> prompts!
+	eq('write for creation target after file exists prompts', permissionVerdict('Write', { file_path: newPath, content: 'overwrite' }, vaultPaths, grantForCreation), 'ask');
+
+	// Decision 2 granted for existing target (overwrite/edit)
+	const grantForExisting: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: false,
+		rememberedDecisions: [
+			{
+				id: 'rem-write-exist',
+				category: 'write',
+				path: canonicalExistingPath,
+				existedOnGrant: true,
+			},
+		],
+	};
+
+	// While target exists: allowed
+	eq('write for existing target when existing is allowed', permissionVerdict('Write', { file_path: existingPath, content: 'updated' }, vaultPaths, grantForExisting), 'allow');
+
+	// Delete the file
+	rmSync(existingPath, { force: true });
+	// Once target deleted: must NOT match existing approval -> prompts!
+	eq('write for existing target after file deleted prompts', permissionVerdict('Write', { file_path: existingPath, content: 'recreated' }, vaultPaths, grantForExisting), 'ask');
+
+	rmSync(dir, { recursive: true, force: true });
+}
+
+console.log('V6. Remembered Bash decisions: exact argv sequence matching and metacharacter veto');
+{
+	const settings: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: false,
+		rememberedDecisions: [
+			{
+				id: 'rem-bash-1',
+				category: 'command',
+				argv: ['npm', 'test'],
+			},
+		],
+	};
+
+	// Exact match
+	eq('remembered exact command is allowed', permissionVerdict('Bash', { command: 'npm test' }, vaultPaths, settings), 'allow');
+	// Quote and whitespace normalization yields same argv
+	eq('whitespace-normalised remembered command is allowed', permissionVerdict('Bash', { command: 'npm   "test"' }, vaultPaths, settings), 'allow');
+
+	// Extra argument: does NOT match remembered decision and not on whitelist -> prompts
+	eq('extra argument prompts', permissionVerdict('Bash', { command: 'npm test -s' }, vaultPaths, settings), 'ask');
+	eq('extra subcommand prompts', permissionVerdict('Bash', { command: 'npm test --filter=foo' }, vaultPaths, settings), 'ask');
+
+	// Metacharacter veto STILL fires on remembered command:
+	eq('metacharacter semicolon prompts despite remembered match', permissionVerdict('Bash', { command: 'npm test; rm -rf /' }, vaultPaths, settings), 'ask');
+	eq('metacharacter ampersand prompts despite remembered match', permissionVerdict('Bash', { command: 'npm test && echo evil' }, vaultPaths, settings), 'ask');
+	eq('metacharacter pipe prompts despite remembered match', permissionVerdict('Bash', { command: 'npm test | grep m' }, vaultPaths, settings), 'ask');
+	eq('metacharacter redirect prompts despite remembered match', permissionVerdict('Bash', { command: 'npm test > /tmp/out' }, vaultPaths, settings), 'ask');
+	eq('metacharacter expansion prompts despite remembered match', permissionVerdict('Bash', { command: 'npm test $FOO' }, vaultPaths, settings), 'ask');
+}
+
+console.log('V7. Category boundary isolation: remembered decisions do not leak across tool categories');
+{
+	const sharedPath = join(tmpdir(), 'guki-shared-category-test.txt');
+	writeFileSync(sharedPath, 'data');
+
+	const canonicalShared = vaultPaths.resolve(sharedPath)!;
+
+	const readOnlyDecision: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: false,
+		rememberedDecisions: [
+			{
+				id: 'rem-read-cat',
+				category: 'read',
+				path: canonicalShared,
+			},
+		],
+	};
+
+	eq('read decision allows Read', permissionVerdict('Read', { file_path: sharedPath }, vaultPaths, readOnlyDecision), 'allow');
+	eq('read decision does not allow Write on same path', permissionVerdict('Write', { file_path: sharedPath, content: 'x' }, vaultPaths, readOnlyDecision), 'ask');
+	eq('read decision does not allow Edit on same path', permissionVerdict('Edit', { file_path: sharedPath, old_string: 'data', new_string: 'x' }, vaultPaths, readOnlyDecision), 'ask');
+	eq('read decision does not allow Bash using same path', permissionVerdict('Bash', { command: `cat ${sharedPath}` }, vaultPaths, readOnlyDecision), 'ask');
+
+	const writeOnlyDecision: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: false,
+		rememberedDecisions: [
+			{
+				id: 'rem-write-cat',
+				category: 'write',
+				path: canonicalShared,
+				existedOnGrant: true,
+			},
+		],
+	};
+
+	eq('write decision allows Write', permissionVerdict('Write', { file_path: sharedPath, content: 'x' }, vaultPaths, writeOnlyDecision), 'allow');
+	eq('write decision does not allow Read on same path', permissionVerdict('Read', { file_path: sharedPath }, vaultPaths, writeOnlyDecision), 'ask');
+	eq('write decision does not allow LS on same path', permissionVerdict('LS', { path: sharedPath }, vaultPaths, writeOnlyDecision), 'ask');
+
+	rmSync(sharedPath, { force: true });
+}
+
+console.log('V8. Allow everything mode: programmatic allows, .obsidian floor, and fail-closed integrity');
+{
+	const outsideNote = join(tmpdir(), 'guki-v8-outside-note.md');
+	writeFileSync(outsideNote, 'initial');
+	const pluginJs = join(POLICY_VAULT.root, '.obsidian', 'plugins', 'x', 'main.js');
+	const inVaultNote = join(POLICY_VAULT.root, 'notes', 'todo.md');
+
+	const allowEverything: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: true,
+		rememberedDecisions: [],
+	};
+
+	// 1. Absolute floor: .obsidian writes still prompt under allow everything
+	eq('allow everything still refuses .obsidian Write', permissionVerdict('Write', { file_path: pluginJs, content: 'payload' }, vaultPaths, allowEverything), 'ask');
+	eq('allow everything still refuses .obsidian Edit', permissionVerdict('Edit', { file_path: pluginJs, old_string: 'a', new_string: 'b' }, vaultPaths, allowEverything), 'ask');
+
+	// 2. In-vault destructive edit guard still prompts under allow everything
+	eq('in-vault empty Write still prompts under allow everything', permissionVerdict('Write', { file_path: inVaultNote, content: '' }, vaultPaths, allowEverything), 'ask');
+
+	// 3. Fail-closed behaviour on malformed input survives allow everything
+	eq('malformed toolName prompts', permissionVerdict('', { file_path: outsideNote }, vaultPaths, allowEverything), 'ask');
+	eq('non-string toolName prompts', permissionVerdict(123, { file_path: outsideNote }, vaultPaths, allowEverything), 'ask');
+	eq('Write with missing path prompts', permissionVerdict('Write', { content: 'hello' }, vaultPaths, allowEverything), 'ask');
+	eq('Write with non-string path prompts', permissionVerdict('Write', { file_path: 123, content: 'hello' }, vaultPaths, allowEverything), 'ask');
+	eq('Bash with empty command prompts', permissionVerdict('Bash', { command: '   ' }, vaultPaths, allowEverything), 'ask');
+	eq('Bash with non-string command prompts', permissionVerdict('Bash', { command: null }, vaultPaths, allowEverything), 'ask');
+	eq('Glob with path traversal prompts', permissionVerdict('Glob', { path: POLICY_VAULT.root, pattern: '../**' }, vaultPaths, allowEverything), 'ask');
+	eq('Grep with glob traversal prompts', permissionVerdict('Grep', { path: POLICY_VAULT.root, glob: '../**' }, vaultPaths, allowEverything), 'ask');
+	eq('WebFetch with file scheme prompts', permissionVerdict('WebFetch', { url: 'file:///etc/passwd' }, vaultPaths, allowEverything), 'ask');
+	eq('Unrecognised tool prompts', permissionVerdict('mcp__custom_tool', { foo: 'bar' }, vaultPaths, allowEverything), 'ask');
+	eq('Unresolvable path prompts', permissionVerdict('Read', { file_path: '~/.ssh/id_rsa' }, vaultPaths, allowEverything), 'ask');
+
+	// 4. Valid operations are allowed programmatically through the active bridge
+	eq('valid outside Read is allowed under allow everything', permissionVerdict('Read', { file_path: outsideNote }, vaultPaths, allowEverything), 'allow');
+	eq('valid outside Write is allowed under allow everything', permissionVerdict('Write', { file_path: outsideNote, content: 'updated' }, vaultPaths, allowEverything), 'allow');
+	eq('valid Bash command is allowed under allow everything', permissionVerdict('Bash', { command: 'npm test' }, vaultPaths, allowEverything), 'allow');
+
+	rmSync(outsideNote, { force: true });
+}
+
+console.log('V9. buildRememberedDecision constructor and PermissionBroker integration');
+{
+	const outsideNote = join(tmpdir(), 'guki-v9-outside-note.md');
+	writeFileSync(outsideNote, 'initial');
+	const pluginJs = join(POLICY_VAULT.root, '.obsidian', 'plugins', 'x', 'main.js');
+
+	// buildRememberedDecision unit checks
+	const readDec = buildRememberedDecision('Read', { file_path: outsideNote }, vaultPaths);
+	eq('buildRememberedDecision for Read produces read category', readDec?.category, 'read');
+	eq('buildRememberedDecision for Read produces canonical path', readDec?.path, realpathSync(outsideNote).normalize('NFC'));
+
+	const writeDec = buildRememberedDecision('Write', { file_path: outsideNote, content: 'new' }, vaultPaths);
+	eq('buildRememberedDecision for Write produces write category', writeDec?.category, 'write');
+	eq('buildRememberedDecision for Write captures existedOnGrant true', writeDec?.existedOnGrant, true);
+
+	const obsDec = buildRememberedDecision('Write', { file_path: pluginJs, content: 'code' }, vaultPaths);
+	eq('buildRememberedDecision refuses .obsidian write target', obsDec, null);
+
+	const bashDec = buildRememberedDecision('Bash', { command: 'npm test --filter=foo' }, vaultPaths);
+	eq('buildRememberedDecision for Bash captures token sequence', bashDec?.argv?.join(' '), 'npm test --filter=foo');
+
+	const bashMetaDec = buildRememberedDecision('Bash', { command: 'npm test; rm -rf /' }, vaultPaths);
+	eq('buildRememberedDecision refuses Bash with metacharacters', bashMetaDec, null);
+
+	const unrecDec = buildRememberedDecision('mcp__some_tool', {}, vaultPaths);
+	eq('buildRememberedDecision refuses unrecognised tool', unrecDec, null);
+
+	rmSync(outsideNote, { force: true });
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
