@@ -6474,5 +6474,207 @@ console.log('Y3. End-to-end chain check: Bash category (UI card click -> saveDat
 	rmSync(otherDir, { recursive: true, force: true });
 }
 
+// --- Z. Phase 7 task 3 round E: .obsidian floor on command path and Bash permission scoping ---
+
+console.log('Z1. Absolute floor: Write and Bash into .obsidian prompt under all configurations');
+{
+	const zFloorBase = realpathSync(mkdtempSync(join(tmpdir(), 'guki-z-floor-')));
+	const zFloorVault = join(zFloorBase, 'vault');
+	mkdirSync(join(zFloorVault, '.obsidian', 'plugins', 'x'), { recursive: true });
+	const zFloorVaultPaths = await createVaultPaths(zFloorVault);
+	const pluginJs = join(zFloorVault, '.obsidian', 'plugins', 'x', 'main.js');
+	const bashEcho = `echo payload > ${pluginJs}`;
+	const bashCp = `cp /tmp/source.js ${pluginJs}`;
+	const bashTee = `tee ${pluginJs}`;
+
+	const defaultConfig: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS };
+	const readAuto: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, readOutsideVault: 'auto-allow' };
+	const writeAuto: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, writeOutsideVault: 'auto-allow' };
+	const cmdAuto: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, runCommands: 'auto-allow' };
+	const allCategoriesAuto: PermissionSettings = {
+		readOutsideVault: 'auto-allow',
+		writeOutsideVault: 'auto-allow',
+		runCommands: 'auto-allow',
+		allowEverything: false,
+		rememberedDecisions: [],
+	};
+	const allowEverythingOn: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, allowEverything: true };
+
+	// Settings with remembered decisions for each exact operation
+	const writeRemembered: PermissionSettings = {
+		...DEFAULT_PERMISSION_SETTINGS,
+		rememberedDecisions: [
+			{ id: 'rem-w-obs', category: 'write', path: pluginJs.normalize('NFC'), existedOnGrant: false },
+		],
+	};
+	const echoRemembered: PermissionSettings = {
+		...DEFAULT_PERMISSION_SETTINGS,
+		rememberedDecisions: [
+			{ id: 'rem-b-echo', category: 'command', argv: ['echo', 'payload', '>', pluginJs], cwd: zFloorVaultPaths.root },
+		],
+	};
+	const cpRemembered: PermissionSettings = {
+		...DEFAULT_PERMISSION_SETTINGS,
+		rememberedDecisions: [
+			{ id: 'rem-b-cp', category: 'command', argv: ['cp', '/tmp/source.js', pluginJs], cwd: zFloorVaultPaths.root },
+		],
+	};
+	const teeRemembered: PermissionSettings = {
+		...DEFAULT_PERMISSION_SETTINGS,
+		rememberedDecisions: [
+			{ id: 'rem-b-tee', category: 'command', argv: ['tee', pluginJs], cwd: zFloorVaultPaths.root },
+		],
+	};
+
+	// 1. Write targeting .obsidian/
+	eq('Write into .obsidian prompts under default', permissionVerdict('Write', { file_path: pluginJs, content: 'x' }, zFloorVaultPaths, defaultConfig), 'ask');
+	eq('Write into .obsidian prompts under read auto-allow', permissionVerdict('Write', { file_path: pluginJs, content: 'x' }, zFloorVaultPaths, readAuto), 'ask');
+	eq('Write into .obsidian prompts under write auto-allow', permissionVerdict('Write', { file_path: pluginJs, content: 'x' }, zFloorVaultPaths, writeAuto), 'ask');
+	eq('Write into .obsidian prompts under command auto-allow', permissionVerdict('Write', { file_path: pluginJs, content: 'x' }, zFloorVaultPaths, cmdAuto), 'ask');
+	eq('Write into .obsidian prompts under all categories auto-allow', permissionVerdict('Write', { file_path: pluginJs, content: 'x' }, zFloorVaultPaths, allCategoriesAuto), 'ask');
+	eq('Write into .obsidian prompts under allow everything on', permissionVerdict('Write', { file_path: pluginJs, content: 'x' }, zFloorVaultPaths, allowEverythingOn), 'ask');
+	eq('Write into .obsidian prompts under remembered decision', permissionVerdict('Write', { file_path: pluginJs, content: 'x' }, zFloorVaultPaths, writeRemembered), 'ask');
+
+	// 2. Bash echo/redirection targeting .obsidian/
+	eq('Bash echo into .obsidian prompts under default', permissionVerdict('Bash', { command: bashEcho }, zFloorVaultPaths, defaultConfig), 'ask');
+	eq('Bash echo into .obsidian prompts under read auto-allow', permissionVerdict('Bash', { command: bashEcho }, zFloorVaultPaths, readAuto), 'ask');
+	eq('Bash echo into .obsidian prompts under write auto-allow', permissionVerdict('Bash', { command: bashEcho }, zFloorVaultPaths, writeAuto), 'ask');
+	eq('Bash echo into .obsidian prompts under command auto-allow', permissionVerdict('Bash', { command: bashEcho }, zFloorVaultPaths, cmdAuto), 'ask');
+	eq('Bash echo into .obsidian prompts under all categories auto-allow', permissionVerdict('Bash', { command: bashEcho }, zFloorVaultPaths, allCategoriesAuto), 'ask');
+	eq('Bash echo into .obsidian prompts under allow everything on', permissionVerdict('Bash', { command: bashEcho }, zFloorVaultPaths, allowEverythingOn), 'ask');
+	eq('Bash echo into .obsidian prompts under remembered decision', permissionVerdict('Bash', { command: bashEcho }, zFloorVaultPaths, echoRemembered), 'ask');
+
+	// 3. Bash cp targeting .obsidian/
+	eq('Bash cp into .obsidian prompts under default', permissionVerdict('Bash', { command: bashCp }, zFloorVaultPaths, defaultConfig), 'ask');
+	eq('Bash cp into .obsidian prompts under read auto-allow', permissionVerdict('Bash', { command: bashCp }, zFloorVaultPaths, readAuto), 'ask');
+	eq('Bash cp into .obsidian prompts under write auto-allow', permissionVerdict('Bash', { command: bashCp }, zFloorVaultPaths, writeAuto), 'ask');
+	eq('Bash cp into .obsidian prompts under command auto-allow', permissionVerdict('Bash', { command: bashCp }, zFloorVaultPaths, cmdAuto), 'ask');
+	eq('Bash cp into .obsidian prompts under all categories auto-allow', permissionVerdict('Bash', { command: bashCp }, zFloorVaultPaths, allCategoriesAuto), 'ask');
+	eq('Bash cp into .obsidian prompts under allow everything on', permissionVerdict('Bash', { command: bashCp }, zFloorVaultPaths, allowEverythingOn), 'ask');
+	eq('Bash cp into .obsidian prompts under remembered decision', permissionVerdict('Bash', { command: bashCp }, zFloorVaultPaths, cpRemembered), 'ask');
+
+	// 4. Bash tee targeting .obsidian/
+	eq('Bash tee into .obsidian prompts under default', permissionVerdict('Bash', { command: bashTee }, zFloorVaultPaths, defaultConfig), 'ask');
+	eq('Bash tee into .obsidian prompts under read auto-allow', permissionVerdict('Bash', { command: bashTee }, zFloorVaultPaths, readAuto), 'ask');
+	eq('Bash tee into .obsidian prompts under write auto-allow', permissionVerdict('Bash', { command: bashTee }, zFloorVaultPaths, writeAuto), 'ask');
+	eq('Bash tee into .obsidian prompts under command auto-allow', permissionVerdict('Bash', { command: bashTee }, zFloorVaultPaths, cmdAuto), 'ask');
+	eq('Bash tee into .obsidian prompts under all categories auto-allow', permissionVerdict('Bash', { command: bashTee }, zFloorVaultPaths, allCategoriesAuto), 'ask');
+	eq('Bash tee into .obsidian prompts under allow everything on', permissionVerdict('Bash', { command: bashTee }, zFloorVaultPaths, allowEverythingOn), 'ask');
+	eq('Bash tee into .obsidian prompts under remembered decision', permissionVerdict('Bash', { command: bashTee }, zFloorVaultPaths, teeRemembered), 'ask');
+
+	// 5. Metacharacter veto fires under allow everything
+	eq('Bash metacharacter semicolon prompts under allow everything', permissionVerdict('Bash', { command: 'echo hello; rm -rf /' }, zFloorVaultPaths, allowEverythingOn), 'ask');
+	eq('Bash metacharacter pipe prompts under allow everything', permissionVerdict('Bash', { command: 'echo hello | cat' }, zFloorVaultPaths, allowEverythingOn), 'ask');
+	eq('Bash metacharacter ampersand prompts under allow everything', permissionVerdict('Bash', { command: 'echo hello && echo world' }, zFloorVaultPaths, allowEverythingOn), 'ask');
+
+	rmSync(zFloorBase, { recursive: true, force: true });
+}
+
+console.log('Z2. Defect 0 end-to-end chain check: Bash without cwd in request scopes to session cwd');
+{
+	const e2eBaseZ = realpathSync(mkdtempSync(join(tmpdir(), 'guki-e2e-z-')));
+	const e2eVaultZ = join(e2eBaseZ, 'vault');
+	mkdirSync(e2eVaultZ, { recursive: true });
+	const e2eVaultPathsZ = await createVaultPaths(e2eVaultZ);
+	const otherDirZ = mkdtempSync(join(tmpdir(), 'guki-e2e-other-z-'));
+	const bashCmdZ = 'npm test --run';
+
+	function createMockPluginAppZ() {
+		const adapter = new FileSystemAdapter();
+		(adapter as any).getBasePath = () => e2eVaultZ;
+		(adapter as any).read = (_p: string) => Promise.resolve(
+			readFileSync(join(process.cwd(), 'src', 'cli', 'mcp-permission-server.mjs'), 'utf8'),
+		);
+		(adapter as any).exists = (p: string) => existsSync(p);
+		(adapter as any).stat = (_p: string) => ({ ctime: Date.now(), mtime: Date.now(), size: 0 });
+
+		return {
+			vault: { configDir: '.obsidian', adapter },
+			workspace: {
+				on: () => {},
+				onLayoutReady: (cb: () => void) => { cb(); },
+				getLeavesOfType: () => [],
+				getRightLeaf: () => null,
+				getLeaf: () => ({ setViewState: async () => {}, setPinned: () => {} }),
+				revealLeaf: () => {},
+			},
+		};
+	}
+
+	let savedDataZ: any = null;
+	const pluginZ = new GukiChatPlugin(createMockPluginAppZ() as any, { dir: 'plugins/guki-chat' } as any);
+	pluginZ.loadData = async () => ({ ...DEFAULT_SETTINGS });
+	pluginZ.saveData = async (data: any) => {
+		savedDataZ = JSON.parse(JSON.stringify(data));
+	};
+	await pluginZ.onload();
+
+	const sessionZ = (pluginZ as any).session as SessionManager;
+	const brokerZ = (sessionZ as any).broker as PermissionBroker;
+	(brokerZ as unknown as { policyPaths: unknown }).policyPaths = e2eVaultPathsZ;
+
+	// 1. Initial bash request arrives WITHOUT cwd (the measured real CLI wire shape)
+	const reqIdZ1 = 'req-e2e-bash-z1';
+	let firstBashWrittenZ = '';
+	const socketZ1 = { write: (d: any) => { firstBashWrittenZ = String(d); } };
+	(brokerZ as any).handleRequest(socketZ1, { id: reqIdZ1, tool_name: 'Bash', input: { command: bashCmdZ } });
+
+	check('first bash request without cwd prompts with pending card', (brokerZ as any).pending.has(reqIdZ1) === true);
+	const itemZ = (brokerZ as any).pending.get(reqIdZ1)?.item;
+
+	// 2. Render UI card, tick checkbox, click Allow
+	const { parent: parentZ, component: compZ } = createMockDomParent();
+	const actionsZ: PermissionActions = {
+		decide: (requestId, behavior, remember) => {
+			if (remember && behavior === 'allow') {
+				void sessionZ.rememberPermission(requestId);
+			} else {
+				sessionZ.decidePermission(requestId, behavior);
+			}
+		},
+	};
+	const cardZ = createPermissionCard(parentZ, compZ, itemZ, actionsZ);
+	cardZ.rememberCheckbox!.checked = true;
+	cardZ.allowEl.click();
+	await new Promise((r) => setTimeout(r, 15));
+
+	// 3. Assert decision persisted with exact argv and session cwd (vault root)
+	eq('bash decision persisted via saveData', Array.isArray(savedDataZ?.rememberedDecisions) && savedDataZ.rememberedDecisions.length > 0, true);
+	const persistedZ = savedDataZ?.rememberedDecisions?.find((d: any) => d.category === 'command' && d.cwd === e2eVaultPathsZ.root);
+	check('persisted bash decision has exact argv tokens', persistedZ !== undefined && persistedZ.argv?.join(' ') === bashCmdZ);
+	eq('persisted bash decision has exact session canonical cwd', persistedZ?.cwd, e2eVaultPathsZ.root);
+	eq('plugin settings holds bash decision', pluginZ.settings.rememberedDecisions.some((d) => d.category === 'command' && d.cwd === e2eVaultPathsZ.root), true);
+
+	// 4. Second identical bash request (also without cwd) -> auto-allowed without prompt
+	const reqIdZ2 = 'req-e2e-bash-z2';
+	let secondBashWrittenZ = '';
+	const socketZ2 = { write: (d: any) => { secondBashWrittenZ = String(d); } };
+	(brokerZ as any).handleRequest(socketZ2, { id: reqIdZ2, tool_name: 'Bash', input: { command: bashCmdZ } });
+	check('second identical bash request is auto-allowed without prompt', (brokerZ as any).pending.has(reqIdZ2) === false);
+	check('second bash received allow decision', secondBashWrittenZ.includes('"behavior":"allow"'));
+
+	// 5. Near-miss 1: extra argument -> prompts
+	const reqIdZExtra = 'req-e2e-bash-extra';
+	const socketZExtra = { write: () => {} };
+	(brokerZ as any).handleRequest(socketZExtra, { id: reqIdZExtra, tool_name: 'Bash', input: { command: 'npm test --run --extra' } });
+	check('near-miss extra argument bash request still prompts', (brokerZ as any).pending.has(reqIdZExtra) === true);
+
+	// 6. Near-miss 2: different directory -> prompts
+	const reqIdZDir = 'req-e2e-bash-diffdir';
+	const socketZDir = { write: () => {} };
+	(brokerZ as any).handleRequest(socketZDir, { id: reqIdZDir, tool_name: 'Bash', input: { command: bashCmdZ, cwd: otherDirZ } });
+	check('near-miss different directory bash request still prompts', (brokerZ as any).pending.has(reqIdZDir) === true);
+
+	// 7. Near-miss 3: metacharacter -> prompts
+	const reqIdZMeta = 'req-e2e-bash-meta';
+	const socketZMeta = { write: () => {} };
+	(brokerZ as any).handleRequest(socketZMeta, { id: reqIdZMeta, tool_name: 'Bash', input: { command: `${bashCmdZ}; echo evil` } });
+	check('near-miss metacharacter bash request still prompts', (brokerZ as any).pending.has(reqIdZMeta) === true);
+
+	rmSync(e2eBaseZ, { recursive: true, force: true });
+	rmSync(otherDirZ, { recursive: true, force: true });
+}
+
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
+

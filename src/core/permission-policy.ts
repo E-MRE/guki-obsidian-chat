@@ -21,7 +21,7 @@
  * - this is a **safety net, not the only defence** — the CLI resolves some low-risk calls itself and
  *   they never reach the bridge at all (RESEARCH B5).
  */
-import { BASH_METACHARACTERS, bashVerdict, resolveBashCwd, tokenizeCommand } from './bash-whitelist';
+import { bashVerdict, PROTECTED_SEGMENTS, resolveBashCwd, validateBashFloor } from './bash-whitelist';
 
 export type PermissionVerdict = 'allow' | 'ask';
 
@@ -229,9 +229,6 @@ const NO_SIDE_EFFECT_TOOLS = new Set(['WebSearch', 'TodoWrite', 'Task', 'Agent']
 
 /** Schemes `WebFetch` may be auto-allowed for. `file://` is a local file read wearing a URL. */
 const FETCHABLE_SCHEMES = ['http://', 'https://'];
-
-/** Path segments that revoke the "git makes it reversible" argument the edit allow rests on. */
-const PROTECTED_SEGMENTS = new Set(['.git', '.obsidian']);
 
 function field(input: unknown, name: string): unknown {
 	if (typeof input !== 'object' || input === null) {
@@ -468,19 +465,8 @@ export function buildRememberedDecision(
 	}
 
 	if (toolName === 'Bash') {
-		const cmd = field(input, 'command');
-		if (typeof cmd !== 'string') {
-			return null;
-		}
-		const raw = cmd.trim();
-		if (raw.length === 0) {
-			return null;
-		}
-		if (BASH_METACHARACTERS.some((meta) => raw.includes(meta))) {
-			return null;
-		}
-		const tokens = tokenizeCommand(raw);
-		if (tokens === null || tokens.length === 0) {
+		const tokens = validateBashFloor(field(input, 'command'));
+		if (tokens === null) {
 			return null;
 		}
 		const canonicalCwd = resolveBashCwd(field(input, 'cwd'), paths);

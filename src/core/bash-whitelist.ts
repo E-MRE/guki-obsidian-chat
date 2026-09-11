@@ -184,37 +184,77 @@ export function resolveBashCwd(rawCwd: unknown, paths: VaultPaths): string | nul
 	return norm.endsWith('/') && norm.length > 1 ? norm.slice(0, -1) : norm;
 }
 
+export const PROTECTED_SEGMENTS = new Set(['.git', '.obsidian']);
+
+export function hasProtectedSegment(pathOrToken: string): boolean {
+	const norm = pathOrToken.normalize('NFC').toLowerCase();
+	const segments = norm.split(/[/\\]/);
+	for (const seg of segments) {
+		if (PROTECTED_SEGMENTS.has(seg)) {
+			return true;
+		}
+		if (seg.includes('=')) {
+			const subSegs = seg.split('=');
+			if (subSegs.some((s) => PROTECTED_SEGMENTS.has(s))) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 /**
- * The gate. `command` is `unknown` because it arrives off the wire inside the tool's `input`; a
- * non-string is malformed and malformed is `ask`.
+ * Absolute security floor for Bash commands.
+ * Runs on every command BEFORE any allow rule (allowEverything, runCommands auto-allow,
+ * or remembered decisions) can be consulted.
+ *
+ * 1. String and non-empty check
+ * 2. Metacharacter veto (on raw string)
+ * 3. Quote-aware tokenization
+ * 4. Protected segment check (.obsidian, .git in tokens)
+ *
+ * Returns the parsed tokens if the floor passes, or null if vetoed / malformed (fail-closed).
  */
-export function bashVerdict(
-	command: unknown,
+export function validateBashFloor(command: unknown): string[] | null {
+	if (typeof command !== 'string') {
+		return null;
+	}
+	const raw = command.trim();
+	if (raw.length === 0) {
+		return null;
+	}
+
+	// Step 1: Metacharacter veto — on the raw string, before anything is interpreted.
+	if (BASH_METACHARACTERS.some((meta) => raw.includes(meta))) {
+		return null;
+	}
+
+	// Step 2: Tokenization
+	const tokens = tokenizeCommand(raw);
+	if (tokens === null || tokens.length === 0) {
+		return null;
+	}
+
+	// Step 3: Protected segment check — any token naming .obsidian or .git
+	if (tokens.some((token) => hasProtectedSegment(token))) {
+		return null;
+	}
+
+	return tokens;
+}
+
+/**
+ * Evaluates allow rules for commands that have cleared validateBashFloor.
+ * Structured as a separate function so no allow rule can bypass validateBashFloor by construction.
+ */
+function evaluateBashAllow(
+	tokens: string[],
 	paths: VaultPaths,
 	settings?: PermissionSettings,
 	rawCwd?: unknown,
 ): PermissionVerdict {
-	if (typeof command !== 'string') {
-		return 'ask';
-	}
-	const raw = command.trim();
-	if (raw.length === 0) {
-		return 'ask';
-	}
-
 	if (settings?.allowEverything || settings?.runCommands === 'auto-allow') {
 		return 'allow';
-	}
-
-	// Step 1, on the raw string, before anything is interpreted.
-	if (BASH_METACHARACTERS.some((meta) => raw.includes(meta))) {
-		return 'ask';
-	}
-
-	// Step 2.
-	const tokens = tokenizeCommand(raw);
-	if (tokens === null || tokens.length === 0) {
-		return 'ask';
 	}
 
 	const currentCwd = resolveBashCwd(rawCwd, paths);
@@ -243,5 +283,26 @@ export function bashVerdict(
 
 	// Step 3.
 	return argumentsStayInsideVault(tokens, paths) ? 'allow' : 'ask';
+}
+
+/**
+ * The gate. `command` is `unknown` because it arrives off the wire inside the tool's `input`; a
+ * non-string is malformed and malformed is `ask`.
+ *
+ * Enforces absolute security floor first via validateBashFloor. If the floor rejects the command,
+ * it returns 'ask' immediately. Allow rules in evaluateBashAllow can never bypass the floor.
+ */
+export function bashVerdict(
+	command: unknown,
+	paths: VaultPaths,
+	settings?: PermissionSettings,
+	rawCwd?: unknown,
+): PermissionVerdict {
+	const tokens = validateBashFloor(command);
+	if (tokens === null) {
+		return 'ask';
+	}
+
+	return evaluateBashAllow(tokens, paths, settings, rawCwd);
 }
 
