@@ -51,3 +51,20 @@ export class Setting {
 	addToggle() { return this; }
 	addButton() { return this; }
 }
+
+// Phase 7 task 3 round D: `main.ts` defines `GukiChatPlugin extends Plugin`.
+// Section Y instantiates the plugin to test the full save-settings chain.
+export class Plugin {
+	constructor(app, manifest) {
+		this.app = app;
+		this.manifest = manifest ?? { dir: '' };
+	}
+	async loadData() { return {}; }
+	async saveData(_data) {}
+	addSettingTab() {}
+	registerView() {}
+	addRibbonIcon() {}
+	registerEvent() {}
+	addCommand() {}
+}
+

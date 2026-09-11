@@ -161,7 +161,11 @@ export class SessionManager {
 		this.broker.setSettings(settings);
 	}
 
-	setOnSaveSettings(callback: () => Promise<void>): void {
+	getPermissionSettings(): PermissionSettings {
+		return this.broker.getSettings();
+	}
+
+	setOnSaveSettings(callback: (settings?: PermissionSettings) => Promise<void>): void {
 		this.broker.setOnSaveSettings(callback);
 	}
 

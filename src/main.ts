@@ -21,7 +21,12 @@ export default class GukiChatPlugin extends Plugin {
 			this.settings.claudeBinaryPath,
 			this.settings,
 		);
-		session.setOnSaveSettings(async () => {
+		session.setOnSaveSettings(async (newPermissions) => {
+			const permissions = newPermissions ?? session.getPermissionSettings();
+			this.settings = {
+				...this.settings,
+				rememberedDecisions: [...permissions.rememberedDecisions],
+			};
 			await this.saveSettings();
 		});
 		this.session = session;

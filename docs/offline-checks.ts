@@ -92,8 +92,9 @@ import {
 import { startsExpanded, toolCategory, toolResultText, toolSummary } from '../src/core/tool-policy';
 import { diffFromToolInput, diffStats, emptyPaneText } from '../src/ui/diff-view';
 import { toolPermissionBodyText, toolResultTitle, toolStatusText } from '../src/ui/tool-card';
-import { canRememberPermission, permissionDiff, rememberLabelText } from '../src/ui/permission-card';
-import { clearRememberedDecisions, formatRememberedDecision, removeRememberedDecision } from '../src/ui/settings-tab';
+import { canRememberPermission, createPermissionCard, permissionDiff, rememberLabelText, type PermissionActions } from '../src/ui/permission-card';
+import { clearRememberedDecisions, DEFAULT_SETTINGS, formatRememberedDecision, removeRememberedDecision } from '../src/ui/settings-tab';
+import GukiChatPlugin from '../src/main';
 import { renderQuotaBar } from '../src/ui/composer';
 import { formatTurnMeta, MessageList, withTurnMeta } from '../src/ui/message-list';
 import {
@@ -5253,7 +5254,7 @@ class FakeElement {
 
 console.log('P3. Fail-closed violation on malformed question');
 {
-	(global as any).window = { requestAnimationFrame: (cb: any) => cb() };
+	(global as any).window = { ...(global as any).window, requestAnimationFrame: (cb: any) => cb() };
 	const container = new FakeElement() as any;
 	let decision: any = 'no-decision-yet';
 	
@@ -6146,6 +6147,331 @@ console.log('X5. Human-readable formatting of remembered decisions');
 	const bashFmt = formatRememberedDecision({ id: '4', category: 'command', argv: ['npm', 'run', 'build'], cwd: '/home/project' });
 	eq('bash format title shows command', bashFmt.title, 'Bash: npm run build');
 	eq('bash format detail shows directory', bashFmt.detail, 'Directory: /home/project');
+}
+
+
+// --- Y. Phase 7 task 3 round D: End-to-end chain checks for remembered permissions -----------
+
+function createMockDomParent(): { parent: HTMLElement; component: any } {
+	const listeners = new Map<HTMLElement, Map<string, Function[]>>();
+	function makeEl(tag = 'div'): any {
+		const el: any = {
+			tagName: tag.toUpperCase(),
+			disabled: false,
+			checked: false,
+			textContent: '',
+			children: [] as any[],
+			classes: new Set<string>(),
+			createDiv: (opts?: any) => {
+				const child = makeEl('div');
+				if (opts?.cls) child.addClass(opts.cls);
+				el.children.push(child);
+				return child;
+			},
+			createSpan: (opts?: any) => {
+				const child = makeEl('span');
+				if (opts?.cls) child.addClass(opts.cls);
+				el.children.push(child);
+				return child;
+			},
+			createEl: (t: string, opts?: any) => {
+				const child = makeEl(t);
+				if (opts?.cls) child.addClass(opts.cls);
+				if (opts?.text) child.setText(opts.text);
+				if (opts?.attr) Object.assign(child, opts.attr);
+				el.children.push(child);
+				return child;
+			},
+			addClass: (cls: string) => { el.classes.add(cls); },
+			removeClass: (cls: string) => { el.classes.delete(cls); },
+			toggleClass: (cls: string, val: boolean) => { if (val) el.classes.add(cls); else el.classes.delete(cls); },
+			setText: (txt: string) => { el.textContent = txt; },
+			empty: () => { el.children = []; },
+			show: () => {},
+			hide: () => {},
+			click: () => {
+				const elListeners = listeners.get(el);
+				if (elListeners) {
+					const clickHandlers = elListeners.get('click');
+					if (clickHandlers) {
+						for (const h of clickHandlers) {
+							h({ type: 'click' });
+						}
+					}
+				}
+			},
+		};
+		return el;
+	}
+
+	const parent = makeEl('div');
+	const component = {
+		registerDomEvent: (target: HTMLElement, event: string, handler: Function) => {
+			if (!listeners.has(target)) {
+				listeners.set(target, new Map());
+			}
+			const targetListeners = listeners.get(target)!;
+			if (!targetListeners.has(event)) {
+				targetListeners.set(event, []);
+			}
+			targetListeners.get(event)!.push(handler);
+		},
+	};
+	return { parent, component };
+}
+
+const e2eBase = realpathSync(mkdtempSync(join(tmpdir(), 'guki-e2e-')));
+const e2eVault = join(e2eBase, 'vault');
+const e2eOutside = join(e2eBase, 'outside');
+mkdirSync(e2eVault, { recursive: true });
+mkdirSync(e2eOutside, { recursive: true });
+const e2eVaultPaths = await createVaultPaths(e2eVault);
+
+function createMockPluginApp() {
+	const adapter = new FileSystemAdapter();
+	(adapter as unknown as { getBasePath: () => string; read: (p: string) => Promise<string>; exists: (p: string) => boolean; stat: (p: string) => any }).getBasePath = () => e2eVault;
+	(adapter as unknown as { read: (p: string) => Promise<string> }).read = (_p: string) => Promise.resolve(
+		readFileSync(join(process.cwd(), 'src', 'cli', 'mcp-permission-server.mjs'), 'utf8'),
+	);
+	(adapter as unknown as { exists: (p: string) => boolean }).exists = (p: string) => existsSync(p);
+	(adapter as unknown as { stat: (p: string) => any }).stat = (_p: string) => ({ ctime: Date.now(), mtime: Date.now(), size: 0 });
+
+	return {
+		vault: {
+			configDir: '.obsidian',
+			adapter,
+		},
+		workspace: {
+			on: () => {},
+			onLayoutReady: (cb: () => void) => { cb(); },
+			getLeavesOfType: () => [],
+			getRightLeaf: () => null,
+			getLeaf: () => ({ setViewState: async () => {}, setPinned: () => {} }),
+			revealLeaf: () => {},
+		},
+	};
+}
+
+console.log('Y1. End-to-end chain check: Read category (UI card click -> saveData -> auto-allow -> near-miss prompts)');
+{
+	const outsideFile = join(e2eOutside, 'e2e-read-test.txt');
+	writeFileSync(outsideFile, 'read test content');
+	const canonicalOutsideFile = realpathSync(outsideFile).normalize('NFC');
+	const siblingFile = join(e2eOutside, 'e2e-read-sibling.txt');
+	writeFileSync(siblingFile, 'sibling content');
+
+	let savedData: any = null;
+	const plugin = new GukiChatPlugin(createMockPluginApp() as any, { dir: 'plugins/guki-chat' } as any);
+	plugin.loadData = async () => ({ ...DEFAULT_SETTINGS });
+	plugin.saveData = async (data: any) => {
+		savedData = JSON.parse(JSON.stringify(data));
+	};
+	await plugin.onload();
+
+	const session = (plugin as any).session as SessionManager;
+	const broker = (session as any).broker as PermissionBroker;
+	(broker as unknown as { policyPaths: unknown }).policyPaths = e2eVaultPaths;
+
+	// 1. Initial request arrives and prompts
+	const reqId = 'req-e2e-read-1';
+	let firstSocketWritten = '';
+	const socket1 = { write: (d: any) => { firstSocketWritten = String(d); } };
+	(broker as any).handleRequest(socket1, { id: reqId, tool_name: 'Read', input: { file_path: outsideFile } });
+
+	const pendingEntry = (broker as any).pending.get(reqId);
+	check('first read request prompts with pending card', pendingEntry !== undefined);
+	const item = pendingEntry?.item;
+
+	// 2. Render real UI card and click Allow with remember checked
+	const { parent, component } = createMockDomParent();
+	const actions: PermissionActions = {
+		decide: (requestId, behavior, remember) => {
+			if (remember && behavior === 'allow') {
+				void session.rememberPermission(requestId);
+			} else {
+				session.decidePermission(requestId, behavior);
+			}
+		},
+	};
+	const card = createPermissionCard(parent, component, item, actions);
+	check('card has remember checkbox', card.rememberCheckbox !== undefined);
+
+	// User ticks checkbox and clicks Allow
+	card.rememberCheckbox!.checked = true;
+	card.allowEl.click();
+	await new Promise((r) => setTimeout(r, 15));
+
+	// 3. Assert decision was persisted through saveData
+	eq('read decision persisted via saveData', Array.isArray(savedData?.rememberedDecisions) && savedData.rememberedDecisions.length > 0, true);
+	const persisted = savedData?.rememberedDecisions?.find((d: any) => d.category === 'read' && d.path === canonicalOutsideFile);
+	check('persisted read decision has exact canonical path', persisted !== undefined);
+	eq('plugin settings holds read decision', plugin.settings.rememberedDecisions.some((d) => d.category === 'read' && d.path === canonicalOutsideFile), true);
+
+	// 4. Issue second identical request -> auto-allowed without prompt
+	const reqId2 = 'req-e2e-read-2';
+	let secondSocketWritten = '';
+	const socket2 = { write: (d: any) => { secondSocketWritten = String(d); } };
+	(broker as any).handleRequest(socket2, { id: reqId2, tool_name: 'Read', input: { file_path: outsideFile } });
+
+	check('second identical read request is auto-allowed without prompt', (broker as any).pending.has(reqId2) === false);
+	check('second read received allow decision', secondSocketWritten.includes('"behavior":"allow"'));
+
+	// 5. Issue near-miss request (sibling path) -> still prompts
+	const reqIdNear = 'req-e2e-read-near';
+	const socketNear = { write: () => {} };
+	(broker as any).handleRequest(socketNear, { id: reqIdNear, tool_name: 'Read', input: { file_path: siblingFile } });
+	check('near-miss sibling read request still prompts', (broker as any).pending.has(reqIdNear) === true);
+}
+
+console.log('Y2. End-to-end chain check: Write category (UI card click -> saveData -> auto-allow -> near-miss prompts)');
+{
+	const outsideWriteFile = join(e2eOutside, 'e2e-write-test.txt');
+	rmSync(outsideWriteFile, { force: true });
+	const siblingWriteFile = join(e2eOutside, 'e2e-write-sibling.txt');
+	rmSync(siblingWriteFile, { force: true });
+
+	let savedData: any = null;
+	const pluginW = new GukiChatPlugin(createMockPluginApp() as any, { dir: 'plugins/guki-chat' } as any);
+	pluginW.loadData = async () => ({ ...DEFAULT_SETTINGS });
+	pluginW.saveData = async (data: any) => {
+		savedData = JSON.parse(JSON.stringify(data));
+	};
+	await pluginW.onload();
+
+	const sessionW = (pluginW as any).session as SessionManager;
+	const brokerW = (sessionW as any).broker as PermissionBroker;
+	(brokerW as unknown as { policyPaths: unknown }).policyPaths = e2eVaultPaths;
+
+	// 1. Initial write request arrives and prompts
+	const reqIdW = 'req-e2e-write-1';
+	let firstWriteWritten = '';
+	const socketW1 = { write: (d: any) => { firstWriteWritten = String(d); } };
+	(brokerW as any).handleRequest(socketW1, { id: reqIdW, tool_name: 'Write', input: { file_path: outsideWriteFile, content: 'created' } });
+
+	check('first write request prompts with pending card', (brokerW as any).pending.has(reqIdW) === true);
+	const itemW = (brokerW as any).pending.get(reqIdW)?.item;
+
+	// 2. Render UI card, tick checkbox, click Allow
+	const { parent: parentW, component: compW } = createMockDomParent();
+	const actionsW: PermissionActions = {
+		decide: (requestId, behavior, remember) => {
+			if (remember && behavior === 'allow') {
+				void sessionW.rememberPermission(requestId);
+			} else {
+				sessionW.decidePermission(requestId, behavior);
+			}
+		},
+	};
+	const cardW = createPermissionCard(parentW, compW, itemW, actionsW);
+	cardW.rememberCheckbox!.checked = true;
+	cardW.allowEl.click();
+	await new Promise((r) => setTimeout(r, 15));
+
+	// 3. Assert decision persisted with existedOnGrant: false
+	eq('write decision persisted via saveData', Array.isArray(savedData?.rememberedDecisions) && savedData.rememberedDecisions.length > 0, true);
+	const canonicalOutsideWrite = e2eVaultPaths.resolve(outsideWriteFile)!.normalize('NFC');
+	const persistedW = savedData?.rememberedDecisions?.find((d: any) => d.category === 'write' && d.path === canonicalOutsideWrite);
+	check('persisted write decision exists with existedOnGrant false', persistedW !== undefined && persistedW.existedOnGrant === false);
+	eq('plugin settings holds write decision', pluginW.settings.rememberedDecisions.some((d) => d.category === 'write' && d.path === canonicalOutsideWrite), true);
+
+	// 4. Second identical write request (file still absent) -> auto-allowed without prompt
+	const reqIdW2 = 'req-e2e-write-2';
+	let secondWriteWritten = '';
+	const socketW2 = { write: (d: any) => { secondWriteWritten = String(d); } };
+	(brokerW as any).handleRequest(socketW2, { id: reqIdW2, tool_name: 'Write', input: { file_path: outsideWriteFile, content: 'created' } });
+	check('second identical write is auto-allowed without prompt', (brokerW as any).pending.has(reqIdW2) === false);
+	check('second write received allow decision', secondWriteWritten.includes('"behavior":"allow"'));
+
+	// 5. Near-miss 1: sibling path -> prompts
+	const reqIdWSibling = 'req-e2e-write-sibling';
+	const socketWSibling = { write: () => {} };
+	(brokerW as any).handleRequest(socketWSibling, { id: reqIdWSibling, tool_name: 'Write', input: { file_path: siblingWriteFile, content: 'sibling' } });
+	check('near-miss sibling write still prompts', (brokerW as any).pending.has(reqIdWSibling) === true);
+
+	// 6. Near-miss 2: file created after grant -> existedOnGrant invariant requires prompt
+	writeFileSync(outsideWriteFile, 'now exists');
+	const reqIdWExisted = 'req-e2e-write-existed';
+	const socketWExisted = { write: () => {} };
+	(brokerW as any).handleRequest(socketWExisted, { id: reqIdWExisted, tool_name: 'Write', input: { file_path: outsideWriteFile, content: 'overwrite' } });
+	check('near-miss write after file exists still prompts', (brokerW as any).pending.has(reqIdWExisted) === true);
+	rmSync(outsideWriteFile, { force: true });
+}
+
+console.log('Y3. End-to-end chain check: Bash category (UI card click -> saveData -> auto-allow -> near-miss prompts)');
+{
+	const bashDir = mkdtempSync(join(tmpdir(), 'guki-e2e-bash-'));
+	const canonicalBashDir = realpathSync(bashDir).normalize('NFC');
+	const otherDir = mkdtempSync(join(tmpdir(), 'guki-e2e-bash-other-'));
+	const canonicalOtherDir = realpathSync(otherDir).normalize('NFC');
+	const bashCmd = 'npm test --run';
+
+	let savedData: any = null;
+	const pluginB = new GukiChatPlugin(createMockPluginApp() as any, { dir: 'plugins/guki-chat' } as any);
+	pluginB.loadData = async () => ({ ...DEFAULT_SETTINGS });
+	pluginB.saveData = async (data: any) => {
+		savedData = JSON.parse(JSON.stringify(data));
+	};
+	await pluginB.onload();
+
+	const sessionB = (pluginB as any).session as SessionManager;
+	const brokerB = (sessionB as any).broker as PermissionBroker;
+	(brokerB as unknown as { policyPaths: unknown }).policyPaths = e2eVaultPaths;
+
+	// 1. Initial bash request arrives and prompts
+	const reqIdB = 'req-e2e-bash-1';
+	let firstBashWritten = '';
+	const socketB1 = { write: (d: any) => { firstBashWritten = String(d); } };
+	(brokerB as any).handleRequest(socketB1, { id: reqIdB, tool_name: 'Bash', input: { command: bashCmd, cwd: bashDir } });
+
+	check('first bash request prompts with pending card', (brokerB as any).pending.has(reqIdB) === true);
+	const itemB = (brokerB as any).pending.get(reqIdB)?.item;
+
+	// 2. Render UI card, tick checkbox, click Allow
+	const { parent: parentB, component: compB } = createMockDomParent();
+	const actionsB: PermissionActions = {
+		decide: (requestId, behavior, remember) => {
+			if (remember && behavior === 'allow') {
+				void sessionB.rememberPermission(requestId);
+			} else {
+				sessionB.decidePermission(requestId, behavior);
+			}
+		},
+	};
+	const cardB = createPermissionCard(parentB, compB, itemB, actionsB);
+	cardB.rememberCheckbox!.checked = true;
+	cardB.allowEl.click();
+	await new Promise((r) => setTimeout(r, 15));
+
+	// 3. Assert decision persisted with argv tokens and canonical cwd
+	eq('bash decision persisted via saveData', Array.isArray(savedData?.rememberedDecisions) && savedData.rememberedDecisions.length > 0, true);
+	const persistedB = savedData?.rememberedDecisions?.find((d: any) => d.category === 'command' && d.cwd === canonicalBashDir);
+	check('persisted bash decision has exact argv tokens', persistedB !== undefined && persistedB.argv?.join(' ') === bashCmd);
+	eq('persisted bash decision has exact canonical cwd', persistedB?.cwd, canonicalBashDir);
+	eq('plugin settings holds bash decision', pluginB.settings.rememberedDecisions.some((d) => d.category === 'command' && d.cwd === canonicalBashDir), true);
+
+	// 4. Second identical bash request -> auto-allowed without prompt
+	const reqIdB2 = 'req-e2e-bash-2';
+	let secondBashWritten = '';
+	const socketB2 = { write: (d: any) => { secondBashWritten = String(d); } };
+	(brokerB as any).handleRequest(socketB2, { id: reqIdB2, tool_name: 'Bash', input: { command: bashCmd, cwd: bashDir } });
+	check('second identical bash request is auto-allowed without prompt', (brokerB as any).pending.has(reqIdB2) === false);
+	check('second bash received allow decision', secondBashWritten.includes('"behavior":"allow"'));
+
+	// 5. Near-miss 1: extra argument -> prompts
+	const reqIdBExtra = 'req-e2e-bash-extra';
+	const socketBExtra = { write: () => {} };
+	(brokerB as any).handleRequest(socketBExtra, { id: reqIdBExtra, tool_name: 'Bash', input: { command: 'npm test --run --extra', cwd: bashDir } });
+	check('near-miss extra argument bash request still prompts', (brokerB as any).pending.has(reqIdBExtra) === true);
+
+	// 6. Near-miss 2: different directory -> prompts
+	const reqIdBDir = 'req-e2e-bash-diffdir';
+	const socketBDir = { write: () => {} };
+	(brokerB as any).handleRequest(socketBDir, { id: reqIdBDir, tool_name: 'Bash', input: { command: bashCmd, cwd: otherDir } });
+	check('near-miss different directory bash request still prompts', (brokerB as any).pending.has(reqIdBDir) === true);
+
+	rmSync(e2eBase, { recursive: true, force: true });
+	rmSync(bashDir, { recursive: true, force: true });
+	rmSync(otherDir, { recursive: true, force: true });
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);

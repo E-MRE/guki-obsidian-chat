@@ -129,7 +129,7 @@ export class PermissionBroker {
 	onDenied: ((toolUseId: string) => void) | null = null;
 
 	private settings: PermissionSettings;
-	private onSaveSettings: (() => Promise<void>) | null = null;
+	private onSaveSettings: ((settings?: PermissionSettings) => Promise<void>) | null = null;
 
 	constructor(
 		private readonly app: App,
@@ -412,7 +412,7 @@ export class PermissionBroker {
 		};
 	}
 
-	setOnSaveSettings(callback: () => Promise<void>): void {
+	setOnSaveSettings(callback: (settings?: PermissionSettings) => Promise<void>): void {
 		this.onSaveSettings = callback;
 	}
 
@@ -445,7 +445,7 @@ export class PermissionBroker {
 				this.settings.rememberedDecisions.push(decision);
 				if (this.onSaveSettings) {
 					try {
-						await this.onSaveSettings();
+						await this.onSaveSettings(this.settings);
 					} catch (error) {
 						console.warn('GuKi Chat: could not save remembered decision', error);
 					}
@@ -462,7 +462,7 @@ export class PermissionBroker {
 			this.settings.rememberedDecisions.splice(idx, 1);
 			if (this.onSaveSettings) {
 				try {
-					await this.onSaveSettings();
+						await this.onSaveSettings(this.settings);
 				} catch (error) {
 					console.warn('GuKi Chat: could not save settings after forgetting decision', error);
 				}
@@ -474,7 +474,7 @@ export class PermissionBroker {
 		this.settings.rememberedDecisions = [];
 		if (this.onSaveSettings) {
 			try {
-				await this.onSaveSettings();
+					await this.onSaveSettings(this.settings);
 			} catch (error) {
 				console.warn('GuKi Chat: could not save settings after clearing decisions', error);
 			}
