@@ -162,6 +162,29 @@ function argumentsStayInsideVault(tokens: string[], paths: VaultPaths): boolean 
 }
 
 /**
+ * Resolves and canonicalises the working directory for a Bash command.
+ * Normalised to NFC and stripped of trailing slashes.
+ * Returns null if unavailable or unresolvable (fail-closed).
+ */
+export function resolveBashCwd(rawCwd: unknown, paths: VaultPaths): string | null {
+	const raw =
+		typeof rawCwd === 'string' && rawCwd.trim().length > 0
+			? rawCwd.trim()
+			: rawCwd === undefined
+				? paths.root
+				: null;
+	if (raw === null || raw.length === 0) {
+		return null;
+	}
+	const resolved = paths.resolve(raw);
+	if (resolved === null) {
+		return null;
+	}
+	const norm = resolved.normalize('NFC');
+	return norm.endsWith('/') && norm.length > 1 ? norm.slice(0, -1) : norm;
+}
+
+/**
  * The gate. `command` is `unknown` because it arrives off the wire inside the tool's `input`; a
  * non-string is malformed and malformed is `ask`.
  */
@@ -169,6 +192,7 @@ export function bashVerdict(
 	command: unknown,
 	paths: VaultPaths,
 	settings?: PermissionSettings,
+	rawCwd?: unknown,
 ): PermissionVerdict {
 	if (typeof command !== 'string') {
 		return 'ask';
@@ -193,14 +217,22 @@ export function bashVerdict(
 		return 'ask';
 	}
 
+	const currentCwd = resolveBashCwd(rawCwd, paths);
 	if (
-		settings?.rememberedDecisions?.some(
-			(d) =>
-				d.category === 'command' &&
+		currentCwd !== null &&
+		settings?.rememberedDecisions?.some((d) => {
+			if (d.category !== 'command' || typeof d.cwd !== 'string' || d.cwd.length === 0) {
+				return false;
+			}
+			const normCwd = d.cwd.normalize('NFC');
+			const cleanCwd = normCwd.endsWith('/') && normCwd.length > 1 ? normCwd.slice(0, -1) : normCwd;
+			return (
+				cleanCwd === currentCwd &&
 				Array.isArray(d.argv) &&
 				d.argv.length === tokens.length &&
-				d.argv.every((token, i) => token === tokens[i]),
-		)
+				d.argv.every((token, i) => token === tokens[i])
+			);
+		})
 	) {
 		return 'allow';
 	}
@@ -212,3 +244,4 @@ export function bashVerdict(
 	// Step 3.
 	return argumentsStayInsideVault(tokens, paths) ? 'allow' : 'ask';
 }
+

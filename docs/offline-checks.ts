@@ -5733,6 +5733,7 @@ console.log('V6. Remembered Bash decisions: exact argv sequence matching and met
 				id: 'rem-bash-1',
 				category: 'command',
 				argv: ['npm', 'test'],
+				cwd: vaultPaths.root,
 			},
 		],
 	};
@@ -5821,8 +5822,9 @@ console.log('V8. Allow everything mode: programmatic allows, .obsidian floor, an
 	eq('allow everything still refuses .obsidian Write', permissionVerdict('Write', { file_path: pluginJs, content: 'payload' }, vaultPaths, allowEverything), 'ask');
 	eq('allow everything still refuses .obsidian Edit', permissionVerdict('Edit', { file_path: pluginJs, old_string: 'a', new_string: 'b' }, vaultPaths, allowEverything), 'ask');
 
-	// 2. In-vault destructive edit guard still prompts under allow everything
-	eq('in-vault empty Write still prompts under allow everything', permissionVerdict('Write', { file_path: inVaultNote, content: '' }, vaultPaths, allowEverything), 'ask');
+	// 2. In-vault destructive edit guard yields to allow everything, but still prompts under default
+	eq('in-vault empty Write passes under allow everything', permissionVerdict('Write', { file_path: inVaultNote, content: '' }, vaultPaths, allowEverything), 'allow');
+	eq('in-vault empty Write prompts under default settings', permissionVerdict('Write', { file_path: inVaultNote, content: '' }, vaultPaths, DEFAULT_PERMISSION_SETTINGS), 'ask');
 
 	// 3. Fail-closed behaviour on malformed input survives allow everything
 	eq('malformed toolName prompts', permissionVerdict('', { file_path: outsideNote }, vaultPaths, allowEverything), 'ask');
@@ -5865,6 +5867,10 @@ console.log('V9. buildRememberedDecision constructor and PermissionBroker integr
 
 	const bashDec = buildRememberedDecision('Bash', { command: 'npm test --filter=foo' }, vaultPaths);
 	eq('buildRememberedDecision for Bash captures token sequence', bashDec?.argv?.join(' '), 'npm test --filter=foo');
+	eq('buildRememberedDecision for Bash captures canonical cwd', bashDec?.cwd, vaultPaths.root);
+
+	const bashUnresolvableDec = buildRememberedDecision('Bash', { command: 'npm test', cwd: '~' }, vaultPaths);
+	eq('buildRememberedDecision refuses unresolvable cwd', bashUnresolvableDec, null);
 
 	const bashMetaDec = buildRememberedDecision('Bash', { command: 'npm test; rm -rf /' }, vaultPaths);
 	eq('buildRememberedDecision refuses Bash with metacharacters', bashMetaDec, null);
@@ -5873,6 +5879,101 @@ console.log('V9. buildRememberedDecision constructor and PermissionBroker integr
 	eq('buildRememberedDecision refuses unrecognised tool', unrecDec, null);
 
 	rmSync(outsideNote, { force: true });
+}
+
+// --- W. Phase 7 task 3 round B corrections: Bash directory scoping and allow-everything destructive edits ----------
+
+console.log('W1. Bash cwd scoping: directory isolation, spelling variants, and unresolvable cwd');
+{
+	const dirA = mkdtempSync(join(tmpdir(), 'guki-cwd-a-'));
+	const dirB = mkdtempSync(join(tmpdir(), 'guki-cwd-b-'));
+	const canonicalA = realpathSync(dirA).normalize('NFC');
+	const canonicalB = realpathSync(dirB).normalize('NFC');
+
+	const grantInA: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: false,
+		rememberedDecisions: [
+			{
+				id: 'rem-bash-dir-a',
+				category: 'command',
+				argv: ['npm', 'test'],
+				cwd: canonicalA,
+			},
+		],
+	};
+
+	// 1. Remembered Bash decision granted in directory A does NOT match in directory B
+	eq('remembered Bash in dir A does not match same command in dir B', permissionVerdict('Bash', { command: 'npm test', cwd: dirB }, vaultPaths, grantInA), 'ask');
+
+	// 2. DOES still match in directory A
+	eq('remembered Bash in dir A matches same command in dir A', permissionVerdict('Bash', { command: 'npm test', cwd: dirA }, vaultPaths, grantInA), 'allow');
+
+	// 3. Matches when A is spelled with trailing slash
+	eq('remembered Bash in dir A matches with trailing slash', permissionVerdict('Bash', { command: 'npm test', cwd: `${dirA}/` }, vaultPaths, grantInA), 'allow');
+
+	// 4. Matches when A is spelled in NFD decomposed form
+	const nfdDirA = dirA.normalize('NFD');
+	eq('remembered Bash in dir A matches with NFD spelling', permissionVerdict('Bash', { command: 'npm test', cwd: nfdDirA }, vaultPaths, grantInA), 'allow');
+
+	// 5. Unresolvable working directory prompts rather than matching
+	eq('unresolvable working directory (tilde) prompts', permissionVerdict('Bash', { command: 'npm test', cwd: '~' }, vaultPaths, grantInA), 'ask');
+	eq('unresolvable working directory (empty string) prompts', permissionVerdict('Bash', { command: 'npm test', cwd: '' }, vaultPaths, grantInA), 'ask');
+	eq('unresolvable working directory (non-string) prompts', permissionVerdict('Bash', { command: 'npm test', cwd: 123 }, vaultPaths, grantInA), 'ask');
+
+	// 6. Stale decision stored without cwd does not match even in directory A
+	const staleSettings: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: false,
+		rememberedDecisions: [
+			{
+				id: 'rem-bash-stale',
+				category: 'command',
+				argv: ['npm', 'test'],
+			},
+		],
+	};
+	eq('stale Bash decision without cwd prompts', permissionVerdict('Bash', { command: 'npm test', cwd: dirA }, vaultPaths, staleSettings), 'ask');
+
+	// Clean up temp directories
+	rmSync(dirA, { recursive: true, force: true });
+	rmSync(dirB, { recursive: true, force: true });
+}
+
+console.log('W2. Allow everything mode vs destructive edits and absolute floors');
+{
+	const inVaultNote = join(POLICY_VAULT.root, 'notes', 'todo.md');
+	const pluginJs = join(POLICY_VAULT.root, '.obsidian', 'plugins', 'x', 'main.js');
+
+	const allowEverything: PermissionSettings = {
+		readOutsideVault: 'always ask',
+		writeOutsideVault: 'always ask',
+		runCommands: 'always ask',
+		allowEverything: true,
+		rememberedDecisions: [],
+	};
+
+	// 1. With allow everything on, a destructive in-vault edit passes
+	eq('with allow everything on, destructive in-vault Write passes', permissionVerdict('Write', { file_path: inVaultNote, content: '' }, vaultPaths, allowEverything), 'allow');
+	eq('with allow everything on, destructive in-vault Edit passes', permissionVerdict('Edit', { file_path: inVaultNote, old_string: 'a', new_string: '' }, vaultPaths, allowEverything), 'allow');
+	eq('with allow everything on, destructive in-vault MultiEdit passes', permissionVerdict('MultiEdit', { file_path: inVaultNote, edits: [{ old_string: 'a', new_string: '' }] }, vaultPaths, allowEverything), 'allow');
+
+	// 2. With allow everything OFF (default), that same destructive in-vault edit still prompts
+	eq('with allow everything off, destructive in-vault Write prompts', permissionVerdict('Write', { file_path: inVaultNote, content: '' }, vaultPaths, DEFAULT_PERMISSION_SETTINGS), 'ask');
+	eq('with allow everything off, destructive in-vault Edit prompts', permissionVerdict('Edit', { file_path: inVaultNote, old_string: 'a', new_string: '' }, vaultPaths, DEFAULT_PERMISSION_SETTINGS), 'ask');
+	eq('with allow everything off, destructive in-vault MultiEdit prompts', permissionVerdict('MultiEdit', { file_path: inVaultNote, edits: [{ old_string: 'a', new_string: '' }] }, vaultPaths, DEFAULT_PERMISSION_SETTINGS), 'ask');
+
+	// 3. With allow everything on, write into .obsidian/ STILL prompts
+	eq('with allow everything on, write into .obsidian still prompts', permissionVerdict('Write', { file_path: pluginJs, content: 'malicious' }, vaultPaths, allowEverything), 'ask');
+
+	// 4. With allow everything on, malformed input still fails closed
+	eq('with allow everything on, malformed missing path prompts', permissionVerdict('Write', { content: 'hello' }, vaultPaths, allowEverything), 'ask');
+	eq('with allow everything on, unresolvable path prompts', permissionVerdict('Read', { file_path: '~/.ssh/id_rsa' }, vaultPaths, allowEverything), 'ask');
+	eq('with allow everything on, unrecognised tool prompts', permissionVerdict('mcp__unknown', {}, vaultPaths, allowEverything), 'ask');
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);

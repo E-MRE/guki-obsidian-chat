@@ -21,7 +21,7 @@
  * - this is a **safety net, not the only defence** — the CLI resolves some low-risk calls itself and
  *   they never reach the bridge at all (RESEARCH B5).
  */
-import { BASH_METACHARACTERS, bashVerdict, tokenizeCommand } from './bash-whitelist';
+import { BASH_METACHARACTERS, bashVerdict, resolveBashCwd, tokenizeCommand } from './bash-whitelist';
 
 export type PermissionVerdict = 'allow' | 'ask';
 
@@ -35,6 +35,7 @@ export interface RememberedDecision {
 	path?: string;
 	existedOnGrant?: boolean;
 	argv?: string[];
+	cwd?: string;
 	description?: string;
 	createdAt?: number;
 }
@@ -106,11 +107,20 @@ export function normalizePermissionSettings(raw: unknown): PermissionSettings {
 					});
 				}
 			} else if (entry.category === 'command') {
-				if (Array.isArray(entry.argv) && entry.argv.length > 0 && entry.argv.every((t) => typeof t === 'string')) {
+				if (
+					Array.isArray(entry.argv) &&
+					entry.argv.length > 0 &&
+					entry.argv.every((t) => typeof t === 'string') &&
+					typeof entry.cwd === 'string' &&
+					entry.cwd.trim().length > 0
+				) {
+					const normCwd = entry.cwd.normalize('NFC');
+					const cleanCwd = normCwd.endsWith('/') && normCwd.length > 1 ? normCwd.slice(0, -1) : normCwd;
 					rememberedDecisions.push({
 						id: entry.id,
 						category: 'command',
 						argv: entry.argv,
+						cwd: cleanCwd,
 						description: typeof entry.description === 'string' ? entry.description : undefined,
 						createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : undefined,
 					});
@@ -370,7 +380,7 @@ function editVerdict(
 	}
 	if (paths.isInside(raw)) {
 		if (isDestructiveEdit(toolName, input)) {
-			return 'ask';
+			return settings.allowEverything ? 'allow' : 'ask';
 		}
 		return 'allow';
 	}
@@ -473,9 +483,14 @@ export function buildRememberedDecision(
 		if (tokens === null || tokens.length === 0) {
 			return null;
 		}
+		const canonicalCwd = resolveBashCwd(field(input, 'cwd'), paths);
+		if (canonicalCwd === null) {
+			return null;
+		}
 		return {
 			category: 'command',
 			argv: tokens,
+			cwd: canonicalCwd,
 			description: `Bash: ${tokens.join(' ')}`,
 		};
 	}
@@ -499,7 +514,7 @@ export function permissionVerdict(
 	}
 
 	if (toolName === 'Bash') {
-		return bashVerdict(field(input, 'command'), paths, settings);
+		return bashVerdict(field(input, 'command'), paths, settings, field(input, 'cwd'));
 	}
 
 	if (NO_SIDE_EFFECT_TOOLS.has(toolName)) {
