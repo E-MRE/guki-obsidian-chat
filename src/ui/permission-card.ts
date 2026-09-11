@@ -18,6 +18,7 @@
 import { setIcon, type Component } from 'obsidian';
 import type { PermissionItem, PermissionStatus } from '../core/chat-state';
 import type { PermissionBehavior } from '../core/permission-broker';
+import { isFloorProtectedRequest, type VaultPaths } from '../core/permission-policy';
 import { toolIcon, toolSummary } from '../core/tool-policy';
 import { diffFromToolInput, renderDiff, type DiffInput } from './diff-view';
 
@@ -47,8 +48,14 @@ export interface RenderedPermissionCard {
  * Gating predicate: only ordinary tool permission requests offer "don't ask again".
  * AskUserQuestion must NEVER offer it because questions cannot be meaningfully pre-answered.
  */
-export function canRememberPermission(item: PermissionItem): boolean {
-	return item.toolName !== 'AskUserQuestion';
+export function canRememberPermission(item: PermissionItem, paths?: VaultPaths): boolean {
+	if (item.toolName === 'AskUserQuestion') {
+		return false;
+	}
+	if (isFloorProtectedRequest(item.toolName, item.input, paths)) {
+		return false;
+	}
+	return true;
 }
 
 /**
@@ -89,6 +96,7 @@ export function createPermissionCard(
 	component: Component,
 	item: PermissionItem,
 	actions: PermissionActions,
+	paths?: VaultPaths,
 ): RenderedPermissionCard {
 	const el = parent.createDiv({ cls: 'guki-perm-card' });
 
@@ -106,7 +114,7 @@ export function createPermissionCard(
 
 	let rememberEl: HTMLElement | undefined;
 	let rememberCheckbox: HTMLInputElement | undefined;
-	if (canRememberPermission(item)) {
+	if (canRememberPermission(item, paths)) {
 		rememberEl = actionsEl.createDiv({ cls: 'guki-perm-remember' });
 		const checkboxId = `guki-perm-rem-${item.requestId}`;
 		rememberCheckbox = rememberEl.createEl('input', {

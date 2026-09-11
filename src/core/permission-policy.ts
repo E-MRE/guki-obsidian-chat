@@ -88,20 +88,28 @@ export function normalizePermissionSettings(raw: unknown): PermissionSettings {
 
 			if (entry.category === 'read') {
 				if (typeof entry.path === 'string' && entry.path.length > 0) {
+					const normPath = entry.path.normalize('NFC');
+					if (isFloorProtectedPath(normPath)) {
+						continue;
+					}
 					rememberedDecisions.push({
 						id: entry.id,
 						category: 'read',
-						path: entry.path.normalize('NFC'),
+						path: normPath,
 						description: typeof entry.description === 'string' ? entry.description : undefined,
 						createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : undefined,
 					});
 				}
 			} else if (entry.category === 'write') {
 				if (typeof entry.path === 'string' && entry.path.length > 0 && typeof entry.existedOnGrant === 'boolean') {
+					const normPath = entry.path.normalize('NFC');
+					if (isFloorProtectedPath(normPath)) {
+						continue;
+					}
 					rememberedDecisions.push({
 						id: entry.id,
 						category: 'write',
-						path: entry.path.normalize('NFC'),
+						path: normPath,
 						existedOnGrant: entry.existedOnGrant,
 						description: typeof entry.description === 'string' ? entry.description : undefined,
 						createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : undefined,
@@ -357,6 +365,40 @@ function isDestructiveEdit(toolName: string, input: unknown): boolean {
 	return false;
 }
 
+/**
+ * Tests whether a path targets a floor-protected segment (.obsidian or .git).
+ * Checks both the raw path as given and (if paths resolver is provided) the canonical resolved path.
+ */
+export function isFloorProtectedPath(raw: string, paths?: VaultPaths): boolean {
+	if (raw.normalize('NFC').split(/[/\\]/).some((segment) => PROTECTED_SEGMENTS.has(segment.toLowerCase()))) {
+		return true;
+	}
+	if (paths) {
+		const resolved = paths.resolve(raw);
+		if (resolved !== null) {
+			const canonicalPath = resolved.normalize('NFC');
+			if (canonicalPath.split('/').some((segment) => PROTECTED_SEGMENTS.has(segment.toLowerCase()))) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+export function isFloorProtectedRequest(toolName: unknown, input: unknown, paths?: VaultPaths): boolean {
+	if (typeof toolName !== 'string') {
+		return false;
+	}
+	const pathField = EDIT_TOOLS.get(toolName);
+	if (pathField !== undefined) {
+		const raw = stringField(input, pathField);
+		if (raw !== null) {
+			return isFloorProtectedPath(raw, paths);
+		}
+	}
+	return false;
+}
+
 export function validateEditFloor(
 	input: unknown,
 	pathField: string,
@@ -370,11 +412,7 @@ export function validateEditFloor(
 	if (resolved === null) {
 		return false;
 	}
-	const canonicalPath = resolved.normalize('NFC');
-	return (
-		!raw.normalize('NFC').split(/[/\\]/).some((segment) => PROTECTED_SEGMENTS.has(segment.toLowerCase())) &&
-		!canonicalPath.split('/').some((segment) => PROTECTED_SEGMENTS.has(segment.toLowerCase()))
-	);
+	return !isFloorProtectedPath(raw, paths);
 }
 
 export function evaluateEditCandidate(
@@ -483,10 +521,10 @@ export function buildRememberedDecision(
 		if (resolved === null) {
 			return null;
 		}
-		const canonicalPath = resolved.normalize('NFC');
-		if (canonicalPath.split('/').some((segment) => PROTECTED_SEGMENTS.has(segment.toLowerCase()))) {
+		if (isFloorProtectedPath(raw, paths)) {
 			return null;
 		}
+		const canonicalPath = resolved.normalize('NFC');
 		const existedOnGrant = paths.exists ? paths.exists(resolved) : false;
 		return {
 			category: 'write',
