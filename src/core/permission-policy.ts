@@ -53,11 +53,13 @@ export function containsPath(root: string, resolved: string | null): boolean {
 	if (resolved === null || root.length === 0 || root === '/') {
 		return false;
 	}
-	const normalizedRoot = root.endsWith('/') ? root.slice(0, -1) : root;
-	if (resolved === normalizedRoot) {
+	const normRoot = root.normalize('NFC');
+	const normResolved = resolved.normalize('NFC');
+	const normalizedRoot = normRoot.endsWith('/') ? normRoot.slice(0, -1) : normRoot;
+	if (normResolved === normalizedRoot) {
 		return true;
 	}
-	return resolved.startsWith(`${normalizedRoot}/`);
+	return normResolved.startsWith(`${normalizedRoot}/`);
 }
 
 /** Where each tool keeps its path argument, and whether the tool is usable without one. */
@@ -114,8 +116,8 @@ const NO_SIDE_EFFECT_TOOLS = new Set(['WebSearch', 'TodoWrite', 'Task', 'Agent']
 /** Schemes `WebFetch` may be auto-allowed for. `file://` is a local file read wearing a URL. */
 const FETCHABLE_SCHEMES = ['http://', 'https://'];
 
-/** A path segment that revokes the "git makes it reversible" argument the edit allow rests on. */
-const PROTECTED_SEGMENT = '.git';
+/** Path segments that revoke the "git makes it reversible" argument the edit allow rests on. */
+const PROTECTED_SEGMENTS = new Set(['.git', '.obsidian']);
 
 function field(input: unknown, name: string): unknown {
 	if (typeof input !== 'object' || input === null) {
@@ -235,7 +237,7 @@ function editVerdict(toolName: string, input: unknown, pathField: string, paths:
 		return 'ask';
 	}
 	const resolved = paths.resolve(raw);
-	if (resolved === null || resolved.split('/').includes(PROTECTED_SEGMENT)) {
+	if (resolved === null || resolved.split('/').some((segment) => PROTECTED_SEGMENTS.has(segment.normalize('NFC').toLowerCase()))) {
 		return 'ask';
 	}
 	return 'allow';

@@ -53,6 +53,8 @@
  *     because an auto-allow is invisible: it produces no card, so every `allow` branch needs an
  *     assertion that names it. §N12 is the exception that proves the rule — the one decision the
  *     reader *does* see, and it was being shown wrong.
+ * U.  Phase 7 task 3 round A: permission model security floor (.obsidian protection and
+ *     Unicode path normalisation).
  */
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -5413,6 +5415,56 @@ console.log('P8. MessageList.sync skips PermissionItem to avoid duplicate empty 
 	};
 	list.sync([permItem]);
 	eq('no element rendered for PermissionItem in message list', (list as any).rendered.size, 0);
+}
+
+// --- U. Phase 7 task 3 round A: permission model security floor ----------
+
+/*
+ * Round A of the permission model redesign:
+ * - `.obsidian/` protected segment floor: writes into .obsidian prompt, never auto-allow.
+ * - Unicode path normalisation: composed (NFC) and decomposed (NFD) paths match consistently
+ *   at the boundary comparison (`containsPath`).
+ */
+
+console.log('U1. .obsidian protection: writes into .obsidian prompt, never silently allowed');
+{
+	const pluginJs = join(POLICY_VAULT.root, '.obsidian', 'plugins', 'x', 'main.js');
+	const upperPluginJs = join(POLICY_VAULT.root, '.Obsidian', 'plugins', 'x', 'main.js');
+	const regularNote = join(POLICY_VAULT.root, 'notes', 'regular-task3.md');
+	const obsidianInNameNote = join(POLICY_VAULT.root, 'notes', 'my.obsidian-notes.md');
+	const gitConfig = join(POLICY_VAULT.root, '.git', 'config');
+	const gitHooks = join(POLICY_VAULT.root, '.git', 'hooks', 'pre-commit');
+	const gitInNameNote = join(POLICY_VAULT.root, 'notes', 'git-notes-task3.md');
+
+	// 1. A write to <vault>/.obsidian/plugins/x/main.js is not auto-allowed — it prompts
+	eq('Write into .obsidian/plugins prompts', permissionVerdict('Write', { file_path: pluginJs, content: 'console.log(1)' }, vaultPaths), 'ask');
+	eq('Edit inside .obsidian/plugins prompts', permissionVerdict('Edit', { file_path: pluginJs, old_string: 'a', new_string: 'b' }, vaultPaths), 'ask');
+	eq('Write into .Obsidian (differently-cased) prompts', permissionVerdict('Write', { file_path: upperPluginJs, content: 'console.log(1)' }, vaultPaths), 'ask');
+
+	// 2. A write to an ordinary in-vault note is still auto-allowed (no regression, proof match not over-broad)
+	eq('Write to ordinary in-vault note is silent', permissionVerdict('Write', { file_path: regularNote, content: 'clean note' }, vaultPaths), 'allow');
+
+	// 3. A file whose name merely contains text .obsidian is not caught by segment match
+	eq('note whose name contains .obsidian is silent', permissionVerdict('Write', { file_path: obsidianInNameNote, content: 'notes about obsidian' }, vaultPaths), 'allow');
+
+	// 4. .git protection still behaves exactly as before
+	eq('Write into .git prompts', permissionVerdict('Write', { file_path: gitConfig, content: 'x' }, vaultPaths), 'ask');
+	eq('Edit inside .git prompts', permissionVerdict('Edit', { file_path: gitHooks, old_string: 'a', new_string: 'b' }, vaultPaths), 'ask');
+	eq('note whose name contains git is silent', permissionVerdict('Write', { file_path: gitInNameNote, content: 'x' }, vaultPaths), 'allow');
+}
+
+console.log('U2. Unicode path normalisation: composed and decomposed paths match in containsPath');
+{
+	// 5. Two spellings of the same path (composed and decomposed) are judged equal by the comparison normalised
+	const nfcRoot = '/vault/caf\u00e9';
+	const nfdRoot = '/vault/cafe\u0301';
+	const nfcChild = '/vault/caf\u00e9/notes/meeting.md';
+	const nfdChild = '/vault/cafe\u0301/notes/meeting.md';
+
+	eq('NFC child inside NFD root', containsPath(nfdRoot, nfcChild), true);
+	eq('NFD child inside NFC root', containsPath(nfcRoot, nfdChild), true);
+	eq('NFC root equals NFD root', containsPath(nfdRoot, nfcRoot), true);
+	eq('NFD root equals NFC root', containsPath(nfcRoot, nfdRoot), true);
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
