@@ -545,9 +545,10 @@ export class MessageList {
 		if (item.toolName === 'AskUserQuestion') {
 			if (item.askQuestions && item.askQuestions.length > 0) {
 				if (item.status === 'allowed') {
-					const parts = item.askQuestions.map((q) => {
-						const qId = q.id || q.question;
-						const ans = item.answers ? item.answers[qId] : undefined;
+					const parts = item.askQuestions.map((q, idx) => {
+						const ans = item.answers
+							? item.answers[String(idx)] ?? (q.id ? item.answers[q.id] : undefined) ?? item.answers[q.question]
+							: undefined;
 						const ansStr = Array.isArray(ans) ? ans.join(', ') : typeof ans === 'string' ? ans : '';
 						return `${q.question} → ${ansStr}`;
 					});
@@ -607,8 +608,9 @@ export class MessageList {
 					qTitleEl.setText(q.header ? `${q.header}: ${qLabel}` : qLabel);
 
 					const optionsListEl = qEl.createDiv({ cls: 'guki-perm-summary-qoptions' });
-					const qId = q.id || q.question;
-					const answerVal = item.answers ? item.answers[qId] : undefined;
+					const answerVal = item.answers
+						? item.answers[String(idx)] ?? (q.id ? item.answers[q.id] : undefined) ?? item.answers[q.question]
+						: undefined;
 					const chosenArr = Array.isArray(answerVal)
 						? answerVal
 						: typeof answerVal === 'string'
@@ -636,7 +638,8 @@ export class MessageList {
 							otherEl.addClass('is-selected');
 							otherEl.setText(`✓ Other: "${customAnswers.join(', ')}"`);
 						} else {
-							otherEl.setText('○ Other');
+							const bullet = '○ ';
+							otherEl.setText(`${bullet}Other`);
 						}
 					}
 

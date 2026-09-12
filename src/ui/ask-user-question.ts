@@ -78,7 +78,7 @@ export class AskUserQuestionInline {
 		for (let i = 0; i < this.questions.length; i++) {
 			const q = this.questions[i];
 			if (!q) continue;
-			const isAnswered = this.isQuestionAnswered(q);
+			const isAnswered = this.isQuestionAnswered(q, i);
 			
 			const tab = this.tabBarEl.createDiv({ cls: 'guki-ask-tab' });
 			if (i === this.currentTabIndex) {
@@ -101,7 +101,7 @@ export class AskUserQuestionInline {
 			cls: 'guki-ask-tab-submit',
 			text: 'Submit'
 		});
-		const allAnswered = this.questions.every(q => this.isQuestionAnswered(q));
+		const allAnswered = this.questions.every((q, idx) => this.isQuestionAnswered(q, idx));
 		if (allAnswered) {
 			submitBtn.addClass('guki-ask-answered');
 		}
@@ -110,7 +110,7 @@ export class AskUserQuestionInline {
 			if (allAnswered) {
 				this.submit();
 			} else {
-				const firstUnanswered = this.questions.findIndex(q => !this.isQuestionAnswered(q));
+				const firstUnanswered = this.questions.findIndex((q, idx) => !this.isQuestionAnswered(q, idx));
 				if (firstUnanswered !== -1) {
 					this.currentTabIndex = firstUnanswered;
 					this.focusedItemIndex = 0;
@@ -121,12 +121,12 @@ export class AskUserQuestionInline {
 		});
 	}
 	
-	private getQuestionId(q: AskQuestionDef): string {
-		return q.id || q.question;
+	private getQuestionId(_q: AskQuestionDef, index: number): string {
+		return String(index);
 	}
 	
-	private isQuestionAnswered(q: AskQuestionDef): boolean {
-		const qId = this.getQuestionId(q);
+	private isQuestionAnswered(q: AskQuestionDef, index: number): boolean {
+		const qId = this.getQuestionId(q, index);
 		const sels = this.selections[qId] || [];
 		const custom = this.customTexts[qId];
 		return sels.length > 0 || (custom !== undefined && custom.trim().length > 0);
@@ -144,7 +144,7 @@ export class AskUserQuestionInline {
 		
 		const q = this.questions[this.currentTabIndex];
 		if (!q) return;
-		const qId = this.getQuestionId(q);
+		const qId = this.getQuestionId(q, this.currentTabIndex);
 		
 		this.contentEl.createDiv({ cls: 'guki-ask-question', text: q.question });
 		
@@ -176,7 +176,7 @@ export class AskUserQuestionInline {
 				const currentIndex = optionIndex;
 				itemEl.addEventListener('click', () => {
 					this.focusedItemIndex = currentIndex;
-					this.toggleOption(q, opt.value);
+					this.toggleOption(q, this.currentTabIndex, opt.value);
 				});
 				
 				optionIndex++;
@@ -216,7 +216,7 @@ export class AskUserQuestionInline {
 				});
 				this.renderTabBar();
 				if (actionBtn) {
-					actionBtn.disabled = !this.isQuestionAnswered(q);
+					actionBtn.disabled = !this.isQuestionAnswered(q, this.currentTabIndex);
 				}
 			}
 		};
@@ -257,20 +257,20 @@ export class AskUserQuestionInline {
 				otherEl.removeClass('guki-ask-selected');
 			}
 			if (actionBtn) {
-				actionBtn.disabled = !this.isQuestionAnswered(q);
+				actionBtn.disabled = !this.isQuestionAnswered(q, this.currentTabIndex);
 			}
 		});
 
 		const actionsEl = this.contentEl.createDiv({ cls: 'guki-ask-actions' });
 		const isLastQuestion = this.currentTabIndex === this.questions.length - 1;
-		const isAnswered = this.isQuestionAnswered(q);
+		const isAnswered = this.isQuestionAnswered(q, this.currentTabIndex);
 		actionBtn = actionsEl.createEl('button', {
 			cls: 'guki-ask-submit-btn',
 			text: isLastQuestion ? 'Submit' : 'Next'
 		});
 		actionBtn.disabled = !isAnswered;
 		actionBtn.addEventListener('click', () => {
-			if (!this.isQuestionAnswered(q)) return;
+			if (!this.isQuestionAnswered(q, this.currentTabIndex)) return;
 			if (isLastQuestion) {
 				this.submit();
 			} else {
@@ -282,8 +282,8 @@ export class AskUserQuestionInline {
 		});
 	}
 	
-	private toggleOption(q: AskQuestionDef, value: string) {
-		const qId = this.getQuestionId(q);
+	private toggleOption(q: AskQuestionDef, index: number, value: string) {
+		const qId = this.getQuestionId(q, index);
 		let sels = this.selections[qId] || [];
 		
 		if (q.multiSelect) {
@@ -328,13 +328,13 @@ export class AskUserQuestionInline {
 				e.preventDefault();
 				const q = this.questions[this.currentTabIndex];
 				if (!q) return;
-				const qId = this.getQuestionId(q);
+				const qId = this.getQuestionId(q, this.currentTabIndex);
 				const custom = (this.customTexts[qId] || '').trim();
 				// Fail-closed: empty custom answer is not submittable
 				if (custom.length === 0) {
 					return;
 				}
-				if (!this.isQuestionAnswered(q)) {
+				if (!this.isQuestionAnswered(q, this.currentTabIndex)) {
 					return;
 				}
 				(e.target as HTMLElement).blur();
@@ -407,11 +407,11 @@ export class AskUserQuestionInline {
 			const isLastQuestion = this.currentTabIndex === this.questions.length - 1;
 			if (this.focusedItemIndex >= 0 && this.focusedItemIndex < optCount) {
 				const opt = q.options![this.focusedItemIndex]!;
-				this.toggleOption(q, opt.value);
+				this.toggleOption(q, this.currentTabIndex, opt.value);
 				return;
 			}
 			if (this.focusedItemIndex === optCount) {
-				const qId = this.getQuestionId(q);
+				const qId = this.getQuestionId(q, this.currentTabIndex);
 				if (!q.multiSelect) {
 					this.selections[qId] = [];
 					this.renderTabBar();
@@ -420,34 +420,41 @@ export class AskUserQuestionInline {
 				inputEl?.focus();
 				return;
 			}
-			if (isLastQuestion && this.isQuestionAnswered(q)) {
+			if (isLastQuestion && this.isQuestionAnswered(q, this.currentTabIndex)) {
 				this.submit();
 			}
 		}
 	}
 	
 	private submit() {
-		const allAnswered = this.questions.every(q => this.isQuestionAnswered(q));
+		const allAnswered = this.questions.every((q, idx) => this.isQuestionAnswered(q, idx));
 		if (!allAnswered) return;
 		
 		const finalAnswers: Record<string, string | string[]> = {};
-		for (const q of this.questions) {
-			const qId = this.getQuestionId(q);
+		for (let i = 0; i < this.questions.length; i++) {
+			const q = this.questions[i];
+			if (!q) continue;
+			const qId = this.getQuestionId(q, i);
 			const sels = this.selections[qId] || [];
 			const custom = (this.customTexts[qId] || '').trim();
 			
+			let answer: string | string[];
 			if (q.multiSelect) {
 				const ans = [...sels];
 				if (custom.length > 0) ans.push(custom);
-				finalAnswers[qId] = ans;
+				answer = ans;
 			} else {
 				if (custom.length > 0) {
-					finalAnswers[qId] = custom;
+					answer = custom;
 				} else if (sels.length > 0) {
-					finalAnswers[qId] = sels[0]!;
+					answer = sels[0]!;
 				} else {
 					return; // Fail-closed
 				}
+			}
+			finalAnswers[qId] = answer;
+			if (q.id && !finalAnswers[q.id]) {
+				finalAnswers[q.id] = answer;
 			}
 		}
 		

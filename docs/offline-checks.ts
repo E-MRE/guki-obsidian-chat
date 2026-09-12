@@ -7238,16 +7238,33 @@ console.log('AB4. AskUserQuestion: Multi-question and "Other" free-text selectio
 		},
 	);
 
-	// Select option 'Edit' on Tab 1 (currentTabIndex = 0)
-	(askCard as any).selections['action'] = ['Edit'];
+	// Reader clicks 'Edit' option on Tab 1
+	const tab1Items = cardContainer.querySelectorAll('.guki-ask-item');
+	const editOpt = tab1Items.find((el: any) => el.text.includes('Edit'));
+	check('AB4.1a: Edit option element exists on Tab 1', editOpt !== undefined);
+	editOpt.click();
 
-	// Move to Tab 2
-	(askCard as any).currentTabIndex = 1;
-	(askCard as any).selections['destination'] = ['Vault root'];
-	(askCard as any).customTexts['destination'] = 'CustomArchiveDir';
+	// Tab bar rendered tabs; verify Tab 2 navigation
+	const tabs = cardContainer.querySelectorAll('.guki-ask-tab');
+	check('AB4.1b: tab bar rendered tab buttons', tabs.length === 2);
+	tabs[1].click();
 
-	// Submit from the UI button
-	(askCard as any).submit();
+	// Reader clicks 'Vault root' option on Tab 2
+	const tab2Items = cardContainer.querySelectorAll('.guki-ask-item');
+	const vaultOpt = tab2Items.find((el: any) => el.text.includes('Vault root'));
+	check('AB4.1c: Vault root option exists on Tab 2', vaultOpt !== undefined);
+	vaultOpt.click();
+
+	// Reader enters custom free text into 'Other' input
+	const inputEl = cardContainer.querySelector('input');
+	check('AB4.1d: Other input element exists on Tab 2', inputEl !== null);
+	inputEl.value = 'CustomArchiveDir';
+	inputEl.listeners['input']?.({ target: inputEl });
+
+	// Reader clicks Submit button
+	const submitBtn = cardContainer.querySelector('.guki-ask-submit-btn');
+	check('AB4.1e: submit button exists on Tab 2', submitBtn !== null);
+	submitBtn.click();
 
 	eq('AB4.2: item status is allowed', item.status, 'allowed');
 	check('AB4.3: item captured answers on state object', (item as any).answers !== undefined);
@@ -7318,7 +7335,7 @@ console.log('AB5. AskUserQuestion: Deny path via Escape leaves denied summary');
 	const cardContainer = new FakeElement() as any;
 	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
 
-	const askCard = new AskUserQuestionInline(
+	new AskUserQuestionInline(
 		cardContainer,
 		dummyComp,
 		item,
@@ -7333,8 +7350,9 @@ console.log('AB5. AskUserQuestion: Deny path via Escape leaves denied summary');
 		},
 	);
 
-	// User presses Escape
-	(askCard as any).el.listeners['keydown']({ key: 'Escape', preventDefault: () => {} });
+	// User presses Escape on card DOM element
+	const inlineEl = cardContainer.querySelector('.guki-ask-question-inline');
+	inlineEl.listeners['keydown']({ key: 'Escape', preventDefault: () => {} });
 	eq('AB5.1: item status is denied', item.status, 'denied');
 
 	const listWrapper = new FakeElement() as any;
@@ -7420,6 +7438,104 @@ console.log('AB7. Summary row preserves chronological conversation position');
 	check('AB7.1: all three items rendered in scroll container', userIdx !== -1 && permIdx !== -1 && asstIdx !== -1);
 	check('AB7.2: permission summary is positioned in order between user and assistant',
 		userIdx < permIdx && permIdx < asstIdx, `userIdx=${userIdx}, permIdx=${permIdx}, asstIdx=${asstIdx}`);
+}
+
+console.log('AB8. AskUserQuestion: Two questions with identical text and no id preserve separate answers');
+{
+	const state = new ChatState();
+	const readPaths: string[] = [];
+	const broker = new PermissionBroker(brokerApp(readPaths), state, POLICY_VAULT.root);
+	const fakeSocket = { write: () => {} };
+
+	const reqId = 'req-ab8';
+	const input = {
+		questions: [
+			{
+				question: 'Select mode',
+				options: [
+					{ label: 'Alpha', value: 'Alpha' },
+					{ label: 'Beta', value: 'Beta' },
+				],
+				multiSelect: false,
+			},
+			{
+				question: 'Select mode',
+				options: [
+					{ label: 'Alpha', value: 'Alpha' },
+					{ label: 'Beta', value: 'Beta' },
+				],
+				multiSelect: false,
+			},
+		],
+	};
+
+	(broker as any).handleRequest(fakeSocket, {
+		id: reqId,
+		tool_name: 'AskUserQuestion',
+		input,
+	});
+
+	const item = state.items.find((i) => i.kind === 'permission' && (i as PermissionItem).requestId === reqId) as PermissionItem;
+	check('AB8.1: item added as pending AskUserQuestion', item !== undefined && item.toolName === 'AskUserQuestion');
+
+	const cardContainer = new FakeElement() as any;
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
+
+	new AskUserQuestionInline(
+		cardContainer,
+		dummyComp,
+		item,
+		(answers) => {
+			const decision = decideAskUserQuestion(item.input, answers);
+			broker.decide(
+				item.requestId,
+				decision.behavior,
+				undefined,
+				decision.updatedInput !== undefined ? { updatedInput: decision.updatedInput } : undefined,
+			);
+		},
+	);
+
+	// Question 1: Reader clicks 'Alpha'
+	const tab1Opts = cardContainer.querySelectorAll('.guki-ask-item');
+	const alphaOpt = tab1Opts.find((el: any) => el.text.includes('Alpha'));
+	check('AB8.2: Alpha option exists on Question 1', alphaOpt !== undefined);
+	alphaOpt.click();
+
+	// Single select auto-advances to Question 2 (Tab 2)
+	// Question 2: Reader clicks 'Beta'
+	const tab2Opts = cardContainer.querySelectorAll('.guki-ask-item');
+	const betaOpt = tab2Opts.find((el: any) => el.text.includes('Beta'));
+	check('AB8.3: Beta option exists on Question 2', betaOpt !== undefined);
+	betaOpt.click();
+
+	// Single-select on last question automatically submits
+	eq('AB8.4: item status transitions to allowed', item.status, 'allowed');
+	check('AB8.5: item captured answers on state object', item.answers !== undefined);
+
+	// Both distinct answers must be preserved in item.answers
+	eq('AB8.6: question 1 answer is Alpha', item.answers?.['0'], 'Alpha');
+	eq('AB8.7: question 2 answer is Beta', item.answers?.['1'], 'Beta');
+
+	// Sync to message list
+	const listWrapper = new FakeElement() as any;
+	const list = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+	list.sync(state.items);
+
+	const summaryContainer = listWrapper.querySelector('.guki-message-permission');
+	const headerEl = summaryContainer?.querySelector('.guki-perm-summary-header');
+	check('AB8.8: collapsed header contains question 1 answer Alpha', Boolean(headerEl?.text?.includes('Alpha')));
+	check('AB8.9: collapsed header contains question 2 answer Beta', Boolean(headerEl?.text?.includes('Beta')));
+
+	const contentEl = summaryContainer?.querySelector('.guki-perm-summary-content');
+	headerEl?.click();
+
+	const questionsRendered = contentEl?.querySelectorAll('.guki-perm-summary-question');
+	check('AB8.10: renders two separate question sections in detail', questionsRendered?.length === 2);
+	check('AB8.11: first question detail marks Alpha as chosen and Beta as unchosen',
+		Boolean(questionsRendered?.[0]?.text?.includes('✓ Alpha') && questionsRendered?.[0]?.text?.includes('○ Beta')));
+	check('AB8.12: second question detail marks Beta as chosen and Alpha as unchosen',
+		Boolean(questionsRendered?.[1]?.text?.includes('✓ Beta') && questionsRendered?.[1]?.text?.includes('○ Alpha')));
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
