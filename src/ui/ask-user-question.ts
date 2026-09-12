@@ -297,18 +297,19 @@ export class AskUserQuestionInline {
 			this.selections[qId] = [value];
 			this.customTexts[qId] = '';
 			
-			// Single select: advances if more questions, submits if last question
+			// Single select: advances if more questions
 			if (this.currentTabIndex < this.questions.length - 1) {
 				this.currentTabIndex++;
 				this.focusedItemIndex = 0;
-			} else {
-				this.submit();
-				return;
 			}
 		}
 		
 		this.renderTabBar();
 		this.renderTabContent();
+
+		if (!q.multiSelect && index === this.questions.length - 1) {
+			this.submit();
+		}
 	}
 	
 	private onKeyDown(e: KeyboardEvent) {

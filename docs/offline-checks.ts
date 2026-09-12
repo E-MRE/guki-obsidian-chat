@@ -7538,6 +7538,186 @@ console.log('AB8. AskUserQuestion: Two questions with identical text and no id p
 		Boolean(questionsRendered?.[1]?.text?.includes('✓ Beta') && questionsRendered?.[1]?.text?.includes('○ Alpha')));
 }
 
+console.log('AB9. AskUserQuestion: Selection state, tab switching, and auto-submit on last tab');
+{
+	// 1. Defect-proving check: Answering last tab (Tab 2) before earlier tab (Tab 1)
+	const state = new ChatState();
+	const readPaths: string[] = [];
+	const broker = new PermissionBroker(brokerApp(readPaths), state, POLICY_VAULT.root);
+	const fakeSocket = { write: () => {} };
+
+	const reqId = 'req-ab9-defect';
+	(broker as any).handleRequest(fakeSocket, {
+		id: reqId,
+		tool_name: 'AskUserQuestion',
+		input: {
+			questions: [
+				{
+					question: 'Question 1',
+					options: [{ label: 'Q1-A' }, { label: 'Q1-B' }],
+					multiSelect: false,
+				},
+				{
+					question: 'Question 2',
+					options: [{ label: 'Q2-X' }, { label: 'Q2-Y' }],
+					multiSelect: false,
+				},
+			],
+		},
+	});
+
+	const item = state.items.find((i) => i.kind === 'permission' && (i as PermissionItem).requestId === reqId) as PermissionItem;
+	const cardContainer = new FakeElement() as any;
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
+	let decisionSubmitted: any = null;
+
+	new AskUserQuestionInline(
+		cardContainer,
+		dummyComp,
+		item,
+		(answers) => {
+			decisionSubmitted = answers;
+			if (answers) {
+				const decision = decideAskUserQuestion(item.input, answers);
+				broker.decide(
+					item.requestId,
+					decision.behavior,
+					undefined,
+					decision.updatedInput !== undefined ? { updatedInput: decision.updatedInput } : undefined,
+				);
+			}
+		},
+	);
+
+	// Reader navigates directly to Tab 2 before answering Tab 1
+	const tabs = cardContainer.querySelectorAll('.guki-ask-tab');
+	check('AB9.1: Tab bar rendered 2 tabs', tabs.length === 2);
+	tabs[1]?.click();
+
+	// Reader clicks Option Q2-X on Tab 2
+	const tab2Items = cardContainer.querySelectorAll('.guki-ask-item');
+	const optX = tab2Items.find((el: any) => el.text.includes('Q2-X'));
+	check('AB9.2: Option Q2-X element rendered on Tab 2', optX !== undefined);
+	optX?.click();
+
+	// Card must not have submitted yet since Tab 1 is unanswered
+	check('AB9.3: Card does not falsely submit with Tab 1 unanswered', decisionSubmitted === null && item.status === 'pending');
+
+	// DEFECT ASSERTIONS: Option must be highlighted, tab button marked answered, action button enabled
+	const tab2ItemsAfterClick = cardContainer.querySelectorAll('.guki-ask-item');
+	const selectedOptX = tab2ItemsAfterClick.find((el: any) => el.text.includes('Q2-X'));
+	check(
+		'AB9.4: Clicked option Q2-X has guki-ask-selected class in DOM',
+		Boolean(selectedOptX?.hasClass('guki-ask-selected')),
+		'Option was clicked on Tab 2 but guki-ask-selected was not applied because toggleOption returned early without re-rendering',
+	);
+	const updatedTabs = cardContainer.querySelectorAll('.guki-ask-tab');
+	check(
+		'AB9.5: Tab 2 tab button has guki-ask-answered class in DOM',
+		Boolean(updatedTabs[1]?.hasClass('guki-ask-answered')),
+		'Tab 2 was answered by reader click but guki-ask-answered was not applied to tab header',
+	);
+	const tab2SubmitBtn = cardContainer.querySelector('.guki-ask-submit-btn');
+	check(
+		'AB9.6: Tab 2 action button is enabled after answering',
+		Boolean(tab2SubmitBtn && tab2SubmitBtn.disabled === false),
+		'Tab 2 action button remained disabled after reader clicked option',
+	);
+
+	// Complete the flow: reader goes to Tab 1, selects Q1-A, then submits
+	updatedTabs[0]?.click();
+	const tab1Items = cardContainer.querySelectorAll('.guki-ask-item');
+	const optA = tab1Items.find((el: any) => el.text.includes('Q1-A'));
+	check('AB9.7: Option Q1-A element rendered on Tab 1', optA !== undefined);
+	optA?.click();
+
+	// After answering Tab 1, single-select advances to Tab 2 where both tabs are now answered
+	const tabsAfterA = cardContainer.querySelectorAll('.guki-ask-tab');
+	check('AB9.8: Tab 1 marked answered', Boolean(tabsAfterA[0]?.hasClass('guki-ask-answered')));
+	const finalSubmitBtn = cardContainer.querySelector('.guki-ask-submit-btn');
+	check('AB9.9: Submit button enabled when all questions answered', Boolean(finalSubmitBtn && finalSubmitBtn.disabled === false));
+	finalSubmitBtn?.click();
+
+	eq('AB9.10: item status allowed after full submission', item.status, 'allowed');
+	check('AB9.11: answers captured on state object', item.answers !== undefined);
+	eq('AB9.12: Question 1 answer is Q1-A', item.answers?.['0'], 'Q1-A');
+	eq('AB9.13: Question 2 answer is Q2-X', item.answers?.['1'], 'Q2-X');
+
+	// 2. Mirrored cases:
+	// Case A: Clicking an option on an EARLIER tab while later tabs are unanswered
+	// Case B: Clicking on the last tab when all others ARE answered (auto-submits)
+	const mirrorState = new ChatState();
+	const mirrorBroker = new PermissionBroker(brokerApp(readPaths), mirrorState, POLICY_VAULT.root);
+	const mirrorReqId = 'req-ab9-mirror';
+	(mirrorBroker as any).handleRequest(fakeSocket, {
+		id: mirrorReqId,
+		tool_name: 'AskUserQuestion',
+		input: {
+			questions: [
+				{
+					question: 'First Question',
+					options: [{ label: 'First-1' }, { label: 'First-2' }],
+					multiSelect: false,
+				},
+				{
+					question: 'Second Question',
+					options: [{ label: 'Second-1' }, { label: 'Second-2' }],
+					multiSelect: false,
+				},
+			],
+		},
+	});
+
+	const mirrorItem = mirrorState.items.find((i) => i.kind === 'permission' && (i as PermissionItem).requestId === mirrorReqId) as PermissionItem;
+	const mirrorCardContainer = new FakeElement() as any;
+	let mirrorSubmitted: any = null;
+
+	new AskUserQuestionInline(
+		mirrorCardContainer,
+		dummyComp,
+		mirrorItem,
+		(answers) => {
+			mirrorSubmitted = answers;
+			if (answers) {
+				const decision = decideAskUserQuestion(mirrorItem.input, answers);
+				mirrorBroker.decide(
+					mirrorItem.requestId,
+					decision.behavior,
+					undefined,
+					decision.updatedInput !== undefined ? { updatedInput: decision.updatedInput } : undefined,
+				);
+			}
+		},
+	);
+
+	const mirrorTab1Items = mirrorCardContainer.querySelectorAll('.guki-ask-item');
+	const firstOpt = mirrorTab1Items.find((el: any) => el.text.includes('First-1'));
+	check('AB9.14: First-1 option exists on Tab 1', firstOpt !== undefined);
+
+	// Reader clicks First-1 on Tab 1 (EARLIER tab, later tab unanswered)
+	firstOpt?.click();
+
+	const postClickTabs = mirrorCardContainer.querySelectorAll('.guki-ask-tab');
+	// Should mark Tab 1 answered, advance to Tab 2, but NOT submit
+	check('AB9.15: Tab 1 marked answered after option click', Boolean(postClickTabs[0]?.hasClass('guki-ask-answered')));
+	check('AB9.16: auto-advances to Tab 2', Boolean(postClickTabs[1]?.hasClass('guki-ask-active')));
+	check('AB9.17: card does not submit while later tabs are unanswered', mirrorSubmitted === null && mirrorItem.status === 'pending');
+
+	// Now reader is on Tab 2 (the LAST tab) and Tab 1 IS answered
+	const mirrorTab2Items = mirrorCardContainer.querySelectorAll('.guki-ask-item');
+	const secondOpt = mirrorTab2Items.find((el: any) => el.text.includes('Second-1'));
+	check('AB9.18: Second-1 option exists on Tab 2', secondOpt !== undefined);
+
+	// Reader clicks Second-1 on Tab 2 (all others ARE answered)
+	secondOpt?.click();
+
+	// Must auto-submit as it does today!
+	check('AB9.19: clicking last tab when all others are answered auto-submits', mirrorSubmitted !== null);
+	eq('AB9.20: mirror item status is allowed', mirrorItem.status, 'allowed');
+	eq('AB9.21: question 1 answer captured', mirrorItem.answers?.['0'], 'First-1');
+	eq('AB9.22: question 2 answer captured', mirrorItem.answers?.['1'], 'Second-1');
+}
+
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
 
