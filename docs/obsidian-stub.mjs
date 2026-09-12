@@ -37,7 +37,11 @@ export function setIcon() {}
 export class ItemView {}
 export class Notice {}
 export class WorkspaceLeaf {}
-export class MarkdownRenderer {}
+export class MarkdownRenderer {
+	static async render(_app, markdown, el) {
+		if (el?.setText) el.setText(markdown);
+	}
+}
 
 // Phase 7 task 3 round C: `settings-tab.ts` defines `GukiSettingTab extends PluginSettingTab`
 // and instantiates `new Setting(containerEl)`. Stubs allow offline checks to import pure helpers.

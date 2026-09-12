@@ -7409,35 +7409,67 @@ console.log('AB7. Summary row preserves chronological conversation position');
 	// 1. User message
 	state.addUserMessage('Please run the test suite');
 
-	// 2. Permission request
+	// 2. Assistant turn begins with tool call block
+	const asst = state.addAssistantMessage();
+	const toolUseId = 'toolu-ab7';
+	asst.blocks.set(0, {
+		index: 0,
+		kind: 'tool_use',
+		text: '',
+		final: true,
+		toolUseId,
+		toolName: 'Bash',
+		toolInput: { command: 'npm test', cwd: POLICY_VAULT.root },
+		toolPending: true,
+	});
+
+	// 3. Permission request arrives mid-turn with matching toolUseId
 	const reqId = 'req-ab7';
 	(broker as any).handleRequest(fakeSocket, {
 		id: reqId,
 		tool_name: 'Bash',
+		tool_use_id: toolUseId,
 		input: { command: 'npm test', cwd: POLICY_VAULT.root },
 	});
 
-	// 3. Assistant message following it
-	state.addAssistantMessage();
-
-	// While pending, sync: permItem is skipped, user and assistant are rendered
 	const listWrapper = new FakeElement() as any;
 	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
 	const list = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
 	list.sync(state.items);
 
-	// Now resolve permission
+	// 4. Reader resolves request
 	broker.decide(reqId, 'allow');
+
+	// 5. The reply continues in the same turn
+	asst.blocks.set(1, {
+		index: 1,
+		kind: 'text',
+		text: 'All tests passed.',
+		final: true,
+	});
 	list.sync(state.items);
 
+	const summaryContainer = listWrapper.querySelector('.guki-message-permission') ?? listWrapper.querySelector('.guki-perm-summary-block');
+	const replyEl = listWrapper.querySelector('.guki-block-text');
 	const scrollEl = (list as any).scrollEl as FakeElement;
-	const userIdx = scrollEl.children.findIndex((c) => c.classList.has('guki-message-user'));
-	const permIdx = scrollEl.children.findIndex((c) => c.classList.has('guki-message-permission'));
-	const asstIdx = scrollEl.children.findIndex((c) => c.classList.has('guki-message-assistant'));
 
-	check('AB7.1: all three items rendered in scroll container', userIdx !== -1 && permIdx !== -1 && asstIdx !== -1);
-	check('AB7.2: permission summary is positioned in order between user and assistant',
-		userIdx < permIdx && permIdx < asstIdx, `userIdx=${userIdx}, permIdx=${permIdx}, asstIdx=${asstIdx}`);
+	function isBeforeInDom(root: any, a: any, b: any): boolean {
+		const order: any[] = [];
+		const walk = (n: any) => {
+			order.push(n);
+			for (const child of n.children || []) walk(child);
+		};
+		walk(root);
+		const idxA = order.indexOf(a);
+		const idxB = order.indexOf(b);
+		return idxA !== -1 && idxB !== -1 && idxA < idxB;
+	}
+
+	check('AB7.1: summary element and reply element are both rendered', summaryContainer !== null && replyEl !== null);
+	check('AB7.2: summary element appears before the model reply in DOM order',
+		isBeforeInDom(listWrapper, summaryContainer, replyEl));
+	check('AB7.3: summary element is not pinned to the bottom of the transcript',
+		!scrollEl.children[scrollEl.children.length - 1]?.classList.has('guki-message-permission'));
 }
 
 console.log('AB8. AskUserQuestion: Two questions with identical text and no id preserve separate answers');

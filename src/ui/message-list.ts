@@ -127,16 +127,32 @@ export class MessageList {
 		const seen = new Set<string>();
 		let changed = false;
 
-		for (const item of items) {
-			// Permission cards mount in the composer slot while pending.
-			// Resolved requests leave a summary row in the transcript.
-			if (item.kind === 'permission' && item.status === 'pending') {
-				continue;
-			}
+		// Process non-permission items first so that assistant messages and their blocks
+		// exist in this.rendered before attaching permission summaries to tool blocks.
+		const regularItems = items.filter((it) => it.kind !== 'permission');
+		const permissionItems = items.filter((it) => it.kind === 'permission');
+
+		for (const item of regularItems) {
 			seen.add(item.id);
 			const existing = this.rendered.get(item.id);
 			const entry = existing ?? this.createItem(item);
 			if (!existing) {
+				this.placeItemInOrder(item, entry.el, items);
+			}
+			changed = this.updateItem(item, entry) || !existing || changed;
+		}
+
+		for (const item of permissionItems) {
+			// Permission cards mount in the composer slot while pending.
+			// Resolved requests leave a summary row in the transcript.
+			if (item.status === 'pending') {
+				continue;
+			}
+			seen.add(item.id);
+			const existing = this.rendered.get(item.id);
+			const toolBlockEl = this.findToolBlock(items, item.toolUseId);
+			const entry = existing ?? this.createItem(item, toolBlockEl ?? this.scrollEl);
+			if (!existing && !toolBlockEl) {
 				this.placeItemInOrder(item, entry.el, items);
 			}
 			changed = this.updateItem(item, entry) || !existing || changed;
@@ -158,8 +174,29 @@ export class MessageList {
 		this.updateJumpButton();
 	}
 
-	private createItem(item: ChatItem): RenderedItem {
-		const el = this.scrollEl.createDiv({ cls: `guki-message guki-message-${item.kind}` });
+	private findToolBlock(items: readonly ChatItem[], toolUseId: string | undefined): HTMLElement | null {
+		if (!toolUseId) {
+			return null;
+		}
+		for (const item of items) {
+			if (item.kind !== 'assistant') {
+				continue;
+			}
+			for (const [index, block] of item.blocks) {
+				if (block.toolUseId === toolUseId) {
+					const asstEntry = this.rendered.get(item.id);
+					const blockEntry = asstEntry?.blocks.get(index);
+					if (blockEntry) {
+						return blockEntry.el;
+					}
+				}
+			}
+		}
+		return null;
+	}
+
+	private createItem(item: ChatItem, parentEl: HTMLElement = this.scrollEl): RenderedItem {
+		const el = parentEl.createDiv({ cls: `guki-message guki-message-${item.kind}` });
 		const bodyEl = el.createDiv({ cls: 'guki-message-body' });
 		// One row, not two stacked elements (task 8 follow-up, ask 2): the copy button and the meta
 		// pill are row siblings inside this wrapper, copy button first so it lands to the pill's
