@@ -25,10 +25,12 @@ import {
 	type UserItem,
 } from '../core/chat-state';
 import { renderChatMarkdown } from './markdown';
-import type {
-	PermissionActions,
-	RenderedPermissionCard,
+import {
+	statusText,
+	type PermissionActions,
+	type RenderedPermissionCard,
 } from './permission-card';
+import { toolSummary } from '../core/tool-policy';
 import { createToolCard, updateToolCard, type RenderedToolCard } from './tool-card';
 
 /** Treat the view as "at the bottom" within this many pixels, so new content keeps following. */
@@ -63,6 +65,8 @@ interface RenderedItem {
 	blocks: Map<number, RenderedBlock>;
 	/** Permission items only. Holds the buttons, so it is updated in place, never rebuilt. */
 	permissionCard?: RenderedPermissionCard;
+	/** Resolved permission items: tracks expansion of the summary row. */
+	permExpanded?: boolean;
 	/**
 	 * User items that carried pasted images. Its presence is what says they have been rendered —
 	 * a `UserItem` never changes after it is created, so there is nothing to re-sync.
@@ -124,13 +128,17 @@ export class MessageList {
 		let changed = false;
 
 		for (const item of items) {
-			// Permission cards mount in the composer slot; tool cards already render in the assistant bubble.
-			if (item.kind === 'permission') {
+			// Permission cards mount in the composer slot while pending.
+			// Resolved requests leave a summary row in the transcript.
+			if (item.kind === 'permission' && item.status === 'pending') {
 				continue;
 			}
 			seen.add(item.id);
 			const existing = this.rendered.get(item.id);
 			const entry = existing ?? this.createItem(item);
+			if (!existing) {
+				this.placeItemInOrder(item, entry.el, items);
+			}
 			changed = this.updateItem(item, entry) || !existing || changed;
 		}
 
@@ -180,6 +188,20 @@ export class MessageList {
 
 		this.rendered.set(item.id, entry);
 		return entry;
+	}
+
+	private placeItemInOrder(item: ChatItem, el: HTMLElement, items: readonly ChatItem[]): void {
+		const idx = items.findIndex((it) => it.id === item.id);
+		if (idx === -1) {
+			return;
+		}
+		for (let i = idx + 1; i < items.length; i++) {
+			const next = this.rendered.get(items[i]!.id);
+			if (next) {
+				this.scrollEl.insertBefore(el, next.el);
+				return;
+			}
+		}
 	}
 
 	/**
@@ -491,22 +513,173 @@ export class MessageList {
 	// --- permission requests -------------------------------------------------
 
 	/**
-	 * The card is created on first sight and only ever updated after that: rebuilding it would take
-	 * the buttons out from under the pointer, and `createPermissionCard` binds the click handlers to
-	 * the request id the card was created for.
+	 * Renders a resolved permission summary row in the transcript.
+	 * While pending, the card is in the composer slot.
+	 * Once resolved (allowed, denied, cancelled), it renders a one-line summary that expands on click.
 	 */
 	private updatePermission(item: PermissionItem, entry: RenderedItem): boolean {
 		if (item.status === 'pending') {
-			entry.bodyEl.empty();
-			entry.metaEl.setText(
-				item.toolName === 'AskUserQuestion'
-					? 'Waiting for your response…'
-					: 'Waiting for approval…'
-			);
-			entry.el.show();
-		} else {
 			entry.el.hide();
+			return false;
 		}
+
+		entry.el.show();
+		const key = `${item.status}:${item.toolName}:${JSON.stringify(item.answers ?? '')}:${JSON.stringify(item.askQuestions ?? '')}`;
+		if (entry.status === key) {
+			return false;
+		}
+		entry.status = key;
+		entry.bodyEl.empty();
+		entry.metaEl.empty();
+
+		const containerEl = entry.bodyEl.createDiv({ cls: 'guki-perm-summary-block' });
+		containerEl.toggleClass('guki-perm-summary-allowed', item.status === 'allowed');
+		containerEl.toggleClass('guki-perm-summary-denied', item.status === 'denied');
+		containerEl.toggleClass('guki-perm-summary-cancelled', item.status === 'cancelled');
+		containerEl.toggleClass('guki-perm-summary-open', Boolean(entry.permExpanded));
+
+		const headerEl = containerEl.createEl('button', { cls: 'guki-perm-summary-header' });
+
+		// Build one-line collapsed summary text
+		let headerText = '';
+		if (item.toolName === 'AskUserQuestion') {
+			if (item.askQuestions && item.askQuestions.length > 0) {
+				if (item.status === 'allowed') {
+					const parts = item.askQuestions.map((q) => {
+						const qId = q.id || q.question;
+						const ans = item.answers ? item.answers[qId] : undefined;
+						const ansStr = Array.isArray(ans) ? ans.join(', ') : typeof ans === 'string' ? ans : '';
+						return `${q.question} → ${ansStr}`;
+					});
+					headerText = `Question: ${parts.join(' · ')}`;
+				} else if (item.status === 'denied') {
+					headerText = `Question: ${item.askQuestions.map((q) => q.question).join(' · ')} → Denied`;
+				} else {
+					headerText = `Question: ${item.askQuestions.map((q) => q.question).join(' · ')} → Not answered (turn ended)`;
+				}
+			} else {
+				if (item.status === 'allowed') {
+					headerText = 'Question: Answered';
+				} else if (item.status === 'denied') {
+					headerText = 'Question: (unreadable question) → Denied';
+				} else {
+					headerText = 'Question: (unreadable question) → Not answered (turn ended)';
+				}
+			}
+		} else {
+			const target = toolSummary(item.toolName, item.input);
+			const targetStr = target.length > 0 ? `: ${target}` : '';
+			let decisionStr = '';
+			if (item.status === 'allowed') {
+				decisionStr = 'Allowed';
+			} else if (item.status === 'denied') {
+				decisionStr = 'Denied';
+			} else {
+				decisionStr = 'Not answered (turn ended)';
+			}
+			headerText = `Approval: ${item.toolName}${targetStr} → ${decisionStr}`;
+		}
+
+		headerEl.setText(headerText);
+
+		const contentEl = containerEl.createDiv({ cls: 'guki-perm-summary-content' });
+		if (!entry.permExpanded) {
+			contentEl.hide();
+		}
+
+		this.component.registerDomEvent(headerEl, 'click', () => {
+			entry.permExpanded = !entry.permExpanded;
+			containerEl.toggleClass('guki-perm-summary-open', Boolean(entry.permExpanded));
+			if (entry.permExpanded) {
+				contentEl.show();
+			} else {
+				contentEl.hide();
+			}
+		});
+
+		// Build expanded content
+		if (item.toolName === 'AskUserQuestion') {
+			if (item.askQuestions && item.askQuestions.length > 0) {
+				item.askQuestions.forEach((q, idx) => {
+					const qEl = contentEl.createDiv({ cls: 'guki-perm-summary-question' });
+					const qTitleEl = qEl.createDiv({ cls: 'guki-perm-summary-qtitle' });
+					const qLabel = item.askQuestions!.length > 1 ? `Question ${idx + 1}: ${q.question}` : q.question;
+					qTitleEl.setText(q.header ? `${q.header}: ${qLabel}` : qLabel);
+
+					const optionsListEl = qEl.createDiv({ cls: 'guki-perm-summary-qoptions' });
+					const qId = q.id || q.question;
+					const answerVal = item.answers ? item.answers[qId] : undefined;
+					const chosenArr = Array.isArray(answerVal)
+						? answerVal
+						: typeof answerVal === 'string'
+							? [answerVal]
+							: [];
+
+					if (q.options && q.options.length > 0) {
+						for (const opt of q.options) {
+							const optEl = optionsListEl.createDiv({ cls: 'guki-perm-summary-option' });
+							const isChosen =
+								item.status === 'allowed' &&
+								(chosenArr.includes(opt.value) || chosenArr.includes(opt.label));
+							optEl.toggleClass('is-selected', isChosen);
+							const prefix = isChosen ? '✓ ' : '○ ';
+							const desc = opt.description ? ` — ${opt.description}` : '';
+							optEl.setText(`${prefix}${opt.label}${desc}`);
+						}
+					}
+
+					const knownValues = new Set((q.options ?? []).flatMap((o) => [o.value, o.label]));
+					const customAnswers = chosenArr.filter((v) => !knownValues.has(v));
+					if (q.isOther || customAnswers.length > 0) {
+						const otherEl = optionsListEl.createDiv({ cls: 'guki-perm-summary-option' });
+						if (customAnswers.length > 0 && item.status === 'allowed') {
+							otherEl.addClass('is-selected');
+							otherEl.setText(`✓ Other: "${customAnswers.join(', ')}"`);
+						} else {
+							otherEl.setText('○ Other');
+						}
+					}
+
+					if (item.status !== 'allowed') {
+						const outcomeEl = qEl.createDiv({ cls: 'guki-perm-summary-outcome' });
+						outcomeEl.setText(statusText(item.status));
+					}
+				});
+			} else {
+				const malformedEl = contentEl.createDiv({ cls: 'guki-perm-summary-malformed' });
+				malformedEl.setText('Question details unavailable.');
+				const outcomeEl = contentEl.createDiv({ cls: 'guki-perm-summary-outcome' });
+				outcomeEl.setText(statusText(item.status));
+			}
+		} else {
+			const detailEl = contentEl.createDiv({ cls: 'guki-perm-summary-details' });
+
+			const toolRow = detailEl.createDiv({ cls: 'guki-perm-summary-detail-row' });
+			toolRow.createSpan({ cls: 'guki-perm-summary-detail-label', text: 'Tool:' });
+			toolRow.createSpan({ cls: 'guki-perm-summary-detail-value', text: item.toolName });
+
+			const target = toolSummary(item.toolName, item.input);
+			if (target.length > 0) {
+				const targetRow = detailEl.createDiv({ cls: 'guki-perm-summary-detail-row' });
+				targetRow.createSpan({ cls: 'guki-perm-summary-detail-label', text: 'Target:' });
+				targetRow.createSpan({ cls: 'guki-perm-summary-detail-value', text: target });
+			}
+
+			if (typeof item.input === 'object' && item.input !== null) {
+				const inputObj = item.input as Record<string, unknown>;
+				const fullTarget = inputObj.file_path ?? inputObj.path ?? inputObj.command;
+				if (typeof fullTarget === 'string' && fullTarget !== target) {
+					const fullRow = detailEl.createDiv({ cls: 'guki-perm-summary-detail-row' });
+					fullRow.createSpan({ cls: 'guki-perm-summary-detail-label', text: 'Full target:' });
+					fullRow.createSpan({ cls: 'guki-perm-summary-detail-value', text: fullTarget });
+				}
+			}
+
+			const decisionRow = detailEl.createDiv({ cls: 'guki-perm-summary-detail-row' });
+			decisionRow.createSpan({ cls: 'guki-perm-summary-detail-label', text: 'Decision:' });
+			decisionRow.createSpan({ cls: 'guki-perm-summary-detail-value', text: statusText(item.status) });
+		}
+
 		return true;
 	}
 

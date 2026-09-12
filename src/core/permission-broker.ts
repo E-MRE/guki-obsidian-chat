@@ -35,7 +35,7 @@ import {
 	type NodeSocketServer,
 } from '../cli/node-api';
 import { MCP_SERVER_NAME, PERMISSION_PROMPT_TOOL, PERMISSION_SERVER_FILE, PLUGIN_ID } from '../constants';
-import type { ChatState, PermissionItem, PriorContent } from './chat-state';
+import type { ChatState, PermissionItem, PermissionStatus, PriorContent } from './chat-state';
 import {
 	buildRememberedDecision,
 	DEFAULT_PERMISSION_SETTINGS,
@@ -328,7 +328,7 @@ export class PermissionBroker {
 				if (entry.socket === socket) {
 					this.pending.delete(id);
 					if (entry.item.status === 'pending') {
-						entry.item.status = 'cancelled';
+						this.finalizeItem(entry.item, 'cancelled');
 						if (entry.item.toolUseId !== undefined) {
 							this.onDenied?.(entry.item.toolUseId);
 						}
@@ -545,7 +545,7 @@ export class PermissionBroker {
 			return;
 		}
 		this.pending.delete(requestId);
-		entry.item.status = behavior === 'allow' ? 'allowed' : 'denied';
+		this.finalizeItem(entry.item, behavior === 'allow' ? 'allowed' : 'denied', payload);
 		if (behavior === 'deny' && entry.item.toolUseId !== undefined) {
 			// So the tool card renders this as a decision rather than as a failure: the CLI is about
 			// to report it as a `tool_result` with `is_error: true` and nothing on the wire says who
@@ -582,7 +582,7 @@ export class PermissionBroker {
 		}
 		for (const [id, entry] of this.pending) {
 			this.pending.delete(id);
-			entry.item.status = 'cancelled';
+			this.finalizeItem(entry.item, 'cancelled');
 			this.send(entry.socket, { type: 'decision', id, behavior: 'deny', message: reason });
 			if (entry.item.toolUseId !== undefined) {
 				// Same reasoning as `decide`: the CLI will report this as a failed tool, and it was
@@ -591,6 +591,29 @@ export class PermissionBroker {
 			}
 		}
 		this.state.emitChange();
+	}
+
+	/**
+	 * Funnel transition helper for all permission status changes.
+	 * Sets the final status and captures any updated answers payload onto the permission item in chat state.
+	 */
+	private finalizeItem(
+		item: PermissionItem,
+		status: PermissionStatus,
+		payload?: { updatedInput: unknown },
+	): void {
+		item.status = status;
+		if (
+			payload &&
+			typeof payload === 'object' &&
+			payload.updatedInput &&
+			typeof payload.updatedInput === 'object'
+		) {
+			const updated = payload.updatedInput as Record<string, unknown>;
+			if (updated.answers && typeof updated.answers === 'object') {
+				item.answers = updated.answers as Record<string, string | string[]>;
+			}
+		}
 	}
 
 	private send(socket: NodeSocket, message: Record<string, unknown>): void {

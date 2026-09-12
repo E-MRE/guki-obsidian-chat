@@ -244,7 +244,7 @@ export function updatePermissionCard(item: PermissionItem, card: RenderedPermiss
  * reader did not deny anything, the turn ended underneath them and the broker answered on their
  * behalf so the CLI would not hang (PHASE5A-STATE D5).
  */
-function statusText(status: PermissionStatus): string {
+export function statusText(status: PermissionStatus): string {
 	switch (status) {
 		case 'pending':
 			return '';

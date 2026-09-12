@@ -9,6 +9,7 @@
 
 import type { QuotaSnapshot } from '../cli/events';
 import type { ImageAttachment } from './attachments';
+import { type AskQuestionDef, parseAskUserQuestionInput } from './ask-user-question';
 
 export type BlockKind = 'text' | 'thinking' | 'tool_use';
 
@@ -189,6 +190,14 @@ export interface PermissionItem {
 	 */
 	priorContent?: PriorContent;
 	status: PermissionStatus;
+	/**
+	 * For AskUserQuestion: question definitions captured from what was displayed to the reader.
+	 */
+	askQuestions?: AskQuestionDef[];
+	/**
+	 * For AskUserQuestion: user selections captured at the decision moment.
+	 */
+	answers?: Record<string, string | string[]>;
 }
 
 export type ChatItem = UserItem | AssistantItem | NoticeItem | PermissionItem;
@@ -304,6 +313,12 @@ export class ChatState {
 			priorContent: request.priorContent,
 			status: 'pending',
 		};
+		if (request.toolName === 'AskUserQuestion') {
+			const parsed = parseAskUserQuestionInput(request.input);
+			if (parsed) {
+				item.askQuestions = parsed;
+			}
+		}
 		this.itemList.push(item);
 		this.emitChange();
 		return item;

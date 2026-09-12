@@ -26,9 +26,10 @@ export class AskUserQuestionInline {
 		private readonly item: PermissionItem,
 		private readonly onDecide: (answers: Record<string, string | string[]> | null) => void
 	) {
-		const parsed = parseAskUserQuestionInput(item.input);
+		const parsed = item.askQuestions ?? parseAskUserQuestionInput(item.input);
 		if (parsed) {
 			this.questions = parsed;
+			this.item.askQuestions = parsed;
 		} else {
 			this.isMalformed = true;
 		}
@@ -450,6 +451,7 @@ export class AskUserQuestionInline {
 			}
 		}
 		
+		this.item.answers = finalAnswers;
 		this.onDecide(finalAnswers);
 	}
 	

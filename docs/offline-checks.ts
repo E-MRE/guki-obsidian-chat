@@ -5192,7 +5192,19 @@ class FakeElement {
 	children: any[] = [];
 	classList = new Set<string>();
 	listeners: Record<string, any> = {};
-	text: string = '';
+	private _text: string = '';
+	get text(): string {
+		const parts: string[] = [];
+		if (this._text) parts.push(this._text);
+		for (const c of this.children) {
+			const t = c.text;
+			if (t) parts.push(t);
+		}
+		return parts.join(' ');
+	}
+	set text(t: string) {
+		this._text = t;
+	}
 	value: string = '';
 	disabled: boolean = false;
 	tag: string = 'div';
@@ -5216,6 +5228,8 @@ class FakeElement {
 	}
 	addClass(c: string) { this.classList.add(c); }
 	removeClass(c: string) { this.classList.delete(c); }
+	toggleClass(c: string, val: boolean) { if (val) this.addClass(c); else this.removeClass(c); }
+	hasClass(c: string): boolean { return this.classList.has(c); }
 	empty() {
 		this.children = [];
 		this.childElementCount = 0;
@@ -5232,9 +5246,27 @@ class FakeElement {
 		if (this.listeners['blur']) this.listeners['blur']();
 	}
 	scrollIntoView() {}
+	click() {
+		if (this.listeners['click']) {
+			this.listeners['click']({ preventDefault: () => {}, target: this });
+		}
+	}
+	insertBefore(newChild: any, refChild: any) {
+		const oldIdx = this.children.indexOf(newChild);
+		if (oldIdx !== -1) this.children.splice(oldIdx, 1);
+		const idx = this.children.indexOf(refChild);
+		if (idx !== -1) {
+			this.children.splice(idx, 0, newChild);
+		} else {
+			this.children.push(newChild);
+		}
+		this.childElementCount = this.children.length;
+		return newChild;
+	}
 	querySelector(sel: string): any {
 		const findNode = (node: any): any => {
 			if (sel === 'input' && node.tag === 'input') return node;
+			if (sel === 'button' && node.tag === 'button') return node;
 			if (sel.startsWith('.') && node.classList.has(sel.slice(1))) return node;
 			for (const child of node.children) {
 				const found = findNode(child);
@@ -7008,6 +7040,386 @@ console.log('AA4. Label and list formatting: directory displayed, distinguishabl
 	const revCwd = '/Users/alice/projects/work/client/subproject/deep/directory/subfolder';
 	const fmtRevCmdCwd = formatRememberedDecision({ id: 'rem-rev-cmd-cwd', category: 'command', argv: ['ls'], cwd: revCwd });
 	eq('AA4.18: directory path in command detail is fully represented without middle truncation', fmtRevCmdCwd.detail, `Directory: ${revCwd}`);
+}
+
+// --- AB. Permission resolved summary in transcript end-to-end chain ------
+
+console.log('\nAB1. Approval request: Allow path leaves expandable summary row');
+{
+	const state = new ChatState();
+	const readPaths: string[] = [];
+	const broker = new PermissionBroker(brokerApp(readPaths), state, POLICY_VAULT.root);
+	const fakeSocket = { write: () => {} };
+	(broker as any).pending.clear?.();
+
+	const reqId = 'req-ab1';
+	const bashCmd = 'npm test --run';
+	(broker as any).handleRequest(fakeSocket, {
+		id: reqId,
+		tool_name: 'Bash',
+		input: { command: bashCmd, cwd: POLICY_VAULT.root },
+	});
+
+	const item = state.items.find((i) => i.kind === 'permission' && (i as PermissionItem).requestId === reqId) as PermissionItem;
+	check('AB1.1: permission item added to state as pending', item !== undefined && item.status === 'pending');
+
+	// Real permission card DOM entry point
+	const cardContainer = new FakeElement() as any;
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
+	const permCard = createPermissionCard(cardContainer, dummyComp, item, {
+		decide: (id, b, r) => broker.decide(id, b, undefined, undefined, r),
+	});
+
+	// Reader clicks Allow
+	permCard.allowEl.click();
+	eq('AB1.2: item status transitions to allowed', item.status, 'allowed');
+
+	// Transcript message list sync
+	const listWrapper = new FakeElement() as any;
+	const list = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+	list.sync(state.items);
+
+	const summaryContainer = listWrapper.querySelector('.guki-message-permission');
+	check('AB1.3: summary element rendered in message list', summaryContainer !== null);
+
+	const headerEl = summaryContainer?.querySelector('.guki-perm-summary-header');
+	check('AB1.4: collapsed summary header exists', headerEl !== null);
+	check('AB1.5: header text shows tool name, target, and allowed',
+		Boolean(headerEl?.text?.includes('Bash') && headerEl?.text?.includes(bashCmd) && headerEl?.text?.includes('Allowed')));
+
+	const contentEl = summaryContainer?.querySelector('.guki-perm-summary-content');
+	check('AB1.6: detail content exists and starts hidden (collapsed)',
+		Boolean(contentEl !== null && contentEl?.classList?.has('guki-hidden')));
+
+	// Click to expand
+	headerEl?.click();
+	check('AB1.7: clicking header expands detail content',
+		Boolean(contentEl !== null && !contentEl?.classList?.has('guki-hidden')));
+	check('AB1.8: expanded detail shows tool, target, and decision',
+		Boolean(contentEl?.text?.includes('Bash') && contentEl?.text?.includes(bashCmd) && contentEl?.text?.includes('Allowed')));
+
+	// Click again to collapse
+	headerEl?.click();
+	check('AB1.9: clicking header again collapses detail content',
+		Boolean(contentEl !== null && contentEl?.classList?.has('guki-hidden')));
+}
+
+console.log('AB2. Approval request: Deny path leaves denied summary row');
+{
+	const state = new ChatState();
+	const readPaths: string[] = [];
+	const broker = new PermissionBroker(brokerApp(readPaths), state, POLICY_VAULT.root);
+	const fakeSocket = { write: () => {} };
+
+	const reqId = 'req-ab2';
+	const bashCmd = 'rm -rf /unwanted';
+	(broker as any).handleRequest(fakeSocket, {
+		id: reqId,
+		tool_name: 'Bash',
+		input: { command: bashCmd, cwd: POLICY_VAULT.root },
+	});
+
+	const item = state.items.find((i) => i.kind === 'permission' && (i as PermissionItem).requestId === reqId) as PermissionItem;
+	const cardContainer = new FakeElement() as any;
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
+	const permCard = createPermissionCard(cardContainer, dummyComp, item, {
+		decide: (id, b, r) => broker.decide(id, b, undefined, undefined, r),
+	});
+
+	// Reader clicks Deny
+	permCard.denyEl.click();
+	eq('AB2.1: item status transitions to denied', item.status, 'denied');
+
+	const listWrapper = new FakeElement() as any;
+	const list = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+	list.sync(state.items);
+
+	const summaryContainer = listWrapper.querySelector('.guki-message-permission');
+	const headerEl = summaryContainer?.querySelector('.guki-perm-summary-header');
+	check('AB2.2: header shows denied outcome', Boolean(headerEl?.text?.includes('Denied')));
+	check('AB2.3: row has guki-perm-summary-denied class',
+		Boolean(summaryContainer?.querySelector('.guki-perm-summary-denied') !== null || summaryContainer?.classList?.has('guki-perm-summary-denied')));
+}
+
+console.log('AB3. Approval request: Cancelled path distinguishes turn ended from reader denial');
+{
+	const state = new ChatState();
+	const readPaths: string[] = [];
+	const broker = new PermissionBroker(brokerApp(readPaths), state, POLICY_VAULT.root);
+	const fakeSocket = { write: () => {} };
+
+	const reqId = 'req-ab3';
+	(broker as any).handleRequest(fakeSocket, {
+		id: reqId,
+		tool_name: 'Write',
+		input: { file_path: join(POLICY_VAULT.root, 'cancel-test.md'), content: 'hello' },
+	});
+
+	const item = state.items.find((i) => i.kind === 'permission' && (i as PermissionItem).requestId === reqId) as PermissionItem;
+
+	// Active turn stopped while card open
+	broker.cancelPending('Turn stopped');
+	eq('AB3.1: item status transitions to cancelled', item.status, 'cancelled');
+
+	const listWrapper = new FakeElement() as any;
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
+	const list = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+	list.sync(state.items);
+
+	const summaryContainer = listWrapper.querySelector('.guki-message-permission');
+	const headerEl = summaryContainer?.querySelector('.guki-perm-summary-header');
+	check('AB3.2: cancelled outcome does NOT say Denied', !headerEl?.text?.includes('Denied'));
+	check('AB3.3: cancelled outcome explicitly mentions not answered / turn ended',
+		Boolean(headerEl?.text?.includes('Not answered') || headerEl?.text?.includes('turn ended') || headerEl?.text?.includes('Cancelled')));
+	check('AB3.4: row has guki-perm-summary-cancelled class and not denied class',
+		Boolean((summaryContainer?.querySelector('.guki-perm-summary-cancelled') !== null || summaryContainer?.classList?.has('guki-perm-summary-cancelled')) &&
+		summaryContainer?.querySelector('.guki-perm-summary-denied') === null));
+}
+
+console.log('AB4. AskUserQuestion: Multi-question and "Other" free-text selection chain');
+{
+	const state = new ChatState();
+	const readPaths: string[] = [];
+	const broker = new PermissionBroker(brokerApp(readPaths), state, POLICY_VAULT.root);
+	const fakeSocket = { write: () => {} };
+
+	const reqId = 'req-ab4';
+	const input = {
+		questions: [
+			{
+				id: 'action',
+				question: 'What do you want to do with this document?',
+				header: 'Action',
+				options: [
+					{ label: 'Read', description: 'Read document content' },
+					{ label: 'Edit', description: 'Modify document content' },
+					{ label: 'Delete', description: 'Remove document permanently' },
+				],
+				multiSelect: false,
+			},
+			{
+				id: 'destination',
+				question: 'Where should the summary be saved?',
+				header: 'Destination',
+				options: [
+					{ label: 'Vault root', description: 'Save in root' },
+					{ label: 'Notes folder', description: 'Save in /notes' },
+				],
+				multiSelect: true,
+			},
+		],
+	};
+
+	(broker as any).handleRequest(fakeSocket, {
+		id: reqId,
+		tool_name: 'AskUserQuestion',
+		input,
+	});
+
+	const item = state.items.find((i) => i.kind === 'permission' && (i as PermissionItem).requestId === reqId) as PermissionItem;
+	check('AB4.1: item added as pending AskUserQuestion', item !== undefined && item.toolName === 'AskUserQuestion');
+
+	// Mount AskUserQuestionInline DOM card
+	const cardContainer = new FakeElement() as any;
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
+
+	const askCard = new AskUserQuestionInline(
+		cardContainer,
+		dummyComp,
+		item,
+		(answers) => {
+			const decision = decideAskUserQuestion(item.input, answers);
+			broker.decide(
+				item.requestId,
+				decision.behavior,
+				undefined,
+				decision.updatedInput !== undefined ? { updatedInput: decision.updatedInput } : undefined,
+			);
+		},
+	);
+
+	// Select option 'Edit' on Tab 1 (currentTabIndex = 0)
+	(askCard as any).selections['action'] = ['Edit'];
+
+	// Move to Tab 2
+	(askCard as any).currentTabIndex = 1;
+	(askCard as any).selections['destination'] = ['Vault root'];
+	(askCard as any).customTexts['destination'] = 'CustomArchiveDir';
+
+	// Submit from the UI button
+	(askCard as any).submit();
+
+	eq('AB4.2: item status is allowed', item.status, 'allowed');
+	check('AB4.3: item captured answers on state object', (item as any).answers !== undefined);
+	eq('AB4.4: action answer captured correctly', ((item as any).answers as any)?.action, 'Edit');
+	check('AB4.5: destination answer includes custom text',
+		Boolean(Array.isArray(((item as any).answers as any)?.destination) &&
+		((item as any).answers as any)?.destination?.includes('Vault root') &&
+		((item as any).answers as any)?.destination?.includes('CustomArchiveDir')));
+
+	// Sync to message list
+	const listWrapper = new FakeElement() as any;
+	const list = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+	list.sync(state.items);
+
+	const summaryContainer = listWrapper.querySelector('.guki-message-permission');
+	check('AB4.6: AskUserQuestion leaves summary element in message list', summaryContainer !== null);
+
+	const headerEl = summaryContainer?.querySelector('.guki-perm-summary-header');
+	check('AB4.7: collapsed one-line header contains question and choice',
+		Boolean(headerEl?.text?.includes('What do you want to do with this document?') && headerEl?.text?.includes('Edit')));
+
+	const contentEl = summaryContainer?.querySelector('.guki-perm-summary-content');
+	check('AB4.8: detail content exists and is initially collapsed',
+		Boolean(contentEl !== null && contentEl?.classList?.has('guki-hidden')));
+
+	// Expand detail
+	headerEl?.click();
+	check('AB4.9: clicking header expands detail content',
+		Boolean(contentEl !== null && !contentEl?.classList?.has('guki-hidden')));
+
+	// Check question 1 details: shows all options and which is selected
+	check('AB4.10: detail contains question 1 text',
+		Boolean(contentEl?.text?.includes('What do you want to do with this document?')));
+	check('AB4.11: detail lists offered options Read, Edit, Delete',
+		Boolean(contentEl?.text?.includes('Read') && contentEl?.text?.includes('Edit') && contentEl?.text?.includes('Delete')));
+	check('AB4.12: detail identifies Edit as chosen',
+		Boolean(contentEl?.text?.includes('✓ Edit') || contentEl?.querySelector('.is-selected')?.text?.includes('Edit')));
+
+	// Check question 2 details: shows destination question and CustomArchiveDir custom text
+	check('AB4.13: detail contains question 2 text and shows which answer belongs to which question',
+		Boolean(contentEl?.text?.includes('Where should the summary be saved?')));
+	check('AB4.14: detail includes custom free text Other entry',
+		Boolean(contentEl?.text?.includes('CustomArchiveDir')));
+
+	// Collapse again
+	headerEl?.click();
+	check('AB4.15: clicking header again collapses detail',
+		Boolean(contentEl !== null && contentEl?.classList?.has('guki-hidden')));
+}
+
+console.log('AB5. AskUserQuestion: Deny path via Escape leaves denied summary');
+{
+	const state = new ChatState();
+	const readPaths: string[] = [];
+	const broker = new PermissionBroker(brokerApp(readPaths), state, POLICY_VAULT.root);
+	const fakeSocket = { write: () => {} };
+
+	const reqId = 'req-ab5';
+	(broker as any).handleRequest(fakeSocket, {
+		id: reqId,
+		tool_name: 'AskUserQuestion',
+		input: {
+			questions: [{ question: 'May I proceed?', options: [{ label: 'Yes' }] }],
+		},
+	});
+
+	const item = state.items.find((i) => i.kind === 'permission' && (i as PermissionItem).requestId === reqId) as PermissionItem;
+	const cardContainer = new FakeElement() as any;
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
+
+	const askCard = new AskUserQuestionInline(
+		cardContainer,
+		dummyComp,
+		item,
+		(answers) => {
+			const decision = decideAskUserQuestion(item.input, answers);
+			broker.decide(
+				item.requestId,
+				decision.behavior,
+				undefined,
+				decision.updatedInput !== undefined ? { updatedInput: decision.updatedInput } : undefined,
+			);
+		},
+	);
+
+	// User presses Escape
+	(askCard as any).el.listeners['keydown']({ key: 'Escape', preventDefault: () => {} });
+	eq('AB5.1: item status is denied', item.status, 'denied');
+
+	const listWrapper = new FakeElement() as any;
+	const list = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+	list.sync(state.items);
+
+	const summaryContainer = listWrapper.querySelector('.guki-message-permission');
+	const headerEl = summaryContainer?.querySelector('.guki-perm-summary-header');
+	check('AB5.2: header shows question and Denied',
+		Boolean(headerEl?.text?.includes('May I proceed?') && headerEl?.text?.includes('Denied')));
+}
+
+console.log('AB6. AskUserQuestion: Cancelled path leaves non-denied cancellation summary');
+{
+	const state = new ChatState();
+	const readPaths: string[] = [];
+	const broker = new PermissionBroker(brokerApp(readPaths), state, POLICY_VAULT.root);
+	const fakeSocket = { write: () => {} };
+
+	const reqId = 'req-ab6';
+	(broker as any).handleRequest(fakeSocket, {
+		id: reqId,
+		tool_name: 'AskUserQuestion',
+		input: {
+			questions: [{ question: 'Unanswered prompt question?', options: [{ label: 'Opt1' }] }],
+		},
+	});
+
+	const item = state.items.find((i) => i.kind === 'permission' && (i as PermissionItem).requestId === reqId) as PermissionItem;
+
+	// Cancelled by turn stopping
+	broker.cancelPending('Turn stopped');
+	eq('AB6.1: item status is cancelled', item.status, 'cancelled');
+
+	const listWrapper = new FakeElement() as any;
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
+	const list = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+	list.sync(state.items);
+
+	const summaryContainer = listWrapper.querySelector('.guki-message-permission');
+	const headerEl = summaryContainer?.querySelector('.guki-perm-summary-header');
+	check('AB6.2: header does not say Denied', !headerEl?.text?.includes('Denied'));
+	check('AB6.3: header indicates not answered / turn ended',
+		Boolean(headerEl?.text?.includes('Not answered') || headerEl?.text?.includes('turn ended') || headerEl?.text?.includes('Cancelled')));
+}
+
+console.log('AB7. Summary row preserves chronological conversation position');
+{
+	const state = new ChatState();
+	const readPaths: string[] = [];
+	const broker = new PermissionBroker(brokerApp(readPaths), state, POLICY_VAULT.root);
+	const fakeSocket = { write: () => {} };
+
+	// 1. User message
+	state.addUserMessage('Please run the test suite');
+
+	// 2. Permission request
+	const reqId = 'req-ab7';
+	(broker as any).handleRequest(fakeSocket, {
+		id: reqId,
+		tool_name: 'Bash',
+		input: { command: 'npm test', cwd: POLICY_VAULT.root },
+	});
+
+	// 3. Assistant message following it
+	state.addAssistantMessage();
+
+	// While pending, sync: permItem is skipped, user and assistant are rendered
+	const listWrapper = new FakeElement() as any;
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
+	const list = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+	list.sync(state.items);
+
+	// Now resolve permission
+	broker.decide(reqId, 'allow');
+	list.sync(state.items);
+
+	const scrollEl = (list as any).scrollEl as FakeElement;
+	const userIdx = scrollEl.children.findIndex((c) => c.classList.has('guki-message-user'));
+	const permIdx = scrollEl.children.findIndex((c) => c.classList.has('guki-message-permission'));
+	const asstIdx = scrollEl.children.findIndex((c) => c.classList.has('guki-message-assistant'));
+
+	check('AB7.1: all three items rendered in scroll container', userIdx !== -1 && permIdx !== -1 && asstIdx !== -1);
+	check('AB7.2: permission summary is positioned in order between user and assistant',
+		userIdx < permIdx && permIdx < asstIdx, `userIdx=${userIdx}, permIdx=${permIdx}, asstIdx=${asstIdx}`);
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
