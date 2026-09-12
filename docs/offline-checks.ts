@@ -8040,6 +8040,53 @@ console.log('AB12. Re-homing: expanded state and click handler survive re-homing
 		!contentElAfter.hasClass('guki-hidden'));
 }
 
+console.log('AB13. Multi-question card: tab bar contains only question tabs and no dead submit leftover');
+{
+	const multiInput = {
+		questions: [
+			{ question: 'İçecek ne istersin?', header: 'İçecek', options: [{ label: 'Çay' }, { label: 'Kahve' }] },
+			{ question: 'Boş zaman aktivitesi?', header: 'Boş zaman', options: [{ label: 'Kitap' }, { label: 'Yürüyüş' }] },
+		],
+	};
+	const card = new FakeElement() as any;
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
+	new AskUserQuestionInline(card, dummyComp, { input: multiInput } as any, () => {});
+
+	const tabBar = card.querySelector('.guki-ask-tab-bar');
+	check('AB13.1: tab bar element exists and is not hidden', tabBar !== null && !tabBar.hasClass('guki-hidden'));
+
+	const tabs = tabBar ? tabBar.children : [];
+	eq('AB13.2: tab bar contains exactly 2 question tabs', tabs.length, 2);
+	check('AB13.3: every tab bar child is a .guki-ask-tab element',
+		tabs.every((c: any) => c.tag === 'div' && c.hasClass('guki-ask-tab')));
+	check('AB13.4: no tab bar child has empty text content',
+		tabs.every((c: any) => typeof c.text === 'string' && c.text.trim().length > 0));
+	eq('AB13.5: tab 0 header is İçecek', tabs[0]?.text, 'İçecek');
+	eq('AB13.6: tab 1 header is Boş zaman', tabs[1]?.text, 'Boş zaman');
+
+	// Also check 3-question case
+	const multi3Input = {
+		questions: [
+			{ question: 'Q1?', header: 'Tab1' },
+			{ question: 'Q2?', header: 'Tab2' },
+			{ question: 'Q3?', header: 'Tab3' },
+		],
+	};
+	const card3 = new FakeElement() as any;
+	new AskUserQuestionInline(card3, dummyComp, { input: multi3Input } as any, () => {});
+	const tabBar3 = card3.querySelector('.guki-ask-tab-bar');
+	const tabs3 = tabBar3 ? tabBar3.children : [];
+	eq('AB13.7: 3-question tab bar contains exactly 3 question tabs', tabs3.length, 3);
+	check('AB13.8: no extra or empty-text elements in 3-question tab bar',
+		tabs3.every((c: any) => c.tag === 'div' && c.hasClass('guki-ask-tab') && c.text.trim().length > 0));
+
+	// Stylesheet leftover verification: styles.css must not contain the removed top submit control rules
+	const stylesCss = readFileSync(join(process.cwd(), 'styles.css'), 'utf8');
+	check('AB13.9: styles.css contains no leftover .guki-ask-tab-submit rule',
+		!stylesCss.includes('.guki-ask-tab-submit'),
+		'styles.css still contains .guki-ask-tab-submit rule leftover from removed top submit control');
+}
+
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
 
