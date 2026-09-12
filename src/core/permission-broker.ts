@@ -604,6 +604,7 @@ export class PermissionBroker {
 	): void {
 		item.status = status;
 		if (
+			!item.answers &&
 			payload &&
 			typeof payload === 'object' &&
 			payload.updatedInput &&

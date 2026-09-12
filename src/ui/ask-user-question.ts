@@ -96,29 +96,6 @@ export class AskUserQuestionInline {
 				this.renderTabContent();
 			});
 		}
-		
-		const submitBtn = this.tabBarEl.createEl('button', {
-			cls: 'guki-ask-tab-submit',
-			text: 'Submit'
-		});
-		const allAnswered = this.questions.every((q, idx) => this.isQuestionAnswered(q, idx));
-		if (allAnswered) {
-			submitBtn.addClass('guki-ask-answered');
-		}
-		
-		submitBtn.addEventListener('click', () => {
-			if (allAnswered) {
-				this.submit();
-			} else {
-				const firstUnanswered = this.questions.findIndex((q, idx) => !this.isQuestionAnswered(q, idx));
-				if (firstUnanswered !== -1) {
-					this.currentTabIndex = firstUnanswered;
-					this.focusedItemIndex = 0;
-					this.renderTabBar();
-					this.renderTabContent();
-				}
-			}
-		});
 	}
 	
 	private getQuestionId(_q: AskQuestionDef, index: number): string {
@@ -431,7 +408,15 @@ export class AskUserQuestionInline {
 		const allAnswered = this.questions.every((q, idx) => this.isQuestionAnswered(q, idx));
 		if (!allAnswered) return;
 		
-		const finalAnswers: Record<string, string | string[]> = {};
+		// Internal display identity: keyed by positional index (so identical question texts
+		// remain distinct on screen and in summary) plus q.id if defined (for checks/callers).
+		const displayAnswers: Record<string, string | string[]> = {};
+		// Wire identity: keyed by literal question text string (q.question) per CLI contract.
+		// Multi-select answers go as comma-separated string per CLI schema.
+		// Limit: when two questions share byte-identical text, the wire carries one key and the
+		// last answer overwrites the first. Screen and summary remain correct; the wire ceiling
+		// is documented here and accepted by the operator.
+		const wireAnswers: Record<string, string | string[]> = {};
 		for (let i = 0; i < this.questions.length; i++) {
 			const q = this.questions[i];
 			if (!q) continue;
@@ -453,14 +438,20 @@ export class AskUserQuestionInline {
 					return; // Fail-closed
 				}
 			}
-			finalAnswers[qId] = answer;
-			if (q.id && !finalAnswers[q.id]) {
-				finalAnswers[q.id] = answer;
+			displayAnswers[qId] = answer;
+			if (q.id && !displayAnswers[q.id]) {
+				displayAnswers[q.id] = answer;
+			}
+
+			const wireVal = Array.isArray(answer) ? answer.join(', ') : answer;
+			wireAnswers[q.question] = wireVal;
+			if (q.id && !wireAnswers[q.id]) {
+				wireAnswers[q.id] = answer;
 			}
 		}
 		
-		this.item.answers = finalAnswers;
-		this.onDecide(finalAnswers);
+		this.item.answers = displayAnswers;
+		this.onDecide(wireAnswers);
 	}
 	
 	destroy(): void {

@@ -1551,6 +1551,7 @@
 .guki-perm-summary-header {
 	display: flex;
 	align-items: center;
+	justify-content: flex-start;
 	gap: var(--size-2-2);
 	width: 100%;
 	box-shadow: none;

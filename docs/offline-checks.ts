@@ -7718,6 +7718,99 @@ console.log('AB9. AskUserQuestion: Selection state, tab switching, and auto-subm
 	eq('AB9.22: question 2 answer captured', mirrorItem.answers?.['1'], 'Second-1');
 }
 
+console.log('AB10. Wire-contract: outgoing answers object keys are literal question strings');
+{
+	// The CLI handler keys answers on question.question (n[P] where P = question.question).
+	// Any other key format — index, generated id — produces "The user did not answer the questions."
+	// This check drives the real DOM path and asserts the exact outgoing wire payload for four cases.
+
+	const fakeComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
+
+	// Case 1: Single question, option selected
+	{
+		let capturedAnswers: any = undefined;
+		const q1Input = { questions: [{ question: 'What is your goal?', options: [{ label: 'Ship it' }, { label: 'Review it' }], multiSelect: false }] };
+		const card1 = new FakeElement() as any;
+		new AskUserQuestionInline(card1, fakeComp, { input: q1Input } as any, (ans) => { capturedAnswers = ans; });
+		const opts1 = card1.querySelectorAll('.guki-ask-item');
+		opts1.find((el: any) => el.text.includes('Ship it'))?.click();
+		const decision1 = capturedAnswers !== undefined ? decideAskUserQuestion(q1Input, capturedAnswers) : null;
+		const wire1 = decision1?.updatedInput?.answers as any;
+		check('AB10.1: single question — wire key is question text', wire1 !== undefined && 'What is your goal?' in wire1);
+		eq('AB10.2: single question — wire key is not "0"', '0' in (wire1 ?? {}), false);
+		eq('AB10.3: single question — answer value correct', wire1?.['What is your goal?'], 'Ship it');
+		console.log('AB10 case1 wire payload:', JSON.stringify({ answers: wire1 }));
+	}
+
+	// Case 2: Two questions, one option each
+	{
+		let capturedAnswers2: any = undefined;
+		const q2Input = {
+			questions: [
+				{ question: 'Priority', options: [{ label: 'High' }, { label: 'Low' }], multiSelect: false },
+				{ question: 'Mode', options: [{ label: 'Auto' }, { label: 'Manual' }], multiSelect: false },
+			]
+		};
+		const card2 = new FakeElement() as any;
+		new AskUserQuestionInline(card2, fakeComp, { input: q2Input } as any, (ans) => { capturedAnswers2 = ans; });
+		const tab1opts = card2.querySelectorAll('.guki-ask-item');
+		tab1opts.find((el: any) => el.text.includes('High'))?.click();
+		// After single-select auto-advance to tab 2:
+		const tab2opts = card2.querySelectorAll('.guki-ask-item');
+		tab2opts.find((el: any) => el.text.includes('Auto'))?.click();
+		const decision2 = capturedAnswers2 !== undefined ? decideAskUserQuestion(q2Input, capturedAnswers2) : null;
+		const wire2 = decision2?.updatedInput?.answers as any;
+		check('AB10.4: two questions — key 1 is question text', wire2 !== undefined && 'Priority' in wire2);
+		check('AB10.5: two questions — key 2 is question text', wire2 !== undefined && 'Mode' in wire2);
+		eq('AB10.6: two questions — no index key "0"', '0' in (wire2 ?? {}), false);
+		eq('AB10.7: two questions — no index key "1"', '1' in (wire2 ?? {}), false);
+		eq('AB10.8: two questions — answer 1 correct', wire2?.['Priority'], 'High');
+		eq('AB10.9: two questions — answer 2 correct', wire2?.['Mode'], 'Auto');
+		console.log('AB10 case2 wire payload:', JSON.stringify({ answers: wire2 }));
+	}
+
+	// Case 3: Multi-select answer (comma-separated per CLI schema)
+	{
+		let capturedAnswers3: any = undefined;
+		const q3Input = { questions: [{ question: 'Pick features', options: [{ label: 'Search', value: 'search' }, { label: 'Export', value: 'export' }], multiSelect: true }] };
+		const card3 = new FakeElement() as any;
+		new AskUserQuestionInline(card3, fakeComp, { input: q3Input } as any, (ans) => { capturedAnswers3 = ans; });
+		// Toggle both options
+		const opts3 = card3.querySelectorAll('.guki-ask-item');
+		opts3.find((el: any) => el.text.includes('Search'))?.click();
+		opts3.find((el: any) => el.text.includes('Export'))?.click();
+		// Multi-select: click bottom submit button explicitly
+		const submitBtn3 = card3.querySelector('.guki-ask-submit-btn');
+		submitBtn3?.click();
+		const decision3 = capturedAnswers3 !== undefined ? decideAskUserQuestion(q3Input, capturedAnswers3) : null;
+		const wire3 = decision3?.updatedInput?.answers as any;
+		const multiAnswer = wire3?.['Pick features'];
+		check('AB10.10: multi-select — key is question text', wire3 !== undefined && 'Pick features' in wire3);
+		eq('AB10.11: multi-select — no index key "0"', '0' in (wire3 ?? {}), false);
+		eq('AB10.12: multi-select — comma-separated string answer', multiAnswer, 'search, export');
+		console.log('AB10 case3 wire payload:', JSON.stringify({ answers: wire3 }));
+	}
+
+	// Case 4: "Other" free-text answer
+	{
+		let capturedAnswers4: any = undefined;
+		const q4Input = { questions: [{ question: 'Describe goal', options: [{ label: 'Opt A' }], multiSelect: false }] };
+		const card4 = new FakeElement() as any;
+		new AskUserQuestionInline(card4, fakeComp, { input: q4Input } as any, (ans) => { capturedAnswers4 = ans; });
+		const inputEl4 = card4.querySelector('input');
+		inputEl4?.listeners['focus']?.();
+		inputEl4?.listeners['input']?.({ target: { value: 'my custom text' } });
+		card4.querySelector('.guki-ask-submit-btn')?.click();
+		const decision4 = capturedAnswers4 !== undefined ? decideAskUserQuestion(q4Input, capturedAnswers4) : null;
+		const wire4 = decision4?.updatedInput?.answers as any;
+		check('AB10.13: other free-text — key is question text', wire4 !== undefined && 'Describe goal' in wire4);
+		eq('AB10.14: other free-text — no index key "0"', '0' in (wire4 ?? {}), false);
+		eq('AB10.15: other free-text — value is the typed text', wire4?.['Describe goal'], 'my custom text');
+		console.log('AB10 case4 wire payload:', JSON.stringify({ answers: wire4 }));
+	}
+}
+
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
+
 
