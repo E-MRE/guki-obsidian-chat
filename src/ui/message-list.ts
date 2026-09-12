@@ -155,6 +155,10 @@ export class MessageList {
 			if (!existing && !toolBlockEl) {
 				this.placeItemInOrder(item, entry.el, items);
 			}
+			if (existing && toolBlockEl && entry.el.parentElement !== toolBlockEl) {
+				toolBlockEl.appendChild(entry.el);
+				changed = true;
+			}
 			changed = this.updateItem(item, entry) || !existing || changed;
 		}
 

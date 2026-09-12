@@ -5214,12 +5214,17 @@ class FakeElement {
 	clientHeight: number = 0;
 	childElementCount: number = 0;
 
+	parentElement: FakeElement | null = null;
+	parent: FakeElement | null = null;
+
 	createDiv(opts?: any) { return this.createEl('div', opts); }
 	createSpan(opts?: any) { return this.createEl('span', opts); }
 	createEl(tag: string, opts?: any) {
 		const el = new FakeElement();
 		el.tag = tag;
 		el.tagName = tag.toUpperCase();
+		el.parentElement = this;
+		el.parent = this;
 		if (opts?.cls) opts.cls.split(' ').forEach((c: string) => el.addClass(c));
 		if (opts?.text) el.text = opts.text;
 		this.children.push(el);
@@ -5238,7 +5243,21 @@ class FakeElement {
 	addEventListener(evt: string, cb: any) { this.listeners[evt] = cb; }
 	hide() { this.addClass('guki-hidden'); }
 	show() { this.removeClass('guki-hidden'); }
-	remove() {}
+	remove() {
+		const prevParent = this.parentElement ?? this.parent;
+		if (prevParent && prevParent.children) {
+			const idx = prevParent.children.indexOf(this);
+			if (idx !== -1) {
+				prevParent.children.splice(idx, 1);
+				prevParent.childElementCount = prevParent.children.length;
+			}
+			this.parentElement = null;
+			this.parent = null;
+		}
+	}
+	appendChild(newChild: any) {
+		return this.insertBefore(newChild, null);
+	}
 	focus() {
 		if (this.listeners['focus']) this.listeners['focus']();
 	}
@@ -5252,9 +5271,17 @@ class FakeElement {
 		}
 	}
 	insertBefore(newChild: any, refChild: any) {
-		const oldIdx = this.children.indexOf(newChild);
-		if (oldIdx !== -1) this.children.splice(oldIdx, 1);
-		const idx = this.children.indexOf(refChild);
+		const prevParent = newChild.parentElement ?? newChild.parent;
+		if (prevParent && prevParent.children) {
+			const oldIdx = prevParent.children.indexOf(newChild);
+			if (oldIdx !== -1) {
+				prevParent.children.splice(oldIdx, 1);
+				prevParent.childElementCount = prevParent.children.length;
+			}
+		}
+		newChild.parentElement = this;
+		newChild.parent = this;
+		const idx = refChild ? this.children.indexOf(refChild) : -1;
 		if (idx !== -1) {
 			this.children.splice(idx, 0, newChild);
 		} else {
@@ -7840,6 +7867,177 @@ console.log('AB10. Wire-contract: outgoing answers object keys are literal quest
 		eq('AB10.15: other free-text — value is the typed text', wire4?.['Describe goal'], 'my custom text');
 		console.log('AB10 case4 wire payload:', JSON.stringify({ answers: wire4 }));
 	}
+}
+
+console.log('AB11. Re-homing: late tool block moves summary out of fallback into tool block');
+{
+	const state = new ChatState();
+	const readPaths: string[] = [];
+	const broker = new PermissionBroker(brokerApp(readPaths), state, POLICY_VAULT.root);
+	const fakeSocket = { write: () => {} };
+
+	// 1. User message
+	state.addUserMessage('Please run the test suite');
+
+	// 2. Assistant turn begins (no tool block yet)
+	const asst = state.addAssistantMessage();
+	const toolUseId = 'toolu-ab11';
+	const reqId = 'req-ab11';
+
+	// 3. Permission request arrives mid-turn BEFORE tool block exists in asst.blocks
+	(broker as any).handleRequest(fakeSocket, {
+		id: reqId,
+		tool_name: 'Bash',
+		tool_use_id: toolUseId,
+		input: { command: 'npm test', cwd: POLICY_VAULT.root },
+	});
+
+	const listWrapper = new FakeElement() as any;
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
+	const list = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+	list.sync(state.items);
+
+	// 4. Reader resolves request BEFORE tool block exists in asst.blocks
+	broker.decide(reqId, 'allow');
+	list.sync(state.items); // Summary placed in fallback position (scrollEl)
+
+	const scrollEl = (list as any).scrollEl as FakeElement;
+	check('AB11.1: initially placed in fallback position before tool block arrives',
+		scrollEl.children[scrollEl.children.length - 1]?.classList.has('guki-message-permission'));
+
+	// 5. Tool block appears afterwards
+	asst.blocks.set(0, {
+		index: 0,
+		kind: 'tool_use',
+		text: '',
+		final: true,
+		toolUseId,
+		toolName: 'Bash',
+		toolInput: { command: 'npm test', cwd: POLICY_VAULT.root },
+		toolPending: false,
+	});
+
+	// 6. Followed by reply
+	asst.blocks.set(1, {
+		index: 1,
+		kind: 'text',
+		text: 'All tests passed.',
+		final: true,
+	});
+	list.sync(state.items); // Sync after tool block arrives: should re-home!
+
+	const summaryContainer = listWrapper.querySelector('.guki-message-permission') ?? listWrapper.querySelector('.guki-perm-summary-block');
+	const replyEl = listWrapper.querySelector('.guki-block-text');
+	const allSummaries = listWrapper.querySelectorAll('.guki-perm-summary-block');
+
+	function isBeforeInDom(root: any, a: any, b: any): boolean {
+		const order: any[] = [];
+		const walk = (n: any) => {
+			order.push(n);
+			for (const child of n.children || []) walk(child);
+		};
+		walk(root);
+		const idxA = order.indexOf(a);
+		const idxB = order.indexOf(b);
+		return idxA !== -1 && idxB !== -1 && idxA < idxB;
+	}
+
+	check('AB11.2: summary element and reply element are both rendered', summaryContainer !== null && replyEl !== null);
+	check('AB11.3: summary element appears before the model reply in DOM order',
+		isBeforeInDom(listWrapper, summaryContainer, replyEl));
+	check('AB11.4: summary element is not pinned to the bottom of the transcript',
+		!scrollEl.children[scrollEl.children.length - 1]?.classList.has('guki-message-permission'));
+	check('AB11.5: re-homing does not duplicate the summary', allSummaries.length === 1);
+}
+
+console.log('AB12. Re-homing: expanded state and click handler survive re-homing');
+{
+	const state = new ChatState();
+	const readPaths: string[] = [];
+	const broker = new PermissionBroker(brokerApp(readPaths), state, POLICY_VAULT.root);
+	const fakeSocket = { write: () => {} };
+
+	// 1. User message
+	state.addUserMessage('Run another command');
+
+	// 2. Assistant message created without tool block
+	const asst = state.addAssistantMessage();
+	const toolUseId = 'toolu-ab12';
+	const reqId = 'req-ab12';
+
+	// 3. Permission request arrives
+	(broker as any).handleRequest(fakeSocket, {
+		id: reqId,
+		tool_name: 'Bash',
+		tool_use_id: toolUseId,
+		input: { command: 'git status', cwd: POLICY_VAULT.root },
+	});
+
+	const listWrapper = new FakeElement() as any;
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
+	const list = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+	list.sync(state.items);
+
+	// 4. Request is RESOLVED first
+	broker.decide(reqId, 'allow');
+	list.sync(state.items);
+
+	const summaryBlockFallback = listWrapper.querySelector('.guki-perm-summary-block');
+	const contentElFallback = listWrapper.querySelector('.guki-perm-summary-content');
+	const headerBtnFallback = listWrapper.querySelector('.guki-perm-summary-header');
+
+	check('AB12.1: summary starts collapsed in fallback position',
+		summaryBlockFallback !== null &&
+		!summaryBlockFallback.hasClass('guki-perm-summary-open') &&
+		contentElFallback.hasClass('guki-hidden'));
+
+	// 5. Reader expands the summary while in fallback position
+	headerBtnFallback.click();
+	check('AB12.2: reader expanded summary while in fallback position',
+		summaryBlockFallback.hasClass('guki-perm-summary-open') &&
+		!contentElFallback.hasClass('guki-hidden'));
+
+	// 6. Tool block arrives afterwards
+	asst.blocks.set(0, {
+		index: 0,
+		kind: 'tool_use',
+		text: '',
+		final: true,
+		toolUseId,
+		toolName: 'Bash',
+		toolInput: { command: 'git status', cwd: POLICY_VAULT.root },
+		toolPending: false,
+	});
+	// Followed by reply
+	asst.blocks.set(1, {
+		index: 1,
+		kind: 'text',
+		text: 'On branch main, working tree clean.',
+		final: true,
+	});
+	list.sync(state.items);
+
+	const summaryBlockAfter = listWrapper.querySelector('.guki-perm-summary-block');
+	const contentElAfter = listWrapper.querySelector('.guki-perm-summary-content');
+	const headerBtnAfter = listWrapper.querySelector('.guki-perm-summary-header');
+
+	// 7. Summary is still expanded afterwards
+	check('AB12.3: summary remains expanded after re-homing to tool block',
+		summaryBlockAfter !== null &&
+		summaryBlockAfter.hasClass('guki-perm-summary-open') &&
+		!contentElAfter.hasClass('guki-hidden'));
+
+	// 8. Still responds to a click: collapses on click
+	headerBtnAfter.click();
+	check('AB12.4: summary collapses on click after re-homing',
+		!summaryBlockAfter.hasClass('guki-perm-summary-open') &&
+		contentElAfter.hasClass('guki-hidden'));
+
+	// 9. Expands again on second click
+	headerBtnAfter.click();
+	check('AB12.5: summary re-expands on second click after re-homing',
+		summaryBlockAfter.hasClass('guki-perm-summary-open') &&
+		!contentElAfter.hasClass('guki-hidden'));
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
