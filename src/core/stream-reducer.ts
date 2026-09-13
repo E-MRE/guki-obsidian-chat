@@ -134,6 +134,12 @@ export class StreamReducer {
 	/** Assistant items participating in the current turn (e.g. across a mid-turn compaction split). */
 	private turnItems: AssistantItem[] = [];
 
+	/** Local timestamp when the current turn segment began (at beginTurn or when a compaction boundary arrived). */
+	private segmentStartedAt: number | null = null;
+
+	/** Measured elapsed milliseconds per turn segment prior to compaction, keyed by item. */
+	private itemSegmentDurations = new Map<AssistantItem, number>();
+
 	/**
 	 * The last `result.total_cost_usd` this reducer has seen, and the reducer's own running sum of
 	 * per-turn deltas. `null` means "no result yet" — the state a fresh process starts in, and the
@@ -196,6 +202,8 @@ export class StreamReducer {
 		this.active = item;
 		this.turnItem = item;
 		this.turnItems = [item];
+		this.segmentStartedAt = Date.now();
+		this.itemSegmentDurations.clear();
 		this.blockBase = 0;
 		this.nextFreeSlot = 0;
 		this.assistantSlot = 0;
@@ -392,6 +400,7 @@ export class StreamReducer {
 			this.seenBoundaryUuids.add(uuid);
 		}
 
+		const boundaryNow = Date.now();
 		const inFlight = this.active;
 		if (inFlight) {
 			if (!hasRenderableContent(inFlight)) {
@@ -403,11 +412,14 @@ export class StreamReducer {
 			} else {
 				closeOpenBlocks(inFlight);
 				inFlight.status = 'complete';
+				const elapsed = Math.max(0, boundaryNow - (this.segmentStartedAt ?? boundaryNow));
+				this.itemSegmentDurations.set(inFlight, elapsed);
 			}
 			this.active = null;
 		}
+		this.segmentStartedAt = boundaryNow;
 
-		this.state.addDivider(uuid ?? `divider-${Date.now()}`, 'Conversation compacted');
+		this.state.addDivider(uuid ?? `divider-${boundaryNow}`, 'Conversation compacted');
 	}
 
 	private ensureActiveItem(): AssistantItem {
@@ -419,6 +431,9 @@ export class StreamReducer {
 		this.active = item;
 		this.turnItem = item;
 		this.turnItems.push(item);
+		if (this.segmentStartedAt === null) {
+			this.segmentStartedAt = Date.now();
+		}
 		return item;
 	}
 
@@ -807,20 +822,36 @@ export class StreamReducer {
 
 		const terminalItem = activeItem ?? (this.turnItems.length > 0 ? this.turnItems[this.turnItems.length - 1] : null);
 
-		for (const prevItem of this.turnItems) {
-			if (prevItem !== terminalItem) {
-				prevItem.meta = {
+		if (terminalItem) {
+			if (this.turnItems.length > 1) {
+				let allocatedSum = 0;
+				for (const prevItem of this.turnItems) {
+					if (prevItem !== terminalItem) {
+						let segDuration = this.itemSegmentDurations.get(prevItem) ?? 0;
+						if (durationMs !== undefined) {
+							if (allocatedSum + segDuration > durationMs) {
+								segDuration = Math.max(0, durationMs - allocatedSum);
+							}
+							allocatedSum += segDuration;
+						}
+						prevItem.meta = {
+							durationMs: segDuration,
+						};
+					}
+				}
+				const terminalDuration = durationMs !== undefined ? Math.max(0, durationMs - allocatedSum) : undefined;
+				terminalItem.meta = {
+					costUsd,
+					durationMs: terminalDuration,
+					sessionCostUsd,
+				};
+			} else {
+				terminalItem.meta = {
+					costUsd,
 					durationMs,
+					sessionCostUsd,
 				};
 			}
-		}
-
-		if (terminalItem) {
-			terminalItem.meta = {
-				costUsd,
-				durationMs,
-				sessionCostUsd,
-			};
 			closeOpenBlocks(terminalItem);
 			this.applyPermissionDenials(terminalItem, event);
 
@@ -847,6 +878,8 @@ export class StreamReducer {
 		}
 
 		this.turnItems = [];
+		this.itemSegmentDurations.clear();
+		this.segmentStartedAt = null;
 		this.state.emitChange();
 		this.onTurnEnd?.();
 	}
@@ -899,6 +932,8 @@ export class StreamReducer {
 		const item = this.active ?? (this.turnItems.length > 0 ? this.turnItems[this.turnItems.length - 1] : null);
 		this.active = null;
 		this.turnItems = [];
+		this.itemSegmentDurations.clear();
+		this.segmentStartedAt = null;
 		if (!item) {
 			this.onTurnEnd?.();
 			return false;
