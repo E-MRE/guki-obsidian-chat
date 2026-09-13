@@ -200,7 +200,14 @@ export interface PermissionItem {
 	answers?: Record<string, string | string[]>;
 }
 
-export type ChatItem = UserItem | AssistantItem | NoticeItem | PermissionItem;
+/** Compact boundary divider item in the transcript (SPEC §3 R1, §4). */
+export interface DividerItem {
+	kind: 'divider';
+	id: string;
+	text: string;
+}
+
+export type ChatItem = UserItem | AssistantItem | NoticeItem | PermissionItem | DividerItem;
 
 let nextId = 0;
 function newId(prefix: string): string {
@@ -329,6 +336,23 @@ export class ChatState {
 		this.itemList.push(item);
 		this.emitChange();
 		return item;
+	}
+
+	addDivider(id: string, text = 'Conversation compacted'): DividerItem {
+		const item: DividerItem = { kind: 'divider', id, text };
+		this.itemList.push(item);
+		this.emitChange();
+		return item;
+	}
+
+	removeItem(id: string): boolean {
+		const idx = this.itemList.findIndex((item) => item.id === id);
+		if (idx >= 0) {
+			this.itemList.splice(idx, 1);
+			this.emitChange();
+			return true;
+		}
+		return false;
 	}
 }
 

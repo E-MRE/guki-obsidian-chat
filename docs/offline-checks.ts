@@ -8828,6 +8828,232 @@ console.log('\nAD. Completed turn work group: collapsed intermediate work with M
 	check('AD10.11: bodyEl child 1 is answer block 3', bodyElI?.children[1] === block3ElI);
 }
 
+console.log('\nAE. Görev 7 — Conversation compacted divider (A1-A5)');
+{
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el?.addEventListener?.(evt, cb) } as any;
+
+	// Raw wire event lines from measured evidence (SPEC §2, raw-stream.out)
+	const RAW_COMPACT_BOUNDARY_LINE =
+		'{"type":"system","subtype":"compact_boundary","session_id":"214d9943-675d-4e9a-a7c7-b3dd55a2c363","uuid":"29916d2f-e8d8-477b-a205-e1daa675e651","compact_metadata":{"trigger":"manual","pre_tokens":26529,"post_tokens":5062,"cumulative_dropped_tokens":21467,"duration_ms":33022},"logical_parent_uuid":"2cd61295-c76d-4db6-a2a9-2121c7fdd71e"}';
+	const RAW_NEAR_MISS_STATUS_LINE =
+		'{"type":"system","subtype":"status","status":"requesting","session_id":"214d9943-675d-4e9a-a7c7-b3dd55a2c363","uuid":"2546cd8f-0466-462d-a9ba-91e20a4ede57"}';
+	const RAW_NEAR_MISS_MICROCOMPACT_LINE =
+		'{"type":"system","subtype":"microcompact_boundary","session_id":"214d9943-675d-4e9a-a7c7-b3dd55a2c363","uuid":"micro-boundary-uuid-1"}';
+	const RAW_SYNTHETIC_SUMMARY_LINE =
+		'{"type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\\n\\nSummary:\\n1. Primary Request and Intent: test probe\\n\\nContinue the conversation directly."},"session_id":"214d9943-675d-4e9a-a7c7-b3dd55a2c363","parent_tool_use_id":null,"uuid":"751baf78-b60b-4fe3-8f6e-b484da2dd784","timestamp":"2026-09-13T21:12:54.524Z","isReplay":false,"isSynthetic":true}';
+
+	// ------------------------------------------------------------------------
+	// A1. End-to-end chain check
+	// ------------------------------------------------------------------------
+	const stateA1 = new ChatState();
+	const reducerA1 = new StreamReducer(stateA1);
+	const listWrapperA1 = new FakeElement() as any;
+	const messageListA1 = new MessageList({} as any, listWrapperA1, dummyComp, { decide: () => {} } as any);
+	stateA1.subscribe(() => messageListA1.sync(stateA1.items));
+
+	stateA1.addUserMessage('Prior user prompt');
+	const asstBeforeA1 = stateA1.addAssistantMessage();
+	reducerA1.beginTurn(asstBeforeA1);
+	asstBeforeA1.blocks.set(0, { index: 0, kind: 'text', text: 'Prior assistant reply.', final: true });
+	stateA1.emitChange();
+
+	// Production entry point: parseStreamJsonLine -> reducer.apply
+	const evA1 = parseStreamJsonLine(RAW_COMPACT_BOUNDARY_LINE);
+	if (evA1) {
+		reducerA1.apply(evA1);
+	}
+
+	stateA1.addUserMessage('Subsequent user prompt');
+	stateA1.emitChange();
+
+	const dividerElA1 = listWrapperA1.querySelector('.guki-message-divider');
+	check('A1.1: divider element exists in rendered message list', dividerElA1 !== null && dividerElA1 !== undefined);
+	check('A1.2: divider label text is Conversation compacted', Boolean(dividerElA1?.text?.includes('Conversation compacted')));
+
+	const scrollContainerA1 = listWrapperA1.querySelector('.guki-messages') ?? listWrapperA1;
+	const childrenA1 = scrollContainerA1.children;
+	const idxBeforeA1 = childrenA1.findIndex((c: any) => c.hasClass('guki-message-assistant'));
+	const idxDividerA1 = childrenA1.indexOf(dividerElA1);
+	const idxAfterA1 = childrenA1.findIndex((c: any) => c.hasClass('guki-message-user') && c.text.includes('Subsequent user prompt'));
+	check('A1.3: divider is placed in correct position between prior and subsequent items',
+		idxBeforeA1 !== -1 && idxDividerA1 > idxBeforeA1 && idxAfterA1 > idxDividerA1);
+
+	// ------------------------------------------------------------------------
+	// A3. Near-miss checks
+	// ------------------------------------------------------------------------
+	const stateA3 = new ChatState();
+	const reducerA3 = new StreamReducer(stateA3);
+	const listWrapperA3 = new FakeElement() as any;
+	const messageListA3 = new MessageList({} as any, listWrapperA3, dummyComp, { decide: () => {} } as any);
+	stateA3.subscribe(() => messageListA3.sync(stateA3.items));
+
+	// (a) system line with different subtype
+	const evStatus = parseStreamJsonLine(RAW_NEAR_MISS_STATUS_LINE);
+	if (evStatus) reducerA3.apply(evStatus);
+	check('A3.1: system event with different subtype produces no divider',
+		listWrapperA3.querySelector('.guki-message-divider') === null);
+
+	// (b) microcompact_boundary line
+	const evMicro = parseStreamJsonLine(RAW_NEAR_MISS_MICROCOMPACT_LINE);
+	if (evMicro) reducerA3.apply(evMicro);
+	check('A3.2: microcompact_boundary produces no divider',
+		listWrapperA3.querySelector('.guki-message-divider') === null);
+
+	// (c) identical compact_boundary uuid delivered twice -> exactly one divider
+	if (evA1) {
+		reducerA3.apply(evA1);
+		reducerA3.apply(evA1);
+	}
+	const dividerCountA3 = listWrapperA3.querySelectorAll('.guki-message-divider').length;
+	eq('A3.3: identical compact_boundary uuid delivered twice produces exactly one divider', dividerCountA3, 1);
+
+	// ------------------------------------------------------------------------
+	// A4. Split-turn check
+	// ------------------------------------------------------------------------
+	const stateA4 = new ChatState();
+	const reducerA4 = new StreamReducer(stateA4);
+	const listWrapperA4 = new FakeElement() as any;
+	const messageListA4 = new MessageList({} as any, listWrapperA4, dummyComp, { decide: () => {} } as any);
+	stateA4.subscribe(() => messageListA4.sync(stateA4.items));
+
+	stateA4.addUserMessage('Explain quantum computing');
+	const asstA4 = stateA4.addAssistantMessage();
+	reducerA4.beginTurn(asstA4);
+
+	// Assistant produces text before compaction
+	reducerA4.apply({
+		type: 'stream_event',
+		event: {
+			type: 'content_block_start',
+			index: 0,
+			content_block: { type: 'text', text: '' },
+		},
+	} as any);
+	reducerA4.apply({
+		type: 'stream_event',
+		event: {
+			type: 'content_block_delta',
+			index: 0,
+			delta: { type: 'text_delta', text: 'Quantum computing uses qubits.' },
+		},
+	} as any);
+	reducerA4.apply({
+		type: 'assistant',
+		message: {
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Quantum computing uses qubits.' }],
+		},
+	} as any);
+
+	// Boundary arrives mid-turn!
+	const boundaryEvA4 = parseStreamJsonLine(
+		'{"type":"system","subtype":"compact_boundary","uuid":"split-turn-uuid-a4","compact_metadata":{"trigger":"auto"}}'
+	);
+	if (boundaryEvA4) {
+		reducerA4.apply(boundaryEvA4);
+	}
+
+	// Text arrives AFTER compaction in the same turn
+	reducerA4.apply({
+		type: 'stream_event',
+		event: {
+			type: 'content_block_start',
+			index: 0,
+			content_block: { type: 'text', text: '' },
+		},
+	} as any);
+	reducerA4.apply({
+		type: 'stream_event',
+		event: {
+			type: 'content_block_delta',
+			index: 0,
+			delta: { type: 'text_delta', text: 'Superposition enables parallel state evaluation.' },
+		},
+	} as any);
+	reducerA4.apply({
+		type: 'assistant',
+		message: {
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Superposition enables parallel state evaluation.' }],
+		},
+	} as any);
+
+	// Turn ends with result
+	reducerA4.apply({
+		type: 'result',
+		subtype: 'success',
+		is_error: false,
+		duration_ms: 15400,
+	} as any);
+
+	const scrollContainerA4 = listWrapperA4.querySelector('.guki-messages') ?? listWrapperA4;
+	const childrenA4 = scrollContainerA4.children;
+	const dividerElA4 = listWrapperA4.querySelector('.guki-message-divider');
+	const idxDividerA4 = childrenA4.indexOf(dividerElA4);
+	const asstBeforeElA4 = childrenA4.find((c: any) =>
+		c.hasClass('guki-message-assistant') && c.text.includes('Quantum computing uses qubits.')
+	);
+	const asstAfterElA4 = childrenA4.find((c: any) =>
+		c.hasClass('guki-message-assistant') && c.text.includes('Superposition enables parallel')
+	);
+	const idxAsstBeforeA4 = childrenA4.indexOf(asstBeforeElA4);
+	const idxAsstAfterA4 = childrenA4.indexOf(asstAfterElA4);
+
+	check('A4.1: earlier text stays above divider',
+		idxAsstBeforeA4 !== -1 && idxDividerA4 > idxAsstBeforeA4);
+	check('A4.2: text arriving after renders below divider',
+		idxAsstAfterA4 !== -1 && idxAsstAfterA4 > idxDividerA4);
+
+	// In-flight empty assistant item dropped on manual /compact:
+	stateA4.addUserMessage('/compact');
+	const asstEmpty = stateA4.addAssistantMessage();
+	reducerA4.beginTurn(asstEmpty);
+	// No text rendered; compact_boundary arrives
+	const boundaryEvManual = parseStreamJsonLine(
+		'{"type":"system","subtype":"compact_boundary","uuid":"split-turn-manual-uuid","compact_metadata":{"trigger":"manual"}}'
+	);
+	if (boundaryEvManual) {
+		reducerA4.apply(boundaryEvManual);
+	}
+	reducerA4.apply({
+		type: 'result',
+		subtype: 'success',
+		is_error: false,
+		duration_ms: 8000,
+	} as any);
+
+	// Check: no empty assistant bubble left behind in DOM
+	const allAssts = listWrapperA4.querySelectorAll('.guki-message-assistant');
+	const hasEmptyAsstBubble = allAssts.some((el: any) => el.text.trim().length === 0);
+	check('A4.3: no empty assistant bubble left behind after /compact turn', !hasEmptyAsstBubble);
+
+	// ------------------------------------------------------------------------
+	// A5. R8 check: synthetic summary message suppression vs ordinary user message
+	// ------------------------------------------------------------------------
+	const stateA5 = new ChatState();
+	const reducerA5 = new StreamReducer(stateA5);
+	const listWrapperA5 = new FakeElement() as any;
+	const messageListA5 = new MessageList({} as any, listWrapperA5, dummyComp, { decide: () => {} } as any);
+	stateA5.subscribe(() => messageListA5.sync(stateA5.items));
+
+	// Feed synthetic summary line from raw evidence
+	const evSynthetic = parseStreamJsonLine(RAW_SYNTHETIC_SUMMARY_LINE);
+	if (evSynthetic) {
+		reducerA5.apply(evSynthetic);
+	}
+	stateA5.emitChange();
+
+	const syntheticBubble = listWrapperA5.querySelector('.guki-message-user');
+	check('A5.1: synthetic summary message produces no user bubble',
+		syntheticBubble === null || !syntheticBubble.text.includes('This session is being continued'));
+
+	// Reverse check: ordinary user message produces a user bubble
+	stateA5.addUserMessage('An ordinary user message');
+	const ordinaryBubble = listWrapperA5.querySelector('.guki-message-user');
+	check('A5.2: ordinary user message produces user bubble',
+		ordinaryBubble !== null && ordinaryBubble.text.includes('An ordinary user message'));
+}
+
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
 
