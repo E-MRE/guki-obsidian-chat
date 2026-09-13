@@ -2,7 +2,13 @@
 // under test only uses these two from `obsidian` as values (the `instanceof` check on the vault
 // adapter); everything else it imports is type-only and erased at build time.
 export class App {}
-export class FileSystemAdapter {}
+export class FileSystemAdapter {
+	getBasePath() { return ''; }
+	getFullPath(path) {
+		const base = this.getBasePath();
+		return base ? `${base}/${path}` : path;
+	}
+}
 // `session-manager` pulls in `binary-resolver` → `node-api`, which imports Platform as a value.
 // Nothing in these checks calls it; the stub only has to exist for the bundle to link.
 export const Platform = { isDesktop: true };
@@ -12,6 +18,32 @@ export const Platform = { isDesktop: true };
 // classes here, not shapes, or the guard under test would answer "no" for every input and §O would
 // pass by refusing everything.
 export class TFile {}
+
+export function prepareFuzzySearch(query) {
+	const lowerQuery = query.toLowerCase();
+	return function(text) {
+		const lowerText = text.toLowerCase();
+		let queryIdx = 0;
+		let score = 0;
+		const matches = [];
+		for (let i = 0; i < lowerText.length; i++) {
+			if (queryIdx < lowerQuery.length && lowerText[i] === lowerQuery[queryIdx]) {
+				matches.push([i, i + 1]);
+				queryIdx++;
+				score += 10;
+				if (i > 0 && matches.some(m => m[1] === i)) score += 5;
+			}
+		}
+		if (queryIdx === lowerQuery.length) {
+			return { score, matches };
+		}
+		return null;
+	};
+}
+
+export function sortSearchResults(results) {
+	results.sort((a, b) => (b.match?.score ?? 0) - (a.match?.score ?? 0));
+}
 
 // Phase 5: `permission-broker.ts` imports `normalizePath` as a value. Obsidian's own version
 // collapses duplicate slashes and strips a leading one; the broker only ever builds a

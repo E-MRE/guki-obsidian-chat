@@ -20,6 +20,7 @@ export default class GukiChatPlugin extends Plugin {
 			this.manifest.dir,
 			this.settings.claudeBinaryPath,
 			this.settings,
+			this.settings.slashCommands ?? [],
 		);
 		session.setOnSaveSettings(async (newPermissions) => {
 			const permissions = newPermissions ?? session.getPermissionSettings();
@@ -28,6 +29,13 @@ export default class GukiChatPlugin extends Plugin {
 				rememberedDecisions: [...permissions.rememberedDecisions],
 			};
 			await this.saveSettings();
+		});
+		session.setOnSlashCommandsUpdated(async (commands) => {
+			this.settings = {
+				...this.settings,
+				slashCommands: [...commands],
+			};
+			await this.saveData(this.settings);
 		});
 		this.session = session;
 
@@ -76,6 +84,9 @@ export default class GukiChatPlugin extends Plugin {
 			...DEFAULT_SETTINGS,
 			...(data ?? {}),
 			...permissions,
+			slashCommands: Array.isArray(data?.slashCommands)
+				? data.slashCommands.filter((s): s is string => typeof s === 'string')
+				: [],
 		};
 	}
 
