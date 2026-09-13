@@ -8642,6 +8642,97 @@ console.log('\nAD. Completed turn work group: collapsed intermediate work with M
 	eq('AD5.2: text block before tool is inside work-content', contentElE?.children.length, 2);
 	check('AD5.3: trailing text block is outside work-content',
 		(bodyElE?.children ?? []).some((c: any) => c.hasClass('guki-block-text') && c !== contentElE?.children[0]));
+
+	// (f) Check 1: A work block created AFTER the group already exists ends up inside the group's content container, in correct slot order.
+	const listWrapperF = new FakeElement() as any;
+	const listF = new MessageList({} as any, listWrapperF, dummyComp, { decide: () => {} } as any);
+	const itemF: AssistantItem = {
+		id: 'asst-chk1',
+		kind: 'assistant',
+		status: 'complete',
+		meta: { durationMs: 20000 },
+		blocks: new Map<number, MessageBlock>([
+			[0, { index: 0, kind: 'thinking', text: 'thinking', final: true }],
+			[2, { index: 2, kind: 'tool_use', text: '', final: true, toolName: 'Write', toolUseId: 't-2' }],
+			[3, { index: 3, kind: 'text', text: 'Answer', final: true }],
+		]),
+	};
+	listF.sync([itemF]);
+	const entryF = (listF as any).rendered.get('asst-chk1');
+	const contentElF = listWrapperF.querySelector('.guki-work-content');
+
+	// A work block created on bodyEl after the group exists
+	const block1ElF = entryF.bodyEl.createDiv({ cls: 'guki-block guki-block-tool_use' });
+	entryF.blocks.set(1, { el: block1ElF, kind: 'tool_use', renderedText: '', renderedFinal: true });
+	itemF.blocks.set(1, { index: 1, kind: 'tool_use', text: '', final: true, toolName: 'Read', toolUseId: 't-1' });
+
+	// Reconcile via syncWorkGroup
+	(listF as any).syncWorkGroup(itemF, entryF);
+
+	check('AD6.1: work block created after group exists ends up inside work content container',
+		Boolean(contentElF?.children.includes(block1ElF)));
+	check('AD6.2: work block is placed in slot order (index 1 between index 0 and index 2)',
+		contentElF?.children[1] === block1ElF);
+
+	// (g) Check 2: An item that changes so that a block previously classified as work becomes part of the answer run: that block is moved back OUT of the container, in correct slot order.
+	const listWrapperG = new FakeElement() as any;
+	const listG = new MessageList({} as any, listWrapperG, dummyComp, { decide: () => {} } as any);
+	const itemG: AssistantItem = {
+		id: 'asst-chk2',
+		kind: 'assistant',
+		status: 'complete',
+		meta: { durationMs: 15000 },
+		blocks: new Map<number, MessageBlock>([
+			[0, { index: 0, kind: 'thinking', text: 'thinking', final: true }],
+			[1, { index: 1, kind: 'text', text: 'interim', final: true }],
+			[2, { index: 2, kind: 'tool_use', text: '', final: true, toolName: 'Read', toolUseId: 't-g1' }],
+			[3, { index: 3, kind: 'text', text: 'final ans', final: true }],
+		]),
+	};
+	listG.sync([itemG]);
+	const entryG = (listG as any).rendered.get('asst-chk2');
+	const bodyElG = listWrapperG.querySelector('.guki-message-body');
+	const contentElG = listWrapperG.querySelector('.guki-work-content');
+	const workGroupG = listWrapperG.querySelector('.guki-work-group');
+
+	eq('AD7.1: initial work content holds 3 blocks', contentElG?.children.length, 3);
+	eq('AD7.2: initial bodyEl has workGroup and 1 answer block', bodyElG?.children.length, 2);
+
+	// Block 2 (tool_use) removed -> block 1 becomes part of answer run [block 1, block 3]
+	itemG.blocks.delete(2);
+	listG.sync([itemG]);
+
+	const block1ElG = entryG.blocks.get(1)?.el;
+	const block3ElG = entryG.blocks.get(3)?.el;
+
+	check('AD7.3: block 1 is moved out of work-content', Boolean(!contentElG?.children.includes(block1ElG)));
+	check('AD7.4: block 1 is direct child of bodyEl', Boolean(bodyElG?.children.includes(block1ElG)));
+	check('AD7.5: bodyEl has work group at child 0', bodyElG?.children[0] === workGroupG);
+	check('AD7.6: block 1 is in slot order in bodyEl at child 1', bodyElG?.children[1] === block1ElG);
+	check('AD7.7: block 3 is in slot order in bodyEl at child 2', bodyElG?.children[2] === block3ElG);
+
+	// (h) Check 3: Reconciling twice is a no-op, and a group the user has expanded stays expanded.
+	const headerElG = workGroupG?.querySelector('.guki-work-header');
+	headerElG?.click();
+	eq('AD8.1: clicking header sets aria-expanded true', headerElG?.getAttribute('aria-expanded'), 'true');
+	check('AD8.2: work content is shown after click', Boolean(contentElG && !contentElG.hasClass('guki-hidden')));
+
+	// First re-sync (reconcile)
+	listG.sync([itemG]);
+	eq('AD8.3: sync after expand keeps aria-expanded true', headerElG?.getAttribute('aria-expanded'), 'true');
+	check('AD8.4: sync after expand keeps work content visible', Boolean(contentElG && !contentElG.hasClass('guki-hidden')));
+	eq('AD8.5: bodyEl children count unchanged after re-sync', bodyElG?.children.length, 3);
+	eq('AD8.6: contentEl children count unchanged after re-sync', contentElG?.children.length, 1);
+	check('AD8.7: bodyEl child 0 still workGroup', bodyElG?.children[0] === workGroupG);
+	check('AD8.8: bodyEl child 1 still block 1', bodyElG?.children[1] === block1ElG);
+	check('AD8.9: bodyEl child 2 still block 3', bodyElG?.children[2] === block3ElG);
+
+	// Second re-sync (reconcile twice is a no-op)
+	listG.sync([itemG]);
+	eq('AD8.10: reconciling twice keeps aria-expanded true', headerElG?.getAttribute('aria-expanded'), 'true');
+	check('AD8.11: reconciling twice keeps work content visible', Boolean(contentElG && !contentElG.hasClass('guki-hidden')));
+	eq('AD8.12: bodyEl children count unchanged after reconciling twice', bodyElG?.children.length, 3);
+	eq('AD8.13: contentEl children count unchanged after reconciling twice', contentElG?.children.length, 1);
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
