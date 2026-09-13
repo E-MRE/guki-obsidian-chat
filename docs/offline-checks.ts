@@ -8733,6 +8733,99 @@ console.log('\nAD. Completed turn work group: collapsed intermediate work with M
 	check('AD8.11: reconciling twice keeps work content visible', Boolean(contentElG && !contentElG.hasClass('guki-hidden')));
 	eq('AD8.12: bodyEl children count unchanged after reconciling twice', bodyElG?.children.length, 3);
 	eq('AD8.13: contentEl children count unchanged after reconciling twice', contentElG?.children.length, 1);
+
+	// (i) Check AD9: Resolved permission row inside a collapsed group
+	const listWrapperH = new FakeElement() as any;
+	const listH = new MessageList({} as any, listWrapperH, dummyComp, { decide: () => {} } as any);
+	const itemH: AssistantItem = {
+		id: 'asst-chk-perm',
+		kind: 'assistant',
+		status: 'complete',
+		meta: { durationMs: 40000 },
+		blocks: new Map<number, MessageBlock>([
+			[0, { index: 0, kind: 'thinking', text: 'thinking', final: true }],
+			[1, { index: 1, kind: 'tool_use', text: '', final: true, toolName: 'Read', toolUseId: 'tool-perm-ad9', toolPending: false }],
+			[2, { index: 2, kind: 'text', text: 'Answer after tool.', final: true }],
+		]),
+	};
+	// First sync creates the collapsed work group with tool_use block inside it
+	listH.sync([itemH]);
+
+	const entryH = (listH as any).rendered.get('asst-chk-perm');
+	const bodyElH = listWrapperH.querySelector('.guki-message-body');
+	const workGroupH = listWrapperH.querySelector('.guki-work-group');
+	const contentElH = workGroupH?.querySelector('.guki-work-content');
+	const toolBlockElH = entryH?.blocks.get(1)?.el;
+
+	check('AD9.1: work group exists and is collapsed', Boolean(contentElH?.hasClass('guki-hidden')));
+	check('AD9.2: tool_use block lives inside work-content', Boolean(contentElH?.children.includes(toolBlockElH)));
+
+	const permItemH: PermissionItem = {
+		id: 'perm-row-ad9',
+		kind: 'permission',
+		requestId: 'req-perm-ad9',
+		toolName: 'Read',
+		toolUseId: 'tool-perm-ad9',
+		status: 'allowed',
+		input: { file_path: 'vault/note.md' },
+	};
+	// Re-sync with the resolved permission item whose toolUseId matches the tool block
+	listH.sync([itemH, permItemH]);
+
+	const permEntryH = (listH as any).rendered.get('perm-row-ad9');
+	const permElH = permEntryH?.el;
+
+	check('AD9.3: permission row element exists', permElH !== null && permElH !== undefined);
+	check('AD9.4: permission row attached inside tool card element', permElH?.parentElement === toolBlockElH);
+	check('AD9.5: tool card element contains permission row', Boolean(toolBlockElH?.contains(permElH)));
+	check('AD9.6: permission row lives inside work content container', Boolean(contentElH?.contains(permElH)));
+	const scrollElH = (listH as any).scrollEl;
+	check('AD9.7: permission row is not direct child of message body', !bodyElH?.children.includes(permElH));
+	check('AD9.8: permission row is not loose in scroll container', !scrollElH?.children.includes(permElH));
+
+	// (j) Check AD10: Removing a vanished block from inside the group
+	const listWrapperI = new FakeElement() as any;
+	const listI = new MessageList({} as any, listWrapperI, dummyComp, { decide: () => {} } as any);
+	const itemI: AssistantItem = {
+		id: 'asst-vanished-block',
+		kind: 'assistant',
+		status: 'complete',
+		meta: { durationMs: 28000 },
+		blocks: new Map<number, MessageBlock>([
+			[0, { index: 0, kind: 'thinking', text: 'thinking', final: true }],
+			[1, { index: 1, kind: 'tool_use', text: '', final: true, toolName: 'Read', toolUseId: 't-i1', toolPending: false }],
+			[2, { index: 2, kind: 'tool_use', text: '', final: true, toolName: 'Write', toolUseId: 't-i2', toolPending: false }],
+			[3, { index: 3, kind: 'text', text: 'Final answer.', final: true }],
+		]),
+	};
+	listI.sync([itemI]);
+
+	const entryI = (listI as any).rendered.get('asst-vanished-block');
+	const bodyElI = listWrapperI.querySelector('.guki-message-body');
+	const workGroupI = listWrapperI.querySelector('.guki-work-group');
+	const contentElI = listWrapperI.querySelector('.guki-work-content');
+
+	const block0ElI = entryI?.blocks.get(0)?.el;
+	const block1ElI = entryI?.blocks.get(1)?.el;
+	const block2ElI = entryI?.blocks.get(2)?.el;
+	const block3ElI = entryI?.blocks.get(3)?.el;
+
+	eq('AD10.1: initial work content holds 3 blocks', contentElI?.children.length, 3);
+	check('AD10.2: block 1 is inside work content initially', Boolean(contentElI?.children.includes(block1ElI)));
+
+	// Block 1 disappears from item on later sync
+	itemI.blocks.delete(1);
+	listI.sync([itemI]);
+
+	check('AD10.3: vanished block 1 is removed from work-content', !contentElI?.children.includes(block1ElI));
+	check('AD10.4: vanished block 1 is removed from bodyEl', !bodyElI?.children.includes(block1ElI));
+	check('AD10.5: vanished block 1 element has null parentElement', block1ElI?.parentElement === null);
+	check('AD10.6: vanished block 1 is removed from rendered blocks map', !entryI?.blocks.has(1));
+	eq('AD10.7: work content holds exactly 2 remaining blocks', contentElI?.children.length, 2);
+	check('AD10.8: remaining block 0 is at slot 0 in work content', contentElI?.children[0] === block0ElI);
+	check('AD10.9: remaining block 2 is at slot 1 in work content', contentElI?.children[1] === block2ElI);
+	check('AD10.10: bodyEl child 0 is work group', bodyElI?.children[0] === workGroupI);
+	check('AD10.11: bodyEl child 1 is answer block 3', bodyElI?.children[1] === block3ElI);
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
