@@ -131,6 +131,9 @@ export class StreamReducer {
 	/** True while a turn is actively processing between beginTurn and applyResult/failActiveTurn. */
 	private inTurn = false;
 
+	/** Assistant items participating in the current turn (e.g. across a mid-turn compaction split). */
+	private turnItems: AssistantItem[] = [];
+
 	/**
 	 * The last `result.total_cost_usd` this reducer has seen, and the reducer's own running sum of
 	 * per-turn deltas. `null` means "no result yet" — the state a fresh process starts in, and the
@@ -192,6 +195,7 @@ export class StreamReducer {
 		this.inTurn = true;
 		this.active = item;
 		this.turnItem = item;
+		this.turnItems = [item];
 		this.blockBase = 0;
 		this.nextFreeSlot = 0;
 		this.assistantSlot = 0;
@@ -254,8 +258,16 @@ export class StreamReducer {
 	 */
 	private stampPermissionState(toolUseId: string): void {
 		// `turnItem`, not `active`: this is reached from `onTurnEnd`, by which point the turn
-		// has already been closed and `active` is null.
-		const block = this.blockInTurn(this.turnItem, toolUseId);
+		// has already been closed and `active` is null. Check turnItems if split across compactions.
+		let block = this.blockInTurn(this.turnItem, toolUseId);
+		if (!block) {
+			for (const item of this.turnItems) {
+				block = this.blockInTurn(item, toolUseId);
+				if (block) {
+					break;
+				}
+			}
+		}
 		if (!block) {
 			return;
 		}
@@ -384,6 +396,10 @@ export class StreamReducer {
 		if (inFlight) {
 			if (!hasRenderableContent(inFlight)) {
 				this.state.removeItem(inFlight.id);
+				const idx = this.turnItems.indexOf(inFlight);
+				if (idx !== -1) {
+					this.turnItems.splice(idx, 1);
+				}
 			} else {
 				closeOpenBlocks(inFlight);
 				inFlight.status = 'complete';
@@ -402,6 +418,7 @@ export class StreamReducer {
 		item.status = 'streaming';
 		this.active = item;
 		this.turnItem = item;
+		this.turnItems.push(item);
 		return item;
 	}
 
@@ -495,10 +512,6 @@ export class StreamReducer {
 	 * dropped: guessing a slot would put a tool's output under a different tool's name.
 	 */
 	private applyUser(event: UserEvent): void {
-		// Suppress synthetic summary messages following compact_boundary (SPEC §2 F5, §3 R8).
-		if (event.isSynthetic === true) {
-			return;
-		}
 		const item = this.active;
 		// A subagent's own tool results arrive as `user` events under the parent's id. Their
 		// content stays hidden in v1; what they contribute is the knowledge that work is still
@@ -780,48 +793,60 @@ export class StreamReducer {
 
 	private applyResult(event: ResultEvent): void {
 		this.inTurn = false;
-		const item = this.active;
+		const activeItem = this.active;
 		this.active = null;
-		if (!item) {
-			this.onTurnEnd?.();
-			return;
-		}
 
-		item.meta = {
-			costUsd: this.turnCostUsd(event.total_cost_usd),
-			durationMs: event.duration_ms,
-			sessionCostUsd: event.total_cost_usd === undefined ? undefined : this.sessionCostUsd,
-		};
+		const costUsd = this.turnCostUsd(event.total_cost_usd);
+		const durationMs = event.duration_ms;
+		const sessionCostUsd = event.total_cost_usd === undefined ? undefined : this.sessionCostUsd;
+
 		const usage = contextUsageFromResult(event);
 		if (usage) {
 			this.onContextUsage?.(usage);
 		}
-		// Whatever the outcome, no block is still streaming once the turn is over — otherwise a
-		// cancelled turn leaves a thinking header saying "Thinking…" forever.
-		closeOpenBlocks(item);
-		this.applyPermissionDenials(item, event);
 
-		// The interrupt flag is checked first and independently of the subtype: see its declaration
-		// for why `terminal_reason` alone misses a Stop pressed during a pending tool call.
-		if (this.interruptSent || ABORTED_TERMINAL_REASONS.has(event.terminal_reason ?? '')) {
-			item.status = 'stopped';
-		} else if (event.is_error === true) {
-			item.status = 'error';
-			// `result` may be absent entirely; fall back to the subtype rather than reading it.
-			item.errorText =
-				typeof event.result === 'string' && event.result.length > 0
-					? event.result
-					: `The turn ended with ${event.subtype}.`;
-		} else {
-			// A denied tool is not a failed turn: subtype 'success', is_error false, and the denial
-			// shows up only in permission_denials[] (RESEARCH B5). Nothing to render as an error.
-			if (item.blocks.size === 0 && typeof event.result === 'string' && event.result.length > 0) {
-				// Defensive: no assistant event carried text, but the result did.
-				item.blocks.set(0, { index: 0, kind: 'text', text: event.result, final: true });
+		const terminalItem = activeItem ?? (this.turnItems.length > 0 ? this.turnItems[this.turnItems.length - 1] : null);
+
+		for (const prevItem of this.turnItems) {
+			if (prevItem !== terminalItem) {
+				prevItem.meta = {
+					durationMs,
+				};
 			}
-			item.status = 'complete';
 		}
 
+		if (terminalItem) {
+			terminalItem.meta = {
+				costUsd,
+				durationMs,
+				sessionCostUsd,
+			};
+			closeOpenBlocks(terminalItem);
+			this.applyPermissionDenials(terminalItem, event);
+
+			// The interrupt flag is checked first and independently of the subtype: see its declaration
+			// for why `terminal_reason` alone misses a Stop pressed during a pending tool call.
+			if (this.interruptSent || ABORTED_TERMINAL_REASONS.has(event.terminal_reason ?? '')) {
+				terminalItem.status = 'stopped';
+			} else if (event.is_error === true) {
+				terminalItem.status = 'error';
+				// `result` may be absent entirely; fall back to the subtype rather than reading it.
+				terminalItem.errorText =
+					typeof event.result === 'string' && event.result.length > 0
+						? event.result
+						: `The turn ended with ${event.subtype}.`;
+			} else {
+				// A denied tool is not a failed turn: subtype 'success', is_error false, and the denial
+				// shows up only in permission_denials[] (RESEARCH B5). Nothing to render as an error.
+				if (terminalItem.blocks.size === 0 && typeof event.result === 'string' && event.result.length > 0) {
+					// Defensive: no assistant event carried text, but the result did.
+					terminalItem.blocks.set(0, { index: 0, kind: 'text', text: event.result, final: true });
+				}
+				terminalItem.status = 'complete';
+			}
+		}
+
+		this.turnItems = [];
 		this.state.emitChange();
 		this.onTurnEnd?.();
 	}
@@ -842,10 +867,18 @@ export class StreamReducer {
 	 *
 	 * `item` is the local from `applyResult`, not `this.active` — that is already null here.
 	 */
-	private applyPermissionDenials(item: AssistantItem, event: ResultEvent): void {
+	private applyPermissionDenials(terminalItem: AssistantItem, event: ResultEvent): void {
 		for (const toolUseId of deniedToolUseIds(event)) {
 			this.permissionDeniedTools.add(toolUseId);
-			const block = this.blockInTurn(item, toolUseId);
+			let block = this.blockInTurn(terminalItem, toolUseId);
+			if (!block) {
+				for (const item of this.turnItems) {
+					block = this.blockInTurn(item, toolUseId);
+					if (block) {
+						break;
+					}
+				}
+			}
 			if (block) {
 				this.markDenied(block, true);
 			}
@@ -863,8 +896,9 @@ export class StreamReducer {
 	 */
 	failActiveTurn(message: string): boolean {
 		this.inTurn = false;
-		const item = this.active;
+		const item = this.active ?? (this.turnItems.length > 0 ? this.turnItems[this.turnItems.length - 1] : null);
 		this.active = null;
+		this.turnItems = [];
 		if (!item) {
 			this.onTurnEnd?.();
 			return false;

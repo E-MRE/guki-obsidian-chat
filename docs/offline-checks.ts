@@ -9022,10 +9022,60 @@ console.log('\nAE. Görev 7 — Conversation compacted divider (A1-A5)');
 		duration_ms: 8000,
 	} as any);
 
-	// Check: no empty assistant bubble left behind in DOM
-	const allAssts = listWrapperA4.querySelectorAll('.guki-message-assistant');
-	const hasEmptyAsstBubble = allAssts.some((el: any) => el.text.trim().length === 0);
-	check('A4.3: no empty assistant bubble left behind after /compact turn', !hasEmptyAsstBubble);
+	// Check: empty assistant item is removed from ChatState (not left behind)
+	check('A4.3: empty assistant item is removed from ChatState after /compact turn',
+		!stateA4.items.some((i: any) => i.id === asstEmpty.id));
+
+	// Mid-turn compaction without post-boundary content (Attack 2 / FIX-1):
+	stateA4.addUserMessage('Run grep');
+	const asstMidComp = stateA4.addAssistantMessage();
+	reducerA4.beginTurn(asstMidComp);
+	reducerA4.apply({
+		type: 'stream_event',
+		event: {
+			type: 'content_block_start',
+			index: 0,
+			content_block: { type: 'tool_use', id: 'tool-call-a4', name: 'Bash' }
+		}
+	} as any);
+	reducerA4.apply({
+		type: 'stream_event',
+		event: { type: 'content_block_stop', index: 0 }
+	} as any);
+	reducerA4.apply({
+		type: 'user',
+		message: {
+			role: 'user',
+			content: [{ type: 'tool_result', tool_use_id: 'tool-call-a4', content: 'output' }]
+		}
+	} as any);
+	const boundaryEvTool = parseStreamJsonLine(
+		'{"type":"system","subtype":"compact_boundary","uuid":"split-mid-turn-uuid","compact_metadata":{"trigger":"auto"}}'
+	);
+	if (boundaryEvTool) reducerA4.apply(boundaryEvTool);
+	reducerA4.apply({
+		type: 'result',
+		subtype: 'success',
+		is_error: false,
+		duration_ms: 25000,
+		total_cost_usd: 0.12
+	} as any);
+
+	check('A4.4: mid-turn compaction without post-boundary content preserves durationMs and cost',
+		asstMidComp.meta?.durationMs === 25000 && asstMidComp.meta?.costUsd === 0.12);
+
+	stateA4.addUserMessage('Next turn prompt');
+	const asstNext = stateA4.addAssistantMessage();
+	reducerA4.beginTurn(asstNext);
+	reducerA4.apply({
+		type: 'result',
+		subtype: 'success',
+		is_error: false,
+		duration_ms: 5000,
+		total_cost_usd: 0.15
+	} as any);
+	check('A4.5: next turn bills delta cost (0.03) after mid-turn compaction',
+		asstNext.meta?.costUsd === 0.03);
 
 	// ------------------------------------------------------------------------
 	// A5. R8 check: synthetic summary message suppression vs ordinary user message
@@ -9045,7 +9095,7 @@ console.log('\nAE. Görev 7 — Conversation compacted divider (A1-A5)');
 
 	const syntheticBubble = listWrapperA5.querySelector('.guki-message-user');
 	check('A5.1: synthetic summary message produces no user bubble',
-		syntheticBubble === null || !syntheticBubble.text.includes('This session is being continued'));
+		syntheticBubble === null && stateA5.items.filter((i: any) => i.kind === 'user').length === 0);
 
 	// Reverse check: ordinary user message produces a user bubble
 	stateA5.addUserMessage('An ordinary user message');
