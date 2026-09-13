@@ -598,6 +598,12 @@ export class MessageList {
 		// Threshold: if zero work blocks, create no group at all.
 		if (workBlocks.length === 0) {
 			if (entry.workGroup) {
+				for (const block of orderedBlocks(item)) {
+					const rendered = entry.blocks.get(block.index);
+					if (rendered && rendered.el.parentElement !== entry.bodyEl) {
+						entry.bodyEl.insertBefore(rendered.el, entry.workGroup.groupEl);
+					}
+				}
 				entry.workGroup.groupEl.remove();
 				entry.workGroup = undefined;
 				return true;
@@ -649,33 +655,53 @@ export class MessageList {
 
 		const workGroup = entry.workGroup;
 
-		// Position groupEl before first answer block in entry.bodyEl
-		const firstAnswerBlock = answerBlocks[0];
-		const firstAnswer = firstAnswerBlock !== undefined ? entry.blocks.get(firstAnswerBlock.index) : undefined;
-		if (firstAnswer?.el && firstAnswer.el.parentElement === entry.bodyEl) {
-			if (workGroup.groupEl.nextSibling !== firstAnswer.el || workGroup.groupEl.parentElement !== entry.bodyEl) {
-				entry.bodyEl.insertBefore(workGroup.groupEl, firstAnswer.el);
-				changed = true;
-			}
-		} else if (workGroup.groupEl.parentElement !== entry.bodyEl) {
-			entry.bodyEl.appendChild(workGroup.groupEl);
-			changed = true;
-		}
-
-		// Move work blocks into contentEl if not already there
+		const workEls: HTMLElement[] = [];
 		for (const block of workBlocks) {
 			const rendered = entry.blocks.get(block.index);
-			if (rendered && rendered.el.parentElement !== workGroup.contentEl) {
-				workGroup.contentEl.appendChild(rendered.el);
+			if (rendered) {
+				workEls.push(rendered.el);
+			}
+		}
+
+		const answerEls: HTMLElement[] = [];
+		for (const block of answerBlocks) {
+			const rendered = entry.blocks.get(block.index);
+			if (rendered) {
+				answerEls.push(rendered.el);
+			}
+		}
+
+		// Move any answer blocks sitting inside contentEl out to entry.bodyEl
+		for (const el of answerEls) {
+			if (el.parentElement === workGroup.contentEl) {
+				entry.bodyEl.appendChild(el);
 				changed = true;
 			}
 		}
 
-		// Ensure answer blocks are direct children of entry.bodyEl
-		for (const block of answerBlocks) {
-			const rendered = entry.blocks.get(block.index);
-			if (rendered && rendered.el.parentElement !== entry.bodyEl) {
-				entry.bodyEl.appendChild(rendered.el);
+		// Reconcile work blocks into contentEl in slot order
+		for (let i = workEls.length - 1; i >= 0; i--) {
+			const el = workEls[i];
+			if (!el) {
+				continue;
+			}
+			const nextEl = workEls[i + 1] ?? null;
+			if (el.parentElement !== workGroup.contentEl || el.nextSibling !== nextEl) {
+				workGroup.contentEl.insertBefore(el, nextEl);
+				changed = true;
+			}
+		}
+
+		// Reconcile bodyEl: groupEl followed by answer blocks in slot order
+		const bodyExpected = [workGroup.groupEl, ...answerEls];
+		for (let i = bodyExpected.length - 1; i >= 0; i--) {
+			const el = bodyExpected[i];
+			if (!el) {
+				continue;
+			}
+			const nextEl = bodyExpected[i + 1] ?? null;
+			if (el.parentElement !== entry.bodyEl || el.nextSibling !== nextEl) {
+				entry.bodyEl.insertBefore(el, nextEl);
 				changed = true;
 			}
 		}
