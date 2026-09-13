@@ -9520,6 +9520,301 @@ console.log('\nAF. Görev 7 Fix 2 — Per-segment work group durations across co
 	}
 }
 
+console.log('\nAG. Görev 7 Fix 3 — Structural accounting (FIX-A) and proportional scaling (FIX-B)');
+{
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el?.addEventListener?.(evt, cb) } as any;
+
+	// Check AG.1 (FIX-A): Structural accounting via boundaryTimestamps produces correct segment durations
+	{
+		let mockTime = 5000000;
+		const origDateNow = Date.now;
+		Date.now = () => mockTime;
+
+		const state = new ChatState();
+		const reducer = new StreamReducer(state);
+		const listWrapper = new FakeElement() as any;
+		const messageList = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+		state.subscribe(() => messageList.sync(state.items));
+
+		state.addUserMessage('Explain quantum computing');
+		const asst = state.addAssistantMessage();
+		reducer.beginTurn(asst);
+
+		// Pre-compaction: tool use + text
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'tool_use', id: 'tool-ag-1', name: 'Bash' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: { type: 'content_block_stop', index: 0 }
+		} as any);
+		reducer.apply({
+			type: 'user',
+			message: {
+				role: 'user',
+				content: [{ type: 'tool_result', tool_use_id: 'tool-ag-1', content: 'output' }]
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 1,
+				content_block: { type: 'text', text: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 1,
+				delta: { type: 'text_delta', text: 'Pre-compaction answer.' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'assistant',
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'tool_use', id: 'tool-ag-1', name: 'Bash' },
+					{ type: 'text', text: 'Pre-compaction answer.' }
+				]
+			}
+		} as any);
+
+		mockTime += 103000; // 1:43
+
+		const boundaryEv = parseStreamJsonLine(
+			'{"type":"system","subtype":"compact_boundary","uuid":"boundary-uuid-ag-1","compact_metadata":{"trigger":"auto"}}'
+		);
+		if (boundaryEv) reducer.apply(boundaryEv);
+
+		// Post-compaction: thinking + text
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'thinking', thinking: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 0,
+				delta: { type: 'thinking_delta', thinking: 'Post-compaction thinking...' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: { type: 'content_block_stop', index: 0 }
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 1,
+				content_block: { type: 'text', text: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 1,
+				delta: { type: 'text_delta', text: 'Post-compaction answer.' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'assistant',
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'thinking', thinking: 'Post-compaction thinking...' },
+					{ type: 'text', text: 'Post-compaction answer.' }
+				]
+			}
+		} as any);
+
+		mockTime += 16000; // 0:16
+
+		reducer.apply({
+			type: 'result',
+			subtype: 'success',
+			is_error: false,
+			duration_ms: 119000,
+			total_cost_usd: 0.15
+		} as any);
+
+		Date.now = origDateNow;
+		messageList.sync(state.items);
+
+		const workHeaders = listWrapper.querySelectorAll('.guki-work-header');
+		check('AG1.1: exactly 2 work headers rendered for split turn', workHeaders.length === 2);
+		eq('AG1.2: pre-compaction work header shows Worked for 1:43', workHeaders[0]?.text?.trim(), 'Worked for 1:43');
+		eq('AG1.3: post-compaction work header shows Worked for 0:16', workHeaders[1]?.text?.trim(), 'Worked for 0:16');
+	}
+
+	// Check AG.2 (FIX-B): Clock skew / local overshoot (70s local vs 50s CLI total)
+	{
+		let mockTime = 6000000;
+		const origDateNow = Date.now;
+		Date.now = () => mockTime;
+
+		const state = new ChatState();
+		const reducer = new StreamReducer(state);
+		const listWrapper = new FakeElement() as any;
+		const messageList = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+		state.subscribe(() => messageList.sync(state.items));
+
+		state.addUserMessage('Clock skew query');
+		const asst = state.addAssistantMessage();
+		reducer.beginTurn(asst);
+
+		// Segment 1: tool use + text
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'tool_use', id: 'tool-skew-1', name: 'Bash' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: { type: 'content_block_stop', index: 0 }
+		} as any);
+		reducer.apply({
+			type: 'user',
+			message: {
+				role: 'user',
+				content: [{ type: 'tool_result', tool_use_id: 'tool-skew-1', content: 'out' }]
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 1,
+				content_block: { type: 'text', text: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 1,
+				delta: { type: 'text_delta', text: 'Answer 1' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'assistant',
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'tool_use', id: 'tool-skew-1', name: 'Bash' },
+					{ type: 'text', text: 'Answer 1' }
+				]
+			}
+		} as any);
+
+		mockTime += 60000; // 60s local for segment 1
+
+		const boundaryEv = parseStreamJsonLine(
+			'{"type":"system","subtype":"compact_boundary","uuid":"b-skew-1","compact_metadata":{"trigger":"auto"}}'
+		);
+		if (boundaryEv) reducer.apply(boundaryEv);
+
+		// Segment 2: thinking + text
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'thinking', thinking: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 0,
+				delta: { type: 'thinking_delta', thinking: 'think' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: { type: 'content_block_stop', index: 0 }
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 1,
+				content_block: { type: 'text', text: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 1,
+				delta: { type: 'text_delta', text: 'Answer 2' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'assistant',
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'thinking', thinking: 'think' },
+					{ type: 'text', text: 'Answer 2' }
+				]
+			}
+		} as any);
+
+		mockTime += 10000; // 10s local for segment 2. Total local: 70s
+
+		// CLI reports duration_ms: 50,000 (50s)
+		reducer.apply({
+			type: 'result',
+			subtype: 'success',
+			is_error: false,
+			duration_ms: 50000,
+			total_cost_usd: 0.10
+		} as any);
+
+		Date.now = origDateNow;
+		messageList.sync(state.items);
+
+		const skewHeaders = listWrapper.querySelectorAll('.guki-work-header');
+		check('AG2.1: clock skew produces exactly 2 work headers', skewHeaders.length === 2);
+		const h1 = skewHeaders[0]?.text?.trim();
+		const h2 = skewHeaders[1]?.text?.trim();
+		// Crucial assertion: no segment that performed work may print "Worked for 0:00"
+		check('AG2.2: segment 1 does not print Worked for 0:00', h1 !== 'Worked for 0:00');
+		check('AG2.3: segment 2 does not print Worked for 0:00', h2 !== 'Worked for 0:00');
+		eq('AG2.4: segment 1 proportional duration is Worked for 0:43', h1, 'Worked for 0:43');
+		eq('AG2.5: segment 2 proportional duration is Worked for 0:07', h2, 'Worked for 0:07');
+
+		// Displayed segments sum to the CLI's reported total (50s)
+		const parseSec = (header: string | undefined): number => {
+			if (!header) return -1;
+			const m = header.match(/Worked for (\d+):(\d+)/);
+			return m ? parseInt(m[1]!, 10) * 60 + parseInt(m[2]!, 10) : -1;
+		};
+		const s1 = parseSec(h1);
+		const s2 = parseSec(h2);
+		check('AG2.6: displayed segment durations sum to CLI total (43s + 7s = 50s)', s1 + s2 === 50, `got ${s1} + ${s2} = ${s1 + s2}`);
+	}
+}
+
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
 

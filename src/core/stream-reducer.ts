@@ -134,11 +134,17 @@ export class StreamReducer {
 	/** Assistant items participating in the current turn (e.g. across a mid-turn compaction split). */
 	private turnItems: AssistantItem[] = [];
 
-	/** Local timestamp when the current turn segment began (at beginTurn or when a compaction boundary arrived). */
-	private segmentStartedAt: number | null = null;
-
-	/** Measured elapsed milliseconds per turn segment prior to compaction, keyed by item. */
-	private itemSegmentDurations = new Map<AssistantItem, number>();
+	/**
+	 * Ordered boundary timestamps for the current turn — the single source of truth for per-segment
+	 * duration accounting (FIX-A, Görev 7 Fix 3).
+	 *
+	 * Invariant: `boundaryTimestamps.length === turnItems.length` at every point during an active turn.
+	 * `boundaryTimestamps[0]` is the local instant the turn began. Each compaction boundary that seals
+	 * an active item pushes `boundaryNow`. At distribution time (`applyResult`), segment `i` elapsed is
+	 * `boundaryTimestamps[i+1] - boundaryTimestamps[i]` (terminal segment ends at `resultNow`).
+	 * No multi-field protocol, no `segmentStartedAt` or `itemSegmentDurations` to reorder or desynchronize.
+	 */
+	private boundaryTimestamps: number[] = [];
 
 	/**
 	 * The last `result.total_cost_usd` this reducer has seen, and the reducer's own running sum of
@@ -202,8 +208,7 @@ export class StreamReducer {
 		this.active = item;
 		this.turnItem = item;
 		this.turnItems = [item];
-		this.segmentStartedAt = Date.now();
-		this.itemSegmentDurations.clear();
+		this.boundaryTimestamps = [Date.now()];
 		this.blockBase = 0;
 		this.nextFreeSlot = 0;
 		this.assistantSlot = 0;
@@ -409,15 +414,14 @@ export class StreamReducer {
 				if (idx !== -1) {
 					this.turnItems.splice(idx, 1);
 				}
+				this.boundaryTimestamps = [boundaryNow];
 			} else {
 				closeOpenBlocks(inFlight);
 				inFlight.status = 'complete';
-				const elapsed = Math.max(0, boundaryNow - (this.segmentStartedAt ?? boundaryNow));
-				this.itemSegmentDurations.set(inFlight, elapsed);
+				this.boundaryTimestamps.push(boundaryNow);
 			}
 			this.active = null;
 		}
-		this.segmentStartedAt = boundaryNow;
 
 		this.state.addDivider(uuid ?? `divider-${boundaryNow}`, 'Conversation compacted');
 	}
@@ -431,9 +435,6 @@ export class StreamReducer {
 		this.active = item;
 		this.turnItem = item;
 		this.turnItems.push(item);
-		if (this.segmentStartedAt === null) {
-			this.segmentStartedAt = Date.now();
-		}
 		return item;
 	}
 
@@ -824,27 +825,72 @@ export class StreamReducer {
 
 		if (terminalItem) {
 			if (this.turnItems.length > 1) {
-				let allocatedSum = 0;
-				for (const prevItem of this.turnItems) {
-					if (prevItem !== terminalItem) {
-						let segDuration = this.itemSegmentDurations.get(prevItem) ?? 0;
-						if (durationMs !== undefined) {
-							if (allocatedSum + segDuration > durationMs) {
-								segDuration = Math.max(0, durationMs - allocatedSum);
+				// FIX-A: derive segment durations from the single source of truth (boundaryTimestamps).
+				// Each segment's local elapsed = next boundary timestamp − this segment's start timestamp.
+				// The terminal segment ends now (result-event time).
+				const resultNow = Date.now();
+				const localElapsed: number[] = [];
+				for (let i = 0; i < this.turnItems.length; i++) {
+					const start = this.boundaryTimestamps[i] ?? resultNow;
+					const end = i + 1 < this.boundaryTimestamps.length ? this.boundaryTimestamps[i + 1]! : resultNow;
+					localElapsed.push(Math.max(0, end - start));
+				}
+				const localTotal = localElapsed.reduce((s, d) => s + d, 0);
+
+				// FIX-B: when localTotal overshoots CLI's durationMs, scale proportionally
+				// so no segment that performed real work prints "Worked for 0:00",
+				// and displayed segments sum to the CLI's reported total.
+				let finalDurations: number[];
+				if (durationMs !== undefined && localTotal > durationMs && localTotal > 0) {
+					const totalSec = Math.floor(durationMs / 1000);
+					if (totalSec > 0) {
+						const rawSec = localElapsed.map(d => d / localTotal * totalSec);
+						const finalSec = rawSec.map(s => Math.round(s));
+						for (let i = 0; i < finalSec.length; i++) {
+							if (finalSec[i] === 0 && localElapsed[i]! >= 500 && totalSec >= finalSec.length) {
+								finalSec[i] = 1;
 							}
-							allocatedSum += segDuration;
 						}
-						prevItem.meta = {
-							durationMs: segDuration,
+						const sumSec = finalSec.reduce((s, d) => s + d, 0);
+						const residualSec = totalSec - sumSec;
+						if (residualSec !== 0) {
+							let maxIdx = 0;
+							for (let i = 1; i < finalSec.length; i++) {
+								if (finalSec[i]! > finalSec[maxIdx]!) maxIdx = i;
+							}
+							finalSec[maxIdx] = finalSec[maxIdx]! + residualSec;
+						}
+						finalDurations = finalSec.map(s => s * 1000);
+						const msResidual = durationMs - finalDurations.reduce((s, d) => s + d, 0);
+						finalDurations[finalDurations.length - 1] = finalDurations[finalDurations.length - 1]! + msResidual;
+					} else {
+						finalDurations = localElapsed.map(() => 0);
+					}
+				} else if (durationMs !== undefined && localTotal <= durationMs) {
+					// Normal case: local fits within CLI total. Earlier segments keep their local
+					// elapsed; the terminal segment absorbs the remainder so the sum is exact.
+					finalDurations = [...localElapsed];
+					const priorSum = finalDurations.slice(0, -1).reduce((s, d) => s + d, 0);
+					finalDurations[finalDurations.length - 1] = Math.max(0, durationMs - priorSum);
+				} else {
+					// No CLI durationMs — use local measurements as-is.
+					finalDurations = [...localElapsed];
+				}
+
+				for (let i = 0; i < this.turnItems.length; i++) {
+					const item = this.turnItems[i]!;
+					if (item === terminalItem) {
+						terminalItem.meta = {
+							costUsd,
+							durationMs: durationMs !== undefined ? finalDurations[i] : undefined,
+							sessionCostUsd,
+						};
+					} else {
+						item.meta = {
+							durationMs: finalDurations[i],
 						};
 					}
 				}
-				const terminalDuration = durationMs !== undefined ? Math.max(0, durationMs - allocatedSum) : undefined;
-				terminalItem.meta = {
-					costUsd,
-					durationMs: terminalDuration,
-					sessionCostUsd,
-				};
 			} else {
 				terminalItem.meta = {
 					costUsd,
@@ -878,8 +924,7 @@ export class StreamReducer {
 		}
 
 		this.turnItems = [];
-		this.itemSegmentDurations.clear();
-		this.segmentStartedAt = null;
+		this.boundaryTimestamps = [];
 		this.state.emitChange();
 		this.onTurnEnd?.();
 	}
@@ -932,8 +977,7 @@ export class StreamReducer {
 		const item = this.active ?? (this.turnItems.length > 0 ? this.turnItems[this.turnItems.length - 1] : null);
 		this.active = null;
 		this.turnItems = [];
-		this.itemSegmentDurations.clear();
-		this.segmentStartedAt = null;
+		this.boundaryTimestamps = [];
 		if (!item) {
 			this.onTurnEnd?.();
 			return false;
