@@ -55,6 +55,14 @@ interface RenderedBlock {
 	toolCard?: RenderedToolCard;
 }
 
+interface RenderedWorkGroup {
+	groupEl: HTMLElement;
+	headerEl: HTMLButtonElement;
+	contentEl: HTMLElement;
+	expanded: boolean;
+	headerText: string;
+}
+
 interface RenderedItem {
 	el: HTMLElement;
 	bodyEl: HTMLElement;
@@ -77,6 +85,11 @@ interface RenderedItem {
 	 * a permission card is not a conversation bubble, and Emre never asked for one there.
 	 */
 	copyEl?: HTMLButtonElement;
+	/**
+	 * Assistant items only: holds the collapsible intermediate work group.
+	 * Only created when the turn is complete and there is at least one work block.
+	 */
+	workGroup?: RenderedWorkGroup;
 }
 
 /** How long the icon shows "copied" before reverting — long enough to register, not a toast. */
@@ -329,6 +342,7 @@ export class MessageList {
 
 	private updateAssistant(item: AssistantItem, entry: RenderedItem): boolean {
 		let changed = this.syncBlocks(item, entry);
+		changed = this.syncWorkGroup(item, entry) || changed;
 
 		const statusKey = `${item.status}:${item.errorText ?? ''}:${String(hasRenderableContent(item))}`;
 		if (statusKey === entry.status) {
@@ -461,7 +475,8 @@ export class MessageList {
 		if (successor !== undefined) {
 			const other = entry.blocks.get(successor);
 			if (other) {
-				entry.bodyEl.insertBefore(el, other.el);
+				const parentEl = other.el.parentElement ?? entry.bodyEl;
+				parentEl.insertBefore(el, other.el);
 			}
 		}
 	}
@@ -549,6 +564,123 @@ export class MessageList {
 		rendered.expanded = false;
 		rendered.el.removeClass('guki-thinking-open');
 		rendered.contentEl?.hide();
+	}
+
+	/**
+	 * When an assistant turn completes, groups intermediate work blocks into a collapsible container.
+	 * Trailing contiguous text blocks form the answer and remain outside the group.
+	 */
+	private syncWorkGroup(item: AssistantItem, entry: RenderedItem): boolean {
+		if (item.status !== 'complete') {
+			if (entry.workGroup) {
+				for (const block of orderedBlocks(item)) {
+					const rendered = entry.blocks.get(block.index);
+					if (rendered && rendered.el.parentElement !== entry.bodyEl) {
+						entry.bodyEl.insertBefore(rendered.el, entry.workGroup.groupEl);
+					}
+				}
+				entry.workGroup.groupEl.remove();
+				entry.workGroup = undefined;
+				return true;
+			}
+			return false;
+		}
+
+		// Partition: trailing contiguous run of 'text' blocks is answer; everything before is work.
+		const blocks = orderedBlocks(item);
+		let answerStartIndex = blocks.length;
+		while (answerStartIndex > 0 && blocks[answerStartIndex - 1]?.kind === 'text') {
+			answerStartIndex--;
+		}
+		const workBlocks = blocks.slice(0, answerStartIndex);
+		const answerBlocks = blocks.slice(answerStartIndex);
+
+		// Threshold: if zero work blocks, create no group at all.
+		if (workBlocks.length === 0) {
+			if (entry.workGroup) {
+				entry.workGroup.groupEl.remove();
+				entry.workGroup = undefined;
+				return true;
+			}
+			return false;
+		}
+
+		let changed = false;
+		const headerText = formatWorkDuration(item.meta?.durationMs);
+
+		if (!entry.workGroup) {
+			const groupEl = entry.bodyEl.createDiv({ cls: 'guki-work-group' });
+			const headerEl = groupEl.createEl('button', {
+				cls: 'guki-work-header',
+				attr: { 'type': 'button', 'aria-expanded': 'false' },
+			});
+			headerEl.setAttribute('aria-expanded', 'false');
+			headerEl.setText(headerText);
+			const contentEl = groupEl.createDiv({ cls: 'guki-work-content' });
+			contentEl.hide();
+
+			const workGroup: RenderedWorkGroup = {
+				groupEl,
+				headerEl,
+				contentEl,
+				expanded: false,
+				headerText,
+			};
+			entry.workGroup = workGroup;
+
+			this.component.registerDomEvent(headerEl, 'click', () => {
+				workGroup.expanded = !workGroup.expanded;
+				headerEl.setAttribute('aria-expanded', String(workGroup.expanded));
+				groupEl.toggleClass('guki-work-open', workGroup.expanded);
+				if (workGroup.expanded) {
+					contentEl.show();
+				} else {
+					contentEl.hide();
+				}
+			});
+			changed = true;
+		} else {
+			if (entry.workGroup.headerText !== headerText) {
+				entry.workGroup.headerEl.setText(headerText);
+				entry.workGroup.headerText = headerText;
+				changed = true;
+			}
+		}
+
+		const workGroup = entry.workGroup;
+
+		// Position groupEl before first answer block in entry.bodyEl
+		const firstAnswerBlock = answerBlocks[0];
+		const firstAnswer = firstAnswerBlock !== undefined ? entry.blocks.get(firstAnswerBlock.index) : undefined;
+		if (firstAnswer?.el && firstAnswer.el.parentElement === entry.bodyEl) {
+			if (workGroup.groupEl.nextSibling !== firstAnswer.el || workGroup.groupEl.parentElement !== entry.bodyEl) {
+				entry.bodyEl.insertBefore(workGroup.groupEl, firstAnswer.el);
+				changed = true;
+			}
+		} else if (workGroup.groupEl.parentElement !== entry.bodyEl) {
+			entry.bodyEl.appendChild(workGroup.groupEl);
+			changed = true;
+		}
+
+		// Move work blocks into contentEl if not already there
+		for (const block of workBlocks) {
+			const rendered = entry.blocks.get(block.index);
+			if (rendered && rendered.el.parentElement !== workGroup.contentEl) {
+				workGroup.contentEl.appendChild(rendered.el);
+				changed = true;
+			}
+		}
+
+		// Ensure answer blocks are direct children of entry.bodyEl
+		for (const block of answerBlocks) {
+			const rendered = entry.blocks.get(block.index);
+			if (rendered && rendered.el.parentElement !== entry.bodyEl) {
+				entry.bodyEl.appendChild(rendered.el);
+				changed = true;
+			}
+		}
+
+		return changed;
 	}
 
 	// --- permission requests -------------------------------------------------
@@ -819,3 +951,19 @@ export function withTurnMeta(prefix: string, item: AssistantItem): string {
 	const meta = formatTurnMeta(item);
 	return meta.length > 0 ? `${prefix} ${meta}` : prefix;
 }
+
+/**
+ * Header text for the completed turn's intermediate work group:
+ * "Worked for MM:SS" derived from item.meta.durationMs (zero-padded seconds, minutes not padded).
+ * If durationMs is missing or not a finite number, returns "Worked".
+ */
+export function formatWorkDuration(durationMs?: number): string {
+	if (durationMs === undefined || typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 0) {
+		return 'Worked';
+	}
+	const totalSeconds = Math.floor(durationMs / 1000);
+	const minutes = Math.floor(totalSeconds / 60);
+	const seconds = totalSeconds % 60;
+	return `Worked for ${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+

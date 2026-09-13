@@ -361,6 +361,44 @@
 	overflow-y: auto;
 }
 
+/* --- work group (completed turn collapsed intermediate work) ------------- */
+
+.guki-work-group {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: var(--size-4-1);
+	width: 100%;
+	max-width: 100%;
+}
+
+.guki-work-header {
+	box-shadow: none;
+	background-color: transparent;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	padding: var(--size-2-1) var(--size-4-2);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	cursor: var(--cursor);
+	text-align: left;
+}
+
+.guki-work-header:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.guki-work-content {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	width: 100%;
+	max-width: 100%;
+	border-left: 2px solid var(--background-modifier-border);
+	padding-left: var(--size-4-2);
+}
+
 /* --- tool card ----------------------------------------------------------- */
 
 /* A tool call is a quieter surface than a reply: same width, less contrast, no bubble tail. It
