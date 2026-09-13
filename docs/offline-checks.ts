@@ -141,6 +141,7 @@ import {
 } from '../src/core/attachment-resolver';
 import { absolutePathForFile } from '../src/cli/node-api';
 import { Composer, pasteBelongsToComposer, type ComposerOptions } from '../src/ui/composer';
+import { insertItem, type DropdownItem, type TriggerMatch } from '../src/ui/composer-dropdown';
 import { projectSlug, scanSessionsDir } from '../src/data/session-index';
 import { NodeTranscriptStore } from '../src/data/transcript-store';
 import { FileSystemAdapter, TFile } from 'obsidian';
@@ -8146,10 +8147,16 @@ console.log('\nAC1. Mandatory end-to-end chain check (simulated keystrokes on re
 		Object.assign(new TFile(), { path: 'notes/beta.md', name: 'beta.md' }),
 		Object.assign(new TFile(), { path: 'notes/gamma.md', name: 'gamma.md' }),
 		Object.assign(new TFile(), { path: 'notes/bad"quote.md', name: 'bad"quote.md' }),
+		Object.assign(new TFile(), { path: 'outside/secret.md', name: 'secret.md' }),
 	];
 	const testVaultAdapter = new FileSystemAdapter();
 	testVaultAdapter.getBasePath = () => POLICY_VAULT.root;
-	testVaultAdapter.getFullPath = (p: string) => `${POLICY_VAULT.root}/${p}`;
+	testVaultAdapter.getFullPath = (p: string) => {
+		if (p.startsWith('outside/')) {
+			return `${POLICY_VAULT.outside}/${p.slice('outside/'.length)}`;
+		}
+		return `${POLICY_VAULT.root}/${p}`;
+	};
 	const testApp = {
 		vault: {
 			adapter: testVaultAdapter,
@@ -8172,6 +8179,7 @@ console.log('\nAC1. Mandatory end-to-end chain check (simulated keystrokes on re
 	const composer = new Composer(container, panel, dummyComp, {
 		app: testApp,
 		getSlashCommands: () => slashCommands,
+		getVaultPaths: () => Promise.resolve(vaultPaths),
 		onSubmit: (text: string) => {
 			submittedText = text;
 			submitCallCount++;
@@ -8207,6 +8215,34 @@ console.log('\nAC1. Mandatory end-to-end chain check (simulated keystrokes on re
 		return { defaultPrevented: prevented };
 	}
 
+	// FIX 2a / regression check for FIX 1:
+	// First mention keystroke after construction — boundary check must be in force.
+	// Fail closed: if vault paths are not known yet, out-of-vault candidate must not be insertable.
+	simulateInput('@secret', 7);
+	const tabResFirstKeystroke = simulateKeydown('Tab');
+	check('FIX2a: boundary check is in force on first mention keystroke after construction (out-of-vault candidate not insertable)',
+		!tabResFirstKeystroke.defaultPrevented && !inputEl.value.includes(POLICY_VAULT.outside) && !inputEl.value.includes('secret.md'),
+		`got value: ${inputEl.value}, defaultPrevented: ${tabResFirstKeystroke.defaultPrevented}`);
+
+	// FIX 2b: After vault paths promise resolves, out-of-vault candidate is not insertable
+	await Promise.resolve();
+	inputEl.value = '';
+	simulateInput('@secret', 7);
+	const tabResOut = simulateKeydown('Tab');
+	check('FIX2b: an out-of-vault candidate is not insertable',
+		!tabResOut.defaultPrevented && !inputEl.value.includes(POLICY_VAULT.outside) && !inputEl.value.includes('secret.md'),
+		`got value: ${inputEl.value}, defaultPrevented: ${tabResOut.defaultPrevented}`);
+
+	// FIX 2c: In-vault candidate still is insertable (inverse check)
+	inputEl.value = '';
+	simulateInput('@gamma', 6);
+	const tabResIn = simulateKeydown('Tab');
+	check('FIX2c: an in-vault candidate still is insertable',
+		tabResIn.defaultPrevented && inputEl.value.includes(`@"${POLICY_VAULT.root}/notes/gamma.md"`),
+		`got value: ${inputEl.value}, defaultPrevented: ${tabResIn.defaultPrevented}`);
+
+	inputEl.value = '';
+
 	// a) @ + query + ArrowDown + Tab -> textarea contains @"<abs path>" for the second match, with whitespace before the @
 	simulateInput('@notes', 6);
 	const downResA = simulateKeydown('ArrowDown');
@@ -8226,6 +8262,36 @@ console.log('\nAC1. Mandatory end-to-end chain check (simulated keystrokes on re
 	check('AC1.2a: Tab intercepted with preventDefault', tabResB.defaultPrevented);
 	const expectedAlphaRef = `@"${POLICY_VAULT.root}/notes/alpha.md"`;
 	eq('AC1.2b: result has whitespace before @ (invariant 6)', inputEl.value, `hello ${expectedAlphaRef}`);
+
+	// FIX 3: Structural whitespace invariant at insertion point
+	const testDirectInput = new FakeElement() as any;
+	testDirectInput.value = 'hello@query';
+	testDirectInput.selectionStart = 11;
+	testDirectInput.selectionEnd = 11;
+	const matchStructural: TriggerMatch = {
+		kind: 'mention',
+		start: 5,
+		end: 11,
+		query: 'query',
+	};
+	const itemWithoutFlag: DropdownItem = {
+		id: 'test',
+		label: 'test',
+		insertText: `@"${POLICY_VAULT.root}/notes/alpha.md"`,
+		needsPrecedingSpace: false,
+	};
+	insertItem(testDirectInput, itemWithoutFlag, matchStructural);
+	eq('FIX3: structural whitespace invariant enforced at insertion point without convention flag',
+		testDirectInput.value,
+		`hello @"${POLICY_VAULT.root}/notes/alpha.md"`);
+
+	// Insertion with caret immediately after non-whitespace character via simulated input
+	inputEl.value = 'review';
+	simulateInput('review@alpha', 12);
+	const tabResStructural = simulateKeydown('Tab');
+	check('FIX3b: insertion with caret immediately after non-whitespace character preserves whitespace invariant',
+		tabResStructural.defaultPrevented && inputEl.value === `review @"${POLICY_VAULT.root}/notes/alpha.md"`,
+		`got: ${inputEl.value}`);
 
 	// c) / + query + Enter -> textarea contains /command and no message was submitted
 	submitCallCount = 0;
@@ -8331,6 +8397,7 @@ console.log('\nAC3. Keyboard contract & Escape while dropdown is open');
 	const composer = new Composer(container, panel, dummyComp, {
 		app: testApp,
 		getSlashCommands: () => ['clear'],
+		getVaultPaths: () => Promise.resolve(vaultPaths),
 		onSubmit: () => true,
 		onStop: () => {},
 		onDropped: () => {},
@@ -8338,6 +8405,7 @@ console.log('\nAC3. Keyboard contract & Escape while dropdown is open');
 		onAttachActiveNote: () => {},
 		onPickedFiles: () => {},
 	});
+	await Promise.resolve();
 	const inputEl = container.querySelector('textarea');
 	inputEl.value = '@';
 	inputEl.selectionStart = 1;

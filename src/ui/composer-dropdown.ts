@@ -92,7 +92,7 @@ export function filterVaultFiles(
 	query: string,
 	needsPrecedingSpace: boolean,
 ): DropdownItem[] {
-	if (!app || !app.vault) {
+	if (!app || !app.vault || !paths) {
 		return [];
 	}
 	const files = app.vault.getFiles();
@@ -141,7 +141,7 @@ export function filterVaultFiles(
 		if (!fullPath) {
 			continue;
 		}
-		if (paths && !containsPath(paths.root, paths.resolve(fullPath))) {
+		if (!containsPath(paths.root, paths.resolve(fullPath))) {
 			continue;
 		}
 		const attachment: PathAttachment = {
@@ -171,10 +171,17 @@ export function filterVaultFiles(
 export function insertItem(inputEl: HTMLTextAreaElement, item: DropdownItem, match: TriggerMatch): void {
 	const before = inputEl.value.slice(0, match.start);
 	const after = inputEl.value.slice(match.end);
-	const prefix = item.needsPrecedingSpace ? ' ' : '';
-	const replacement = prefix + item.insertText;
-	inputEl.value = before + replacement + after;
-	const cursor = before.length + replacement.length;
+	let insertText = item.insertText;
+	if (insertText.startsWith('@')) {
+		const charBefore = before.slice(-1);
+		if (charBefore.length > 0 && !/\s/.test(charBefore)) {
+			insertText = ' ' + insertText;
+		}
+	} else if (item.needsPrecedingSpace) {
+		insertText = ' ' + insertText;
+	}
+	inputEl.value = before + insertText + after;
+	const cursor = before.length + insertText.length;
 	inputEl.selectionStart = cursor;
 	inputEl.selectionEnd = cursor;
 }
@@ -195,6 +202,24 @@ export class ComposerDropdown {
 		this.dropdownEl = options.containerEl.createDiv({
 			cls: 'guki-composer-dropdown guki-hidden',
 		});
+		this.loadVaultPaths();
+	}
+
+	private loadVaultPaths(): void {
+		if (this.cachedVaultPaths || !this.options.getVaultPaths) {
+			return;
+		}
+		const vp = this.options.getVaultPaths();
+		if (vp && typeof (vp as Promise<VaultPaths>).then === 'function') {
+			void (vp as Promise<VaultPaths>).then((resolved) => {
+				this.cachedVaultPaths = resolved;
+				if (this.activeMatch?.kind === 'mention') {
+					this.updateNow();
+				}
+			});
+		} else if (vp) {
+			this.cachedVaultPaths = vp as VaultPaths;
+		}
 	}
 
 	isOpen(): boolean {
@@ -231,6 +256,9 @@ export class ComposerDropdown {
 		this.flushDebounce();
 		const item = this.items[this.selectedIndex];
 		if (!item || !this.activeMatch) {
+			return false;
+		}
+		if (this.activeMatch.kind === 'mention' && !this.cachedVaultPaths) {
 			return false;
 		}
 		insertItem(this.inputEl, item, this.activeMatch);
@@ -304,15 +332,8 @@ export class ComposerDropdown {
 			}
 			this.items = filterSlashCommands(commands, match.query);
 		} else if (match.kind === 'mention') {
-			if (!this.cachedVaultPaths && this.options.getVaultPaths) {
-				const vp = this.options.getVaultPaths();
-				if (vp && typeof (vp as Promise<VaultPaths>).then === 'function') {
-					void (vp as Promise<VaultPaths>).then((resolved) => {
-						this.cachedVaultPaths = resolved;
-					});
-				} else if (vp) {
-					this.cachedVaultPaths = vp as VaultPaths;
-				}
+			if (!this.cachedVaultPaths) {
+				this.loadVaultPaths();
 			}
 			this.items = filterVaultFiles(
 				this.options.app,
@@ -347,6 +368,9 @@ export class ComposerDropdown {
 			itemEl.addEventListener('click', (event: MouseEvent) => {
 				event.preventDefault();
 				if (this.activeMatch) {
+					if (this.activeMatch.kind === 'mention' && !this.cachedVaultPaths) {
+						return;
+					}
 					insertItem(this.inputEl, item, this.activeMatch);
 					this.close();
 					this.options.onInsert?.();
