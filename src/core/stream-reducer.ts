@@ -17,6 +17,7 @@
 import {
 	contextUsageFromResult,
 	isAssistantEvent,
+	isCompactBoundaryEvent,
 	isRateLimitEvent,
 	isResultEvent,
 	isStreamPartialEvent,
@@ -37,6 +38,7 @@ import {
 	type SseContentBlockStop,
 	type StreamJsonEvent,
 	type StreamPartialEvent,
+	type SystemCompactBoundaryEvent,
 	type SystemInitEvent,
 	type SystemTaskEvent,
 	type SystemThinkingTokensEvent,
@@ -44,7 +46,7 @@ import {
 	type UserEvent,
 } from '../cli/events';
 import { toolResultText } from './tool-policy';
-import type { AssistantItem, BlockKind, ChatState, MessageBlock } from './chat-state';
+import { hasRenderableContent, type AssistantItem, type BlockKind, type ChatState, type MessageBlock } from './chat-state';
 
 /**
  * `terminal_reason` values that mean the user interrupted — "stopped", not an error.
@@ -123,6 +125,12 @@ export class StreamReducer {
 	 */
 	private interruptSent = false;
 
+	/** Boundary uuids seen so far, for compact_boundary idempotency (SPEC §2 F2, §3 R6). */
+	private seenBoundaryUuids = new Set<string>();
+
+	/** True while a turn is actively processing between beginTurn and applyResult/failActiveTurn. */
+	private inTurn = false;
+
 	/**
 	 * The last `result.total_cost_usd` this reducer has seen, and the reducer's own running sum of
 	 * per-turn deltas. `null` means "no result yet" — the state a fresh process starts in, and the
@@ -181,6 +189,7 @@ export class StreamReducer {
 
 	/** Called by the SessionManager when a message is handed to the CLI. */
 	beginTurn(item: AssistantItem): void {
+		this.inTurn = true;
 		this.active = item;
 		this.turnItem = item;
 		this.blockBase = 0;
@@ -294,6 +303,10 @@ export class StreamReducer {
 	}
 
 	apply(event: StreamJsonEvent): void {
+		if (isCompactBoundaryEvent(event)) {
+			this.applyCompactBoundary(event);
+			return;
+		}
 		if (isSystemInitEvent(event)) {
 			this.applyInit(event);
 			return;
@@ -351,6 +364,47 @@ export class StreamReducer {
 		}
 	}
 
+	/**
+	 * Handles a compact_boundary event (SPEC §2 F1-F4, §3 R1, R2, R6).
+	 *
+	 * - Deduplicates on `event.uuid` (R6).
+	 * - Turn splitting (R2): drops an empty in-flight assistant item; seals a non-empty one.
+	 * - Inserts a divider item at the arrival position.
+	 */
+	private applyCompactBoundary(event: SystemCompactBoundaryEvent): void {
+		const uuid = event.uuid;
+		if (uuid) {
+			if (this.seenBoundaryUuids.has(uuid)) {
+				return;
+			}
+			this.seenBoundaryUuids.add(uuid);
+		}
+
+		const inFlight = this.active;
+		if (inFlight) {
+			if (!hasRenderableContent(inFlight)) {
+				this.state.removeItem(inFlight.id);
+			} else {
+				closeOpenBlocks(inFlight);
+				inFlight.status = 'complete';
+			}
+			this.active = null;
+		}
+
+		this.state.addDivider(uuid ?? `divider-${Date.now()}`, 'Conversation compacted');
+	}
+
+	private ensureActiveItem(): AssistantItem {
+		if (this.active) {
+			return this.active;
+		}
+		const item = this.state.addAssistantMessage();
+		item.status = 'streaming';
+		this.active = item;
+		this.turnItem = item;
+		return item;
+	}
+
 	// --- live streaming ----------------------------------------------------
 
 	private applyStreamEvent(event: StreamPartialEvent): void {
@@ -360,9 +414,15 @@ export class StreamReducer {
 			this.noteSubagentActivity(event.parent_tool_use_id);
 			return;
 		}
-		const item = this.active;
 		const sse = event.event;
-		if (!item || !sse) {
+		if (!sse) {
+			return;
+		}
+		if (this.inTurn && !this.active && (sse.type === 'content_block_start' || sse.type === 'content_block_delta')) {
+			this.ensureActiveItem();
+		}
+		const item = this.active;
+		if (!item) {
 			return;
 		}
 
@@ -435,6 +495,10 @@ export class StreamReducer {
 	 * dropped: guessing a slot would put a tool's output under a different tool's name.
 	 */
 	private applyUser(event: UserEvent): void {
+		// Suppress synthetic summary messages following compact_boundary (SPEC §2 F5, §3 R8).
+		if (event.isSynthetic === true) {
+			return;
+		}
 		const item = this.active;
 		// A subagent's own tool results arrive as `user` events under the parent's id. Their
 		// content stays hidden in v1; what they contribute is the knowledge that work is still
@@ -632,6 +696,9 @@ export class StreamReducer {
 			this.noteSubagentActivity(event.parent_tool_use_id);
 			return;
 		}
+		if (this.inTurn && !this.active && event.message.content && event.message.content.length > 0) {
+			this.ensureActiveItem();
+		}
 		const item = this.active;
 		if (!item) {
 			return;
@@ -712,6 +779,7 @@ export class StreamReducer {
 	}
 
 	private applyResult(event: ResultEvent): void {
+		this.inTurn = false;
 		const item = this.active;
 		this.active = null;
 		if (!item) {
@@ -794,6 +862,7 @@ export class StreamReducer {
 	 * *not* have the queue drained (a spawn failure, an unexpected exit) clear it first.
 	 */
 	failActiveTurn(message: string): boolean {
+		this.inTurn = false;
 		const item = this.active;
 		this.active = null;
 		if (!item) {
@@ -809,7 +878,7 @@ export class StreamReducer {
 	}
 
 	hasActiveTurn(): boolean {
-		return this.active !== null;
+		return this.inTurn || this.active !== null;
 	}
 }
 

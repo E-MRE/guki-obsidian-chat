@@ -83,6 +83,24 @@ export interface SystemInitEvent {
 	capabilities?: string[];
 }
 
+/** `system` with subtype `compact_boundary` (SPEC §2). Live transport uses snake_case. */
+export interface CompactMetadata {
+	trigger?: 'manual' | 'auto';
+	pre_tokens?: number;
+	post_tokens?: number;
+	cumulative_dropped_tokens?: number;
+	duration_ms?: number;
+}
+
+export interface SystemCompactBoundaryEvent {
+	type: 'system';
+	subtype: 'compact_boundary';
+	uuid: string;
+	session_id?: string;
+	compact_metadata?: CompactMetadata;
+	logical_parent_uuid?: string;
+}
+
 /** `system` with any other subtype: hook_started / hook_response / hook_progress / status / thinking_tokens / permission_denied. */
 export interface SystemOtherEvent {
 	type: 'system';
@@ -94,6 +112,7 @@ export type SystemEvent =
 	| SystemInitEvent
 	| SystemThinkingTokensEvent
 	| SystemTaskEvent
+	| SystemCompactBoundaryEvent
 	| SystemOtherEvent;
 
 export interface AssistantEvent {
@@ -116,6 +135,9 @@ export interface UserEvent {
 	type: 'user';
 	session_id?: string;
 	parent_tool_use_id?: string | null;
+	uuid?: string;
+	isReplay?: boolean;
+	isSynthetic?: boolean;
 	message: {
 		role?: string;
 		content?: ContentBlock[] | string;
@@ -534,6 +556,10 @@ export function isThinkingTokensEvent(ev: StreamJsonEvent): ev is SystemThinking
 
 export function isRateLimitEvent(ev: StreamJsonEvent): ev is RateLimitEvent {
 	return ev.type === 'rate_limit_event';
+}
+
+export function isCompactBoundaryEvent(ev: StreamJsonEvent): ev is SystemCompactBoundaryEvent {
+	return ev.type === 'system' && (ev as SystemOtherEvent).subtype === 'compact_boundary';
 }
 
 /**
