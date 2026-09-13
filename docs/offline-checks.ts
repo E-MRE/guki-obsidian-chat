@@ -5241,6 +5241,21 @@ class FakeElement {
 		return false;
 	}
 
+	attributes: Record<string, string> = {};
+	setAttribute(name: string, value: string) {
+		this.attributes[name] = String(value);
+	}
+	getAttribute(name: string): string | null {
+		return this.attributes[name] ?? null;
+	}
+	get nextSibling(): any {
+		const p = this.parentElement ?? this.parent;
+		if (!p || !p.children) return null;
+		const idx = p.children.indexOf(this);
+		if (idx === -1 || idx + 1 >= p.children.length) return null;
+		return p.children[idx + 1];
+	}
+
 	createDiv(opts?: any) { return this.createEl('div', opts); }
 	createSpan(opts?: any) { return this.createEl('span', opts); }
 	createEl(tag: string, opts?: any) {
@@ -5251,6 +5266,11 @@ class FakeElement {
 		el.parent = this;
 		if (opts?.cls) opts.cls.split(' ').forEach((c: string) => el.addClass(c));
 		if (opts?.text) el.text = opts.text;
+		if (opts?.attr) {
+			for (const [k, v] of Object.entries(opts.attr)) {
+				el.setAttribute(k, String(v));
+			}
+		}
 		this.children.push(el);
 		this.childElementCount = this.children.length;
 		return el;
@@ -8473,7 +8493,159 @@ console.log('\nAC4. Mention ranking: filename matches before path-only matches')
 		`got: ${items.map((i) => i.label).join(', ')}`);
 }
 
+console.log('\nAD. Completed turn work group: collapsed intermediate work with MM:SS header');
+{
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el.addEventListener(evt, cb) } as any;
+
+	// (a) Completed turn with thinking + two tool calls + a final answer
+	const listWrapperA = new FakeElement() as any;
+	const listA = new MessageList({} as any, listWrapperA, dummyComp, { decide: () => {} } as any);
+	const itemA: AssistantItem = {
+		id: 'asst-1',
+		kind: 'assistant',
+		status: 'complete',
+		meta: {
+			durationMs: 67000, // 1:07
+		},
+		blocks: new Map<number, MessageBlock>([
+			[0, { index: 0, kind: 'thinking', text: 'thinking prose', final: true, startedAt: 1000, endedAt: 3000 }],
+			[1, { index: 1, kind: 'tool_use', text: '', final: true, toolName: 'Read', toolUseId: 'tool-1', toolPending: false }],
+			[2, { index: 2, kind: 'tool_use', text: '', final: true, toolName: 'Write', toolUseId: 'tool-2', toolPending: false }],
+			[3, { index: 3, kind: 'text', text: 'Final answer.', final: true }],
+		]),
+	};
+	listA.sync([itemA]);
+
+	const msgElA = listWrapperA.querySelector('.guki-message-assistant');
+	const bodyElA = msgElA?.querySelector('.guki-message-body');
+	check('AD1.1: assistant body element exists', bodyElA !== null);
+
+	const workGroupA = bodyElA?.querySelector('.guki-work-group');
+	check('AD1.2: work group wrapper created for completed turn with work blocks', workGroupA !== null);
+
+	const headerElA = workGroupA?.querySelector('.guki-work-header');
+	check('AD1.3: work header button created', Boolean(headerElA && headerElA.tag === 'button'));
+	eq('AD1.4: header text shows Worked for 1:07', headerElA?.text?.trim(), 'Worked for 1:07');
+	eq('AD1.5: header aria-expanded starts false', headerElA?.getAttribute('aria-expanded'), 'false');
+
+	const contentElA = workGroupA?.querySelector('.guki-work-content');
+	check('AD1.6: work content container exists', contentElA !== null);
+	check('AD1.7: work content container starts hidden (collapsed)', Boolean(contentElA?.hasClass('guki-hidden')));
+
+	// Check elements inside .guki-work-content
+	eq('AD1.8: work-content holds exactly 3 intermediate work blocks', contentElA?.children?.length ?? 0, 3);
+	check('AD1.9: thinking block ended up inside work-content', Boolean(contentElA?.children?.[0]?.hasClass('guki-block-thinking')));
+	check('AD1.10: first tool_use block ended up inside work-content', Boolean(contentElA?.children?.[1]?.hasClass('guki-block-tool_use')));
+	check('AD1.11: second tool_use block ended up inside work-content', Boolean(contentElA?.children?.[2]?.hasClass('guki-block-tool_use')));
+
+	// Check elements outside .guki-work-content
+	const directChildrenA = bodyElA?.children ?? [];
+	check('AD1.12: work group is in bodyEl before the answer text block',
+		directChildrenA[0] === workGroupA && directChildrenA[1]?.hasClass('guki-block-text'));
+	check('AD1.13: answer text block stayed outside work-content as direct child of bodyEl',
+		directChildrenA.some((c: any) => c.hasClass('guki-block-text')));
+	check('AD1.14: answer text block is not inside work-content',
+		!(contentElA?.children ?? []).some((c: any) => c.hasClass('guki-block-text')));
+
+	// Check toggle expand/collapse on click
+	headerElA?.click();
+	eq('AD1.15: clicking header sets aria-expanded to true', headerElA?.getAttribute('aria-expanded'), 'true');
+	check('AD1.16: clicking header shows work content', Boolean(contentElA && !contentElA.hasClass('guki-hidden')));
+
+	// (b) Idempotency: sync() called twice on the same item while expanded
+	listA.sync([itemA]);
+	const groupsAfterSecondSync = (bodyElA?.children ?? []).filter((c: any) => c.hasClass('guki-work-group'));
+	eq('AD2.1: sync twice does not create a second wrapper', groupsAfterSecondSync.length, 1);
+	eq('AD2.2: sync twice does not reset expanded group back to collapsed', headerElA?.getAttribute('aria-expanded'), 'true');
+	check('AD2.3: work content remains visible after second sync', Boolean(contentElA && !contentElA.hasClass('guki-hidden')));
+	eq('AD2.4: work content blocks not duplicated after second sync', contentElA?.children?.length ?? 0, 3);
+
+	// Click again to collapse
+	headerElA?.click();
+	eq('AD2.5: clicking header again collapses group (aria-expanded false)', headerElA?.getAttribute('aria-expanded'), 'false');
+	check('AD2.6: work content hidden after collapsing again', Boolean(contentElA?.hasClass('guki-hidden')));
+
+	// (c) Turn with only an answer and no work blocks (no group created)
+	const listWrapperC = new FakeElement() as any;
+	const listC = new MessageList({} as any, listWrapperC, dummyComp, { decide: () => {} } as any);
+	const itemC: AssistantItem = {
+		id: 'asst-c',
+		kind: 'assistant',
+		status: 'complete',
+		meta: { durationMs: 45000 },
+		blocks: new Map<number, MessageBlock>([
+			[0, { index: 0, kind: 'text', text: 'Direct reply with no intermediate work.', final: true }],
+		]),
+	};
+	listC.sync([itemC]);
+	const bodyElC = listWrapperC.querySelector('.guki-message-body');
+	check('AD3.1: no work group created for turn with zero work blocks', bodyElC?.querySelector('.guki-work-group') === null);
+	check('AD3.2: answer block rendered directly in bodyEl', bodyElC?.querySelector('.guki-block-text') !== null);
+
+	// (d) stopped or error turns keep every block expanded with no group created
+	const listWrapperD1 = new FakeElement() as any;
+	const listD1 = new MessageList({} as any, listWrapperD1, dummyComp, { decide: () => {} } as any);
+	const itemDStopped: AssistantItem = {
+		id: 'asst-stopped',
+		kind: 'assistant',
+		status: 'stopped',
+		meta: { durationMs: 25000 },
+		blocks: new Map<number, MessageBlock>([
+			[0, { index: 0, kind: 'thinking', text: 'thinking...', final: true }],
+			[1, { index: 1, kind: 'tool_use', text: '', final: true, toolName: 'Read', toolUseId: 't-stop' }],
+			[2, { index: 2, kind: 'text', text: 'interrupted', final: true }],
+		]),
+	};
+	listD1.sync([itemDStopped]);
+	const bodyElD1 = listWrapperD1.querySelector('.guki-message-body');
+	check('AD4.1: no work group created on stopped turn', bodyElD1?.querySelector('.guki-work-group') === null);
+	eq('AD4.2: all blocks stay direct children of bodyEl on stopped turn', bodyElD1?.children.length, 3);
+
+	const listWrapperD2 = new FakeElement() as any;
+	const listD2 = new MessageList({} as any, listWrapperD2, dummyComp, { decide: () => {} } as any);
+	const itemDError: AssistantItem = {
+		id: 'asst-error',
+		kind: 'assistant',
+		status: 'error',
+		errorText: 'Process crashed',
+		meta: { durationMs: 15000 },
+		blocks: new Map<number, MessageBlock>([
+			[0, { index: 0, kind: 'thinking', text: 'thinking...', final: true }],
+			[1, { index: 1, kind: 'tool_use', text: '', final: true, toolName: 'Write', toolUseId: 't-err' }],
+			[2, { index: 2, kind: 'text', text: 'error happened', final: true }],
+		]),
+	};
+	listD2.sync([itemDError]);
+	const bodyElD2 = listWrapperD2.querySelector('.guki-message-body');
+	check('AD4.3: no work group created on error turn', bodyElD2?.querySelector('.guki-work-group') === null);
+	eq('AD4.4: all blocks stay direct children of bodyEl on error turn', bodyElD2?.children.length, 3);
+
+	// Extra partition check: text block before tool_use is WORK, not answer
+	const listWrapperE = new FakeElement() as any;
+	const listE = new MessageList({} as any, listWrapperE, dummyComp, { decide: () => {} } as any);
+	const itemE: AssistantItem = {
+		id: 'asst-mixed',
+		kind: 'assistant',
+		status: 'complete',
+		blocks: new Map<number, MessageBlock>([
+			[0, { index: 0, kind: 'text', text: 'Preliminary explanation before tool.', final: true }],
+			[1, { index: 1, kind: 'tool_use', text: '', final: true, toolName: 'Read', toolUseId: 't-mix' }],
+			[2, { index: 2, kind: 'text', text: 'Final answer after tool.', final: true }],
+		]),
+	};
+	listE.sync([itemE]);
+	const bodyElE = listWrapperE.querySelector('.guki-message-body');
+	const workGroupE = bodyElE?.querySelector('.guki-work-group');
+	const headerElE = workGroupE?.querySelector('.guki-work-header');
+	const contentElE = workGroupE?.querySelector('.guki-work-content');
+	eq('AD5.1: missing duration renders header as Worked', headerElE?.text?.trim(), 'Worked');
+	eq('AD5.2: text block before tool is inside work-content', contentElE?.children.length, 2);
+	check('AD5.3: trailing text block is outside work-content',
+		(bodyElE?.children ?? []).some((c: any) => c.hasClass('guki-block-text') && c !== contentElE?.children[0]));
+}
+
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
+
 
 
