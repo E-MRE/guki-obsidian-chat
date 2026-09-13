@@ -74,6 +74,9 @@ export class ChatView extends ItemView {
 		// `root`, not `footer`, as the second argument: a paste the reader aimed at the panel by
 		// clicking a bubble rather than the textarea still belongs to the composer.
 		this.composer = new Composer(footer, root, this, {
+			app: this.app,
+			getSlashCommands: () => this.session.getSlashCommands(),
+			getVaultPaths: () => this.session.vaultPaths(),
 			onSubmit: (text: string, attachments: readonly Attachment[]) => {
 				this.session.send(text, attachments);
 				return true;

@@ -13,10 +13,12 @@ import type GukiChatPlugin from '../main';
 
 export interface GukiChatSettings extends PermissionSettings {
 	claudeBinaryPath: string;
+	slashCommands?: string[];
 }
 
 export const DEFAULT_SETTINGS: GukiChatSettings = {
 	claudeBinaryPath: '',
+	slashCommands: [],
 	...DEFAULT_PERMISSION_SETTINGS,
 };
 

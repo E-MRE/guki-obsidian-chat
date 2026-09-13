@@ -12,6 +12,7 @@ import { ClaudeProcess, type ProcessExitInfo } from '../cli/claude-process';
 import {
 	interruptRequestLine,
 	mcpServerStatus,
+	parseSlashCommands,
 	userMessageLine,
 	type StreamJsonEvent,
 	type SystemInitEvent,
@@ -76,6 +77,8 @@ export class SessionManager {
 	 * change only takes effect on the *next* spawn; a CLI already running keeps its own process.
 	 */
 	private claudeBinaryOverride: string;
+	private slashCommands: string[] = [];
+	private onSlashCommandsUpdated: ((commands: string[]) => void | Promise<void>) | null = null;
 
 	constructor(
 		private readonly app: App,
@@ -83,8 +86,10 @@ export class SessionManager {
 		pluginDir?: string,
 		claudeBinaryOverride = '',
 		permissionSettings?: PermissionSettings,
+		initialSlashCommands: string[] = [],
 	) {
 		this.claudeBinaryOverride = claudeBinaryOverride;
+		this.slashCommands = [...initialSlashCommands];
 		// The vault root is handed over explicitly: it is the boundary PLAN §2b's whole table is
 		// written against, and it must be the *same* string the CLI is given as its cwd. When the
 		// adapter is unsupported, `resolveVaultPath` has already blocked input; the broker gets an
@@ -123,6 +128,11 @@ export class SessionManager {
 			// Every init, not just the first (RESEARCH B1) — a model switched mid-session must not
 			// leave the status line showing the old name (task 7 Trap 4).
 			this.state.setModel(event.model ?? null);
+			const commands = parseSlashCommands(event);
+			if (commands !== null) {
+				this.slashCommands = commands;
+				void this.onSlashCommandsUpdated?.(commands);
+			}
 		};
 
 		this.reducer.onQuota = (snapshot) => {
@@ -163,6 +173,18 @@ export class SessionManager {
 
 	getPermissionSettings(): PermissionSettings {
 		return this.broker.getSettings();
+	}
+
+	getSlashCommands(): readonly string[] {
+		return this.slashCommands;
+	}
+
+	setSlashCommands(commands: string[]): void {
+		this.slashCommands = [...commands];
+	}
+
+	setOnSlashCommandsUpdated(callback: (commands: string[]) => void | Promise<void>): void {
+		this.onSlashCommandsUpdated = callback;
 	}
 
 	setOnSaveSettings(callback: (settings?: PermissionSettings) => Promise<void>): void {

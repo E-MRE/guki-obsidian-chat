@@ -140,7 +140,8 @@ import {
 	triageImageFiles,
 } from '../src/core/attachment-resolver';
 import { absolutePathForFile } from '../src/cli/node-api';
-import { pasteBelongsToComposer } from '../src/ui/composer';
+import { Composer, pasteBelongsToComposer, type ComposerOptions } from '../src/ui/composer';
+import { filterVaultFiles, insertItem, type DropdownItem, type TriggerMatch } from '../src/ui/composer-dropdown';
 import { projectSlug, scanSessionsDir } from '../src/data/session-index';
 import { NodeTranscriptStore } from '../src/data/transcript-store';
 import { FileSystemAdapter, TFile } from 'obsidian';
@@ -5206,6 +5207,8 @@ class FakeElement {
 		this._text = t;
 	}
 	value: string = '';
+	selectionStart: number = 0;
+	selectionEnd: number = 0;
 	disabled: boolean = false;
 	tag: string = 'div';
 	tagName: string = 'DIV';
@@ -5216,6 +5219,27 @@ class FakeElement {
 
 	parentElement: FakeElement | null = null;
 	parent: FakeElement | null = null;
+	ownerDocument: any = this;
+
+	setSelectionRange(start: number, end: number) {
+		this.selectionStart = start;
+		this.selectionEnd = end;
+	}
+
+	isShown(): boolean {
+		return !this.hasClass('guki-hidden');
+	}
+
+	contains(other: any): boolean {
+		if (!other) return false;
+		if (other === this) return true;
+		for (const child of this.children) {
+			if (child === other || (child.contains && child.contains(other))) {
+				return true;
+			}
+		}
+		return false;
+	}
 
 	createDiv(opts?: any) { return this.createEl('div', opts); }
 	createSpan(opts?: any) { return this.createEl('span', opts); }
@@ -5235,12 +5259,28 @@ class FakeElement {
 	removeClass(c: string) { this.classList.delete(c); }
 	toggleClass(c: string, val: boolean) { if (val) this.addClass(c); else this.removeClass(c); }
 	hasClass(c: string): boolean { return this.classList.has(c); }
+	style: Record<string, any> = {};
+	setCssStyles(styles?: any) {
+		if (styles) Object.assign(this.style, styles);
+	}
 	empty() {
 		this.children = [];
 		this.childElementCount = 0;
 	}
 	setText(t: string) { this.text = t; }
-	addEventListener(evt: string, cb: any) { this.listeners[evt] = cb; }
+	private _eventListenersList: Record<string, any[]> = {};
+	addEventListener(evt: string, cb: any) {
+		if (!this._eventListenersList[evt]) {
+			this._eventListenersList[evt] = [];
+		}
+		this._eventListenersList[evt].push(cb);
+		const self = this;
+		this.listeners[evt] = function(e: any) {
+			for (const fn of self._eventListenersList[evt]) {
+				fn(e);
+			}
+		};
+	}
 	hide() { this.addClass('guki-hidden'); }
 	show() { this.removeClass('guki-hidden'); }
 	remove() {
@@ -5294,6 +5334,7 @@ class FakeElement {
 		const findNode = (node: any): any => {
 			if (sel === 'input' && node.tag === 'input') return node;
 			if (sel === 'button' && node.tag === 'button') return node;
+			if (sel === 'textarea' && node.tag === 'textarea') return node;
 			if (sel.startsWith('.') && node.classList.has(sel.slice(1))) return node;
 			for (const child of node.children) {
 				const found = findNode(child);
@@ -5306,7 +5347,9 @@ class FakeElement {
 	querySelectorAll(sel: string): any[] {
 		const results: any[] = [];
 		const walk = (node: any) => {
-			if (sel.startsWith('.') && node.classList.has(sel.slice(1).split('.')[0])) {
+			if (sel === 'textarea' && node.tag === 'textarea') {
+				results.push(node);
+			} else if (sel.startsWith('.') && node.classList.has(sel.slice(1).split('.')[0])) {
 				results.push(node);
 			}
 			for (const child of node.children) walk(child);
@@ -8085,6 +8128,349 @@ console.log('AB13. Multi-question card: tab bar contains only question tabs and 
 	check('AB13.9: styles.css contains no leftover .guki-ask-tab-submit rule',
 		!stylesCss.includes('.guki-ask-tab-submit'),
 		'styles.css still contains .guki-ask-tab-submit rule leftover from removed top submit control');
+}
+
+// --- AC. Composer dropdown: slash commands and mentions -------------------
+
+console.log('\nAC1. Mandatory end-to-end chain check (simulated keystrokes on real composer input path)');
+{
+	if (typeof (globalThis as any).ResizeObserver === 'undefined') {
+		(globalThis as any).ResizeObserver = class {
+			observe() {}
+			unobserve() {}
+			disconnect() {}
+		};
+	}
+
+	const testVaultFiles = [
+		Object.assign(new TFile(), { path: 'notes/alpha.md', name: 'alpha.md' }),
+		Object.assign(new TFile(), { path: 'notes/beta.md', name: 'beta.md' }),
+		Object.assign(new TFile(), { path: 'notes/gamma.md', name: 'gamma.md' }),
+		Object.assign(new TFile(), { path: 'notes/bad"quote.md', name: 'bad"quote.md' }),
+		Object.assign(new TFile(), { path: 'outside/secret.md', name: 'secret.md' }),
+	];
+	const testVaultAdapter = new FileSystemAdapter();
+	testVaultAdapter.getBasePath = () => POLICY_VAULT.root;
+	testVaultAdapter.getFullPath = (p: string) => {
+		if (p.startsWith('outside/')) {
+			return `${POLICY_VAULT.outside}/${p.slice('outside/'.length)}`;
+		}
+		return `${POLICY_VAULT.root}/${p}`;
+	};
+	const testApp = {
+		vault: {
+			adapter: testVaultAdapter,
+			getFiles: () => testVaultFiles,
+		},
+	} as any;
+
+	const slashCommands = ['clear', 'help', 'orchestrate'];
+	let submittedText = '';
+	let submitCallCount = 0;
+
+	const container = new FakeElement() as any;
+	const panel = new FakeElement() as any;
+	const dummyComp = {
+		registerDomEvent: (el: any, evt: string, cb: any) => {
+			if (el?.addEventListener) el.addEventListener(evt, cb);
+		},
+	} as any;
+
+	const composer = new Composer(container, panel, dummyComp, {
+		app: testApp,
+		getSlashCommands: () => slashCommands,
+		getVaultPaths: () => Promise.resolve(vaultPaths),
+		onSubmit: (text: string) => {
+			submittedText = text;
+			submitCallCount++;
+			return true;
+		},
+		onStop: () => {},
+		onDropped: () => {},
+		onPasted: () => false,
+		onAttachActiveNote: () => {},
+		onPickedFiles: () => {},
+	});
+
+	const inputEl = container.querySelector('textarea');
+	check('AC1.0: composer textarea element exists', inputEl !== null);
+
+	function simulateInput(value: string, cursor?: number) {
+		inputEl.value = value;
+		const pos = cursor ?? value.length;
+		inputEl.selectionStart = pos;
+		inputEl.selectionEnd = pos;
+		inputEl.listeners['input']?.();
+	}
+
+	function simulateKeydown(key: string, opts: { shiftKey?: boolean; isComposing?: boolean } = {}) {
+		let prevented = false;
+		const event = {
+			key,
+			shiftKey: !!opts.shiftKey,
+			isComposing: !!opts.isComposing,
+			preventDefault: () => { prevented = true; },
+		};
+		inputEl.listeners['keydown']?.(event);
+		return { defaultPrevented: prevented };
+	}
+
+	// FIX 2a / regression check for FIX 1:
+	// First mention keystroke after construction — boundary check must be in force.
+	// Fail closed: if vault paths are not known yet, out-of-vault candidate must not be insertable.
+	simulateInput('@secret', 7);
+	const tabResFirstKeystroke = simulateKeydown('Tab');
+	check('FIX2a: boundary check is in force on first mention keystroke after construction (out-of-vault candidate not insertable)',
+		!tabResFirstKeystroke.defaultPrevented && !inputEl.value.includes(POLICY_VAULT.outside) && !inputEl.value.includes('secret.md'),
+		`got value: ${inputEl.value}, defaultPrevented: ${tabResFirstKeystroke.defaultPrevented}`);
+
+	// FIX 2b: After vault paths promise resolves, out-of-vault candidate is not insertable
+	await Promise.resolve();
+	inputEl.value = '';
+	simulateInput('@secret', 7);
+	const tabResOut = simulateKeydown('Tab');
+	check('FIX2b: an out-of-vault candidate is not insertable',
+		!tabResOut.defaultPrevented && !inputEl.value.includes(POLICY_VAULT.outside) && !inputEl.value.includes('secret.md'),
+		`got value: ${inputEl.value}, defaultPrevented: ${tabResOut.defaultPrevented}`);
+
+	// FIX 2c: In-vault candidate still is insertable (inverse check)
+	inputEl.value = '';
+	simulateInput('@gamma', 6);
+	const tabResIn = simulateKeydown('Tab');
+	check('FIX2c: an in-vault candidate still is insertable',
+		tabResIn.defaultPrevented && inputEl.value.includes(`@"${POLICY_VAULT.root}/notes/gamma.md"`),
+		`got value: ${inputEl.value}, defaultPrevented: ${tabResIn.defaultPrevented}`);
+
+	inputEl.value = '';
+
+	// a) @ + query + ArrowDown + Tab -> textarea contains @"<abs path>" for the second match, with whitespace before the @
+	simulateInput('@notes', 6);
+	const downResA = simulateKeydown('ArrowDown');
+	check('AC1.1a: ArrowDown intercepted with preventDefault', downResA.defaultPrevented);
+	const tabResA = simulateKeydown('Tab');
+	check('AC1.1b: Tab intercepted with preventDefault', tabResA.defaultPrevented);
+	const expectedBetaRef = `@"${POLICY_VAULT.root}/notes/beta.md"`;
+	check('AC1.1c: textarea contains second match reference', inputEl.value.includes(expectedBetaRef), `got: ${inputEl.value}`);
+	check('AC1.1d: whitespace or start-of-text immediately before @',
+		inputEl.value.startsWith(expectedBetaRef) || inputEl.value.includes(` ${expectedBetaRef}`),
+		`got: ${inputEl.value}`);
+
+	// b) The same insertion performed when the caret directly follows a non-whitespace character -> result still has whitespace before @
+	inputEl.value = 'hello';
+	simulateInput('hello@notes', 11);
+	const tabResB = simulateKeydown('Tab');
+	check('AC1.2a: Tab intercepted with preventDefault', tabResB.defaultPrevented);
+	const expectedAlphaRef = `@"${POLICY_VAULT.root}/notes/alpha.md"`;
+	eq('AC1.2b: result has whitespace before @ (invariant 6)', inputEl.value, `hello ${expectedAlphaRef}`);
+
+	// FIX 3: Structural whitespace invariant at insertion point
+	const testDirectInput = new FakeElement() as any;
+	testDirectInput.value = 'hello@query';
+	testDirectInput.selectionStart = 11;
+	testDirectInput.selectionEnd = 11;
+	const matchStructural: TriggerMatch = {
+		kind: 'mention',
+		start: 5,
+		end: 11,
+		query: 'query',
+	};
+	const itemWithoutFlag: DropdownItem = {
+		id: 'test',
+		label: 'test',
+		insertText: `@"${POLICY_VAULT.root}/notes/alpha.md"`,
+		needsPrecedingSpace: false,
+	};
+	insertItem(testDirectInput, itemWithoutFlag, matchStructural);
+	eq('FIX3: structural whitespace invariant enforced at insertion point without convention flag',
+		testDirectInput.value,
+		`hello @"${POLICY_VAULT.root}/notes/alpha.md"`);
+
+	// Insertion with caret immediately after non-whitespace character via simulated input
+	inputEl.value = 'review';
+	simulateInput('review@alpha', 12);
+	const tabResStructural = simulateKeydown('Tab');
+	check('FIX3b: insertion with caret immediately after non-whitespace character preserves whitespace invariant',
+		tabResStructural.defaultPrevented && inputEl.value === `review @"${POLICY_VAULT.root}/notes/alpha.md"`,
+		`got: ${inputEl.value}`);
+
+	// c) / + query + Enter -> textarea contains /command and no message was submitted
+	submitCallCount = 0;
+	submittedText = '';
+	simulateInput('/or', 3);
+	const enterResC = simulateKeydown('Enter');
+	check('AC1.3a: Enter intercepted with preventDefault when dropdown open', enterResC.defaultPrevented);
+	eq('AC1.3b: no message submitted', submitCallCount, 0);
+	eq('AC1.3c: textarea contains /command with single trailing space', inputEl.value, '/orchestrate ');
+
+	// d) With no dropdown open: Enter still submits, and Tab is not swallowed
+	inputEl.value = 'hello world';
+	simulateInput('hello world', 11);
+	const tabResD = simulateKeydown('Tab');
+	check('AC1.4a: Tab is not swallowed when no dropdown open', !tabResD.defaultPrevented);
+	const enterResD = simulateKeydown('Enter');
+	check('AC1.4b: Enter prevents default when submitting message', enterResD.defaultPrevented);
+	eq('AC1.4c: Enter submitted message when no dropdown open', submitCallCount, 1);
+	eq('AC1.4d: submitted text is hello world', submittedText, 'hello world');
+
+	// e) A file whose attachmentReference() returns null is not insertable
+	simulateInput('@bad', 4);
+	const dropdownEl = container.querySelector('.guki-composer-dropdown');
+	const badItem = dropdownEl ? dropdownEl.querySelectorAll('.guki-composer-dropdown-item').find((el: any) => el.text.includes('bad"quote')) : null;
+	check('AC1.5: file with quotes returning null from attachmentReference is not in dropdown', badItem === null || badItem === undefined);
+}
+
+console.log('\nAC2. Slash command catalogue plumbing and behavior');
+{
+	// Cold start: empty catalogue opens no dropdown
+	const container = new FakeElement() as any;
+	const panel = new FakeElement() as any;
+	const dummyComp = {
+		registerDomEvent: (el: any, evt: string, cb: any) => {
+			if (el?.addEventListener) el.addEventListener(evt, cb);
+		},
+	} as any;
+
+	const composer = new Composer(container, panel, dummyComp, {
+		getSlashCommands: () => [],
+		onSubmit: () => true,
+		onStop: () => {},
+		onDropped: () => {},
+		onPasted: () => false,
+		onAttachActiveNote: () => {},
+		onPickedFiles: () => {},
+	});
+	const inputEl = container.querySelector('textarea');
+	inputEl.value = '/';
+	inputEl.selectionStart = 1;
+	inputEl.selectionEnd = 1;
+	inputEl.listeners['input']?.();
+
+	const dropdownEl = container.querySelector('.guki-composer-dropdown');
+	check('AC2.1: cold start with empty catalogue opens no dropdown',
+		dropdownEl === null || dropdownEl.hasClass('guki-hidden') || dropdownEl.children.length === 0);
+
+	// Slash not at start of text opens nothing
+	let commandsList = ['clear', 'help', 'orchestrate'];
+	const composerWithCommands = new Composer(container, panel, dummyComp, {
+		getSlashCommands: () => commandsList,
+		onSubmit: () => true,
+		onStop: () => {},
+		onDropped: () => {},
+		onPasted: () => false,
+		onAttachActiveNote: () => {},
+		onPickedFiles: () => {},
+	});
+	const inputEl2 = container.querySelectorAll('textarea').slice(-1)[0];
+	inputEl2.value = 'hello /or';
+	inputEl2.selectionStart = 9;
+	inputEl2.selectionEnd = 9;
+	inputEl2.listeners['input']?.();
+	const dropdownEl2 = container.querySelectorAll('.guki-composer-dropdown').slice(-1)[0];
+	check('AC2.2: slash not at start of text opens nothing',
+		dropdownEl2 === null || dropdownEl2 === undefined || dropdownEl2.hasClass('guki-hidden') || dropdownEl2.children.length === 0);
+}
+
+console.log('\nAC3. Keyboard contract & Escape while dropdown is open');
+{
+	const testVaultFiles = [
+		Object.assign(new TFile(), { path: 'notes/alpha.md', name: 'alpha.md' }),
+		Object.assign(new TFile(), { path: 'notes/beta.md', name: 'beta.md' }),
+	];
+	const testVaultAdapter = new FileSystemAdapter();
+	testVaultAdapter.getBasePath = () => POLICY_VAULT.root;
+	testVaultAdapter.getFullPath = (p: string) => `${POLICY_VAULT.root}/${p}`;
+	const testApp = {
+		vault: {
+			adapter: testVaultAdapter,
+			getFiles: () => testVaultFiles,
+		},
+	} as any;
+
+	const container = new FakeElement() as any;
+	const panel = new FakeElement() as any;
+	const dummyComp = {
+		registerDomEvent: (el: any, evt: string, cb: any) => {
+			if (el?.addEventListener) el.addEventListener(evt, cb);
+		},
+	} as any;
+
+	const composer = new Composer(container, panel, dummyComp, {
+		app: testApp,
+		getSlashCommands: () => ['clear'],
+		getVaultPaths: () => Promise.resolve(vaultPaths),
+		onSubmit: () => true,
+		onStop: () => {},
+		onDropped: () => {},
+		onPasted: () => false,
+		onAttachActiveNote: () => {},
+		onPickedFiles: () => {},
+	});
+	await Promise.resolve();
+	const inputEl = container.querySelector('textarea');
+	inputEl.value = '@';
+	inputEl.selectionStart = 1;
+	inputEl.selectionEnd = 1;
+	inputEl.listeners['input']?.();
+
+	// Escape closes dropdown with preventDefault
+	let escapePrevented = false;
+	inputEl.listeners['keydown']?.({
+		key: 'Escape',
+		isComposing: false,
+		preventDefault: () => { escapePrevented = true; },
+	});
+	check('AC3.1: Escape calls preventDefault when dropdown open', escapePrevented);
+	const dropdownEl = container.querySelector('.guki-composer-dropdown');
+	check('AC3.2: dropdown is closed after Escape',
+		dropdownEl === null || dropdownEl.hasClass('guki-hidden') || dropdownEl.children.length === 0);
+
+	// Escape does not preventDefault when dropdown is closed
+	let escapePreventedClosed = false;
+	inputEl.listeners['keydown']?.({
+		key: 'Escape',
+		isComposing: false,
+		preventDefault: () => { escapePreventedClosed = true; },
+	});
+	check('AC3.3: Escape does not prevent default when dropdown is closed', !escapePreventedClosed);
+
+	// IME isComposing is ignored
+	inputEl.value = '@';
+	inputEl.selectionStart = 1;
+	inputEl.selectionEnd = 1;
+	inputEl.listeners['input']?.();
+	let imePrevented = false;
+	inputEl.listeners['keydown']?.({
+		key: 'Enter',
+		isComposing: true,
+		preventDefault: () => { imePrevented = true; },
+	});
+	check('AC3.4: isComposing ignores Enter (does not preventDefault or select)', !imePrevented);
+}
+
+console.log('\nAC4. Mention ranking: filename matches before path-only matches');
+{
+	const pathOnlyFile = Object.assign(new TFile(), {
+		path: 'draftcvsas/unrelated.md',
+		name: 'unrelated.md',
+	});
+	const nameMatchFile = Object.assign(new TFile(), {
+		path: 'notes/draft-cvs-as.md',
+		name: 'draft-cvs-as.md',
+	});
+	const testVaultAdapter = new FileSystemAdapter();
+	testVaultAdapter.getBasePath = () => POLICY_VAULT.root;
+	testVaultAdapter.getFullPath = (p: string) => `${POLICY_VAULT.root}/${p}`;
+	const testApp = {
+		vault: {
+			adapter: testVaultAdapter,
+			getFiles: () => [pathOnlyFile, nameMatchFile],
+		},
+	} as any;
+
+	const items = filterVaultFiles(testApp, vaultPaths, 'draftcvsas', false);
+	check('AC4.1: filename match ranks before path-only match',
+		items.length >= 2 && items[0]?.label === 'notes/draft-cvs-as.md' && items[1]?.label === 'draftcvsas/unrelated.md',
+		`got: ${items.map((i) => i.label).join(', ')}`);
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);

@@ -75,6 +75,7 @@ export interface SystemInitEvent {
 	cwd?: string;
 	model?: string;
 	tools?: string[];
+	slash_commands?: string[];
 	mcp_servers?: McpServerInfo[];
 	/** `"default"` when no `--permission-mode` flag was passed, which is the mode we require. */
 	permissionMode?: string;
@@ -462,6 +463,24 @@ export type StreamJsonEvent =
 
 export function isSystemInitEvent(ev: StreamJsonEvent): ev is SystemInitEvent {
 	return ev.type === 'system' && (ev as SystemOtherEvent).subtype === 'init';
+}
+
+/**
+ * Parses and defensively validates `slash_commands` from a `system/init` event.
+ * Returns null if absent or not an array; filters non-string items.
+ */
+export function parseSlashCommands(event: SystemInitEvent): string[] | null {
+	const raw = (event as { slash_commands?: unknown }).slash_commands;
+	if (!Array.isArray(raw)) {
+		return null;
+	}
+	const commands: string[] = [];
+	for (const item of raw) {
+		if (typeof item === 'string') {
+			commands.push(item);
+		}
+	}
+	return commands;
 }
 
 /**

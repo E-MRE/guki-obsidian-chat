@@ -21,6 +21,7 @@ import {
 	type Attachment,
 } from '../core/attachments';
 import { AskUserQuestionInline } from './ask-user-question';
+import { ComposerDropdown } from './composer-dropdown';
 import {
 	createPermissionCard,
 	updatePermissionCard,
@@ -73,6 +74,12 @@ export interface ComposerOptions {
 	 * identically — the picker is a third affordance over one code path, not a third code path.
 	 */
 	onPickedFiles(files: FileList | null): void;
+	/** The Obsidian App, used for vault file enumeration and fuzzy matching in mentions. */
+	app?: import('obsidian').App;
+	/** Current slash command catalogue, populated from system/init stream events. */
+	getSlashCommands?(): readonly string[];
+	/** Current vault paths resolver, used to verify mention boundary conditions. */
+	getVaultPaths?(): Promise<import('../core/permission-policy').VaultPaths> | import('../core/permission-policy').VaultPaths | null;
 }
 
 const DEFAULT_PLACEHOLDER = 'Message GuKi… (Enter to send, Shift+Enter for a new line)';
@@ -183,6 +190,7 @@ export class Composer {
 	private askQuestionInline: AskUserQuestionInline | null = null;
 	private permissionCardSlot: RenderedPermissionCard | null = null;
 	private currentPermissionRequestId: string | null = null;
+	private readonly dropdown: ComposerDropdown;
 
 	constructor(
 		containerEl: HTMLElement,
@@ -266,19 +274,69 @@ export class Composer {
 		});
 		setIcon(this.actionEl, 'arrow-up');
 
+		this.dropdown = new ComposerDropdown({
+			containerEl: form,
+			inputEl: this.inputEl,
+			app: this.options.app,
+			getSlashCommands: () => this.options.getSlashCommands?.() ?? [],
+			getVaultPaths: () => this.options.getVaultPaths?.() ?? null,
+			onInsert: () => {
+				this.autoGrow();
+			},
+		});
+
 		// The status line's own width is what decides which fields fit (Trap 3) — the toolbar's
 		// width changes whenever the panel is resized or moved between panes, same trigger
 		// `ChatView.observeWidth` already uses for the narrow-pane class, and for the same reason:
 		// a `ResizeObserver` alone misses a leaf being dragged between panes, but this element's
 		// `clientWidth` is re-read on every `setStatus` call too, so that gap does not matter here.
-		this.statusResizeObserver = new ResizeObserver(() => {
-			this.scheduleStatusMeasure();
-		});
-		this.statusResizeObserver.observe(toolbar);
+		if (typeof ResizeObserver !== 'undefined') {
+			this.statusResizeObserver = new ResizeObserver(() => {
+				this.scheduleStatusMeasure();
+			});
+			this.statusResizeObserver.observe(toolbar);
+		}
 
 		component.registerDomEvent(this.inputEl, 'keydown', (event: KeyboardEvent) => {
 			// isComposing: mid-IME-composition Enter belongs to the input method, not to us.
-			if (event.key !== 'Enter' || event.shiftKey || event.isComposing) {
+			if (event.isComposing) {
+				return;
+			}
+
+			if (
+				event.key === 'ArrowDown' ||
+				event.key === 'ArrowUp' ||
+				event.key === 'Enter' ||
+				event.key === 'Tab' ||
+				event.key === 'Escape'
+			) {
+				this.dropdown.flushDebounce();
+			}
+
+			if (this.dropdown.isOpen()) {
+				if (event.key === 'ArrowDown') {
+					event.preventDefault();
+					this.dropdown.selectNext();
+					return;
+				}
+				if (event.key === 'ArrowUp') {
+					event.preventDefault();
+					this.dropdown.selectPrev();
+					return;
+				}
+				if (event.key === 'Enter' || event.key === 'Tab') {
+					event.preventDefault();
+					this.dropdown.insertSelected();
+					return;
+				}
+				if (event.key === 'Escape') {
+					event.preventDefault();
+					this.dropdown.close();
+					return;
+				}
+			}
+
+			if (event.key !== 'Enter' || event.shiftKey) {
 				return;
 			}
 			event.preventDefault();
@@ -294,6 +352,7 @@ export class Composer {
 		// reader gets no drag handle.
 		component.registerDomEvent(this.inputEl, 'input', () => {
 			this.autoGrow();
+			this.dropdown.onInput();
 		});
 
 		component.registerDomEvent(this.actionEl, 'click', () => {
@@ -685,6 +744,7 @@ export class Composer {
 	 * documents for its own observer), so the view calls this by hand from `onClose`.
 	 */
 	destroy(): void {
+		this.dropdown.destroy();
 		this.hideAskUserQuestion();
 		this.hidePermissionCard();
 		this.statusResizeObserver?.disconnect();
@@ -721,6 +781,7 @@ export class Composer {
 	}
 
 	private submit(): void {
+		this.dropdown.close();
 		const text = this.inputEl.value;
 		// Not `text.length === 0`: an attachment with no typed text is a real message.
 		if (!hasSendableContent(text, this.attachments) || this.blocked !== null) {
