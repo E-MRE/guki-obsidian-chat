@@ -141,7 +141,7 @@ import {
 } from '../src/core/attachment-resolver';
 import { absolutePathForFile } from '../src/cli/node-api';
 import { Composer, pasteBelongsToComposer, type ComposerOptions } from '../src/ui/composer';
-import { insertItem, type DropdownItem, type TriggerMatch } from '../src/ui/composer-dropdown';
+import { filterVaultFiles, insertItem, type DropdownItem, type TriggerMatch } from '../src/ui/composer-dropdown';
 import { projectSlug, scanSessionsDir } from '../src/data/session-index';
 import { NodeTranscriptStore } from '../src/data/transcript-store';
 import { FileSystemAdapter, TFile } from 'obsidian';
@@ -8445,6 +8445,32 @@ console.log('\nAC3. Keyboard contract & Escape while dropdown is open');
 		preventDefault: () => { imePrevented = true; },
 	});
 	check('AC3.4: isComposing ignores Enter (does not preventDefault or select)', !imePrevented);
+}
+
+console.log('\nAC4. Mention ranking: filename matches before path-only matches');
+{
+	const pathOnlyFile = Object.assign(new TFile(), {
+		path: 'draftcvsas/unrelated.md',
+		name: 'unrelated.md',
+	});
+	const nameMatchFile = Object.assign(new TFile(), {
+		path: 'notes/draft-cvs-as.md',
+		name: 'draft-cvs-as.md',
+	});
+	const testVaultAdapter = new FileSystemAdapter();
+	testVaultAdapter.getBasePath = () => POLICY_VAULT.root;
+	testVaultAdapter.getFullPath = (p: string) => `${POLICY_VAULT.root}/${p}`;
+	const testApp = {
+		vault: {
+			adapter: testVaultAdapter,
+			getFiles: () => [pathOnlyFile, nameMatchFile],
+		},
+	} as any;
+
+	const items = filterVaultFiles(testApp, vaultPaths, 'draftcvsas', false);
+	check('AC4.1: filename match ranks before path-only match',
+		items.length >= 2 && items[0]?.label === 'notes/draft-cvs-as.md' && items[1]?.label === 'draftcvsas/unrelated.md',
+		`got: ${items.map((i) => i.label).join(', ')}`);
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);

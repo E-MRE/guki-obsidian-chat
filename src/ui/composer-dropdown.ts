@@ -124,15 +124,23 @@ export function filterVaultFiles(
 		matchedFiles.sort((a, b) => a.file.path.localeCompare(b.file.path));
 	} else {
 		const fuzzy = prepareFuzzySearch(query);
-		const candidates: MatchedFile[] = [];
+		const filenameMatches: MatchedFile[] = [];
+		const pathOnlyMatches: MatchedFile[] = [];
 		for (const file of files) {
-			const match = fuzzy(file.path);
-			if (match !== null) {
-				candidates.push({ file, match });
+			const pathMatch = fuzzy(file.path);
+			if (pathMatch === null) {
+				continue;
+			}
+			const nameMatch = fuzzy(file.name);
+			if (nameMatch !== null) {
+				filenameMatches.push({ file, match: nameMatch });
+			} else {
+				pathOnlyMatches.push({ file, match: pathMatch });
 			}
 		}
-		sortSearchResults(candidates);
-		matchedFiles = candidates;
+		sortSearchResults(filenameMatches);
+		sortSearchResults(pathOnlyMatches);
+		matchedFiles = [...filenameMatches, ...pathOnlyMatches];
 	}
 
 	const items: DropdownItem[] = [];

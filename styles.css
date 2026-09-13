@@ -953,10 +953,12 @@
 }
 
 .guki-composer-dropdown-item {
+	flex-shrink: 0;
 	padding: var(--size-4-1) var(--size-4-2);
 	cursor: pointer;
 	color: var(--text-normal);
 	font-size: var(--font-ui-small);
+	line-height: var(--line-height-normal);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
