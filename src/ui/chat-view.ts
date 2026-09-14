@@ -26,6 +26,9 @@ import { HistoryDropdown } from './history-dropdown';
 import { NodeTranscriptStore, type TranscriptStore } from '../data/transcript-store';
 import { MessageList } from './message-list';
 
+/** Page size for historical conversation paging (UI layer policy, Görev 8). */
+export const HISTORY_PAGE_SIZE = 50;
+
 export class ChatView extends ItemView {
 	private rootEl: HTMLElement | null = null;
 	private resizeObserver: ResizeObserver | null = null;
@@ -36,6 +39,7 @@ export class ChatView extends ItemView {
 	private historyActionEl: HTMLElement | null = null;
 	private transcriptStore: TranscriptStore = new NodeTranscriptStore();
 	private unsubscribe: (() => void) | null = null;
+	private currentSessionId: string | null = null;
 
 	/**
 	 * Seam for selecting a past session (Phase 8 Görev 8).
@@ -47,8 +51,15 @@ export class ChatView extends ItemView {
 	 * The session lives on the plugin, not here: the subprocess and the transcript must survive
 	 * the panel being closed and reopened.
 	 */
-	constructor(leaf: WorkspaceLeaf, private readonly session: SessionManager) {
+	constructor(
+		leaf: WorkspaceLeaf,
+		private readonly session: SessionManager,
+		transcriptStore?: TranscriptStore,
+	) {
 		super(leaf);
+		if (transcriptStore) {
+			this.transcriptStore = transcriptStore;
+		}
 	}
 
 	getViewType(): string {
@@ -77,7 +88,7 @@ export class ChatView extends ItemView {
 				return this.transcriptStore.listSessions(paths.root);
 			},
 			onSelectSession: (sessionId: string) => {
-				this.handleSelectSession(sessionId);
+				void this.handleSelectSession(sessionId);
 			},
 		});
 
@@ -241,12 +252,45 @@ export class ChatView extends ItemView {
 			window.cancelAnimationFrame(this.pendingMeasure);
 			this.pendingMeasure = null;
 		}
+		this.currentSessionId = null;
 		this.rootEl = null;
 		this.contentEl.empty();
 	}
 
-	private handleSelectSession(sessionId: string): void {
+	async handleSelectSession(sessionId: string): Promise<void> {
+		if (this.currentSessionId === sessionId) {
+			this.onSessionSelected?.(sessionId);
+			return;
+		}
+
 		this.onSessionSelected?.(sessionId);
+
+		try {
+			const paths = await this.session.vaultPaths();
+			const page = await this.transcriptStore.readSession(sessionId, paths?.root, { count: HISTORY_PAGE_SIZE });
+			if (page.length === 0) {
+				this.session.state.setItems([]);
+				this.session.state.addNotice('info', 'This conversation has no messages to display.');
+			} else {
+				this.session.state.setItems(page);
+			}
+			this.currentSessionId = sessionId;
+			this.messageList?.scrollToBottom();
+		} catch (err: unknown) {
+			this.session.state.setItems([]);
+			const msg = err instanceof Error ? err.message : String(err);
+			this.session.state.addNotice('error', 'Could not load conversation.', msg);
+			this.currentSessionId = sessionId;
+			this.messageList?.scrollToBottom();
+		}
+	}
+
+	getCurrentSessionId(): string | null {
+		return this.currentSessionId;
+	}
+
+	getTranscriptStore(): TranscriptStore {
+		return this.transcriptStore;
 	}
 
 	toggleHistory(): Promise<void> {

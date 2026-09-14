@@ -95,7 +95,7 @@ import { toolPermissionBodyText, toolResultTitle, toolStatusText } from '../src/
 import { canRememberPermission, createPermissionCard, permissionDiff, rememberLabelText, shortenPathForLabel, type PermissionActions } from '../src/ui/permission-card';
 import { clearRememberedDecisions, DEFAULT_SETTINGS, formatRememberedDecision, removeRememberedDecision } from '../src/ui/settings-tab';
 import GukiChatPlugin from '../src/main';
-import { ChatView, currentStatus } from '../src/ui/chat-view';
+import { ChatView, currentStatus, HISTORY_PAGE_SIZE } from '../src/ui/chat-view';
 import { renderQuotaBar } from '../src/ui/composer';
 import { formatTurnMeta, MessageList, withTurnMeta } from '../src/ui/message-list';
 import {
@@ -12110,6 +12110,187 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	// Run close lifecycle
 	await (view as any).onClose();
 	check('AL.11 onClose empties contentEl and cleans up references', container.querySelector('.guki-root') === null && view.getHistoryDropdown() === null);
+}
+
+// AM: Görev 8: Drawing historical conversations on screen (round T4a)
+{
+	console.log('AM. Görev 8: Drawing historical conversations on screen');
+
+	// Fixture 1: Standard conversation with 2 user and 2 assistant turns
+	const basicFile = join(TRANSCRIPT_TEST_DIR, 'sess-am-basic.jsonl');
+	writeFileSync(
+		basicFile,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u-b1', message: { role: 'user', content: 'Question 1: What is Obsidian?' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a-b1', parentUuid: 'u-b1', message: { role: 'assistant', content: [{ type: 'text', text: 'Answer 1: Obsidian is a markdown note-taking app.' }] } }),
+			JSON.stringify({ type: 'user', uuid: 'u-b2', parentUuid: 'a-b1', message: { role: 'user', content: 'Question 2: Does it work offline?' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a-b2', parentUuid: 'u-b2', message: { role: 'assistant', content: [{ type: 'text', text: 'Answer 2: Yes, all notes are local markdown files.' }] } }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a-b2', sessionId: 'sess-am-basic' }),
+			'',
+		].join('\n'),
+	);
+
+	// Fixture 2: Shuffled file order where disk lines contradict DAG causality (for red/green pair b)
+	const dagFile = join(TRANSCRIPT_TEST_DIR, 'sess-am-dag-order.jsonl');
+	writeFileSync(
+		dagFile,
+		[
+			JSON.stringify({ type: 'assistant', uuid: 'a-ord-2', parentUuid: 'u-ord-2', message: { role: 'assistant', content: [{ type: 'text', text: 'Fourth turn: Finished' }] } }),
+			JSON.stringify({ type: 'user', uuid: 'u-ord-1', message: { role: 'user', content: 'First turn: Begun' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a-ord-1', parentUuid: 'u-ord-1', message: { role: 'assistant', content: [{ type: 'text', text: 'Second turn: Working' }] } }),
+			JSON.stringify({ type: 'user', uuid: 'u-ord-2', parentUuid: 'a-ord-1', message: { role: 'user', content: 'Third turn: Continuing' } }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a-ord-2', sessionId: 'sess-am-dag-order' }),
+			'',
+		].join('\n'),
+	);
+
+	// Fixture 3: Empty file (0 bytes)
+	const emptyFile = join(TRANSCRIPT_TEST_DIR, 'sess-am-empty.jsonl');
+	writeFileSync(emptyFile, '');
+
+	// Fixture 4: Long transcript with 70 active branch turns (> HISTORY_PAGE_SIZE = 50)
+	const longFile = join(TRANSCRIPT_TEST_DIR, 'sess-am-long-real.jsonl');
+	const longLines: string[] = [];
+	for (let i = 1; i <= 70; i++) {
+		const isUser = i % 2 === 1;
+		longLines.push(
+			JSON.stringify({
+				type: isUser ? 'user' : 'assistant',
+				uuid: `msg-turn-${String(i)}`,
+				parentUuid: i === 1 ? undefined : `msg-turn-${String(i - 1)}`,
+				message: isUser
+					? { role: 'user', content: `Prompt for turn ${String(i)}` }
+					: { role: 'assistant', content: [{ type: 'text', text: `Reply for turn ${String(i)}` }] },
+			}),
+		);
+	}
+	longLines.push(JSON.stringify({ type: 'last-prompt', leafUuid: 'msg-turn-70', sessionId: 'sess-am-long-real' }));
+	longLines.push('');
+	writeFileSync(longFile, longLines.join('\n'));
+
+	// Set up harness
+	const container = new FakeElement() as any;
+	const app = new App();
+	const leaf = new WorkspaceLeaf(app, container);
+	const state = new ChatState();
+
+	const session = {
+		state,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
+		getSlashCommands: () => ['clear', 'help'],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const store = new NodeTranscriptStore(TRANSCRIPT_TEST_DIR);
+	const view = new ChatView(leaf, session, store);
+	await (view as any).onOpen();
+
+	// AM1. Basic historical conversation draw
+	await view.handleSelectSession('sess-am-basic');
+	eq('AM1.1 state item count matches active branch', state.items.length, 4);
+	eq('AM1.2 currentSessionId tracks selected session', view.getCurrentSessionId(), 'sess-am-basic');
+	check('AM1.3 DOM contains first user message text', container.text.includes('Question 1: What is Obsidian?'));
+	check('AM1.4 DOM contains first assistant reply text', container.text.includes('Answer 1: Obsidian is a markdown note-taking app.'));
+	check('AM1.5 DOM contains second user message text', container.text.includes('Question 2: Does it work offline?'));
+	check('AM1.6 DOM contains second assistant reply text', container.text.includes('Answer 2: Yes, all notes are local markdown files.'));
+	eq('AM1.7 DOM renders four message elements', container.querySelectorAll('.guki-message').length, 4);
+
+	// AM2. Selection clears previous conversation before drawing (Required red/green pair a)
+	state.addUserMessage('Active conversation message to clear');
+	check('AM2.0 active message is on screen before selection', container.text.includes('Active conversation message to clear'));
+
+	const secondFile = join(TRANSCRIPT_TEST_DIR, 'sess-am-second.jsonl');
+	writeFileSync(
+		secondFile,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u-sec-1', message: { role: 'user', content: 'Fresh prompt second session' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a-sec-1', parentUuid: 'u-sec-1', message: { role: 'assistant', content: [{ type: 'text', text: 'Fresh reply second session' }] } }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a-sec-1', sessionId: 'sess-am-second' }),
+			'',
+		].join('\n'),
+	);
+
+	await view.handleSelectSession('sess-am-second');
+	eq('AM2.1 state contains only new session items', state.items.length, 2);
+	check('AM2.2 previous active message removed from state', !state.items.some((it) => (it as any).text === 'Active conversation message to clear'));
+	check('AM2.3 previous active message removed from DOM', !container.text.includes('Active conversation message to clear'));
+	check('AM2.4 previous session messages removed from DOM', !container.text.includes('Question 1: What is Obsidian?'));
+	check('AM2.5 new session message rendered in DOM', container.text.includes('Fresh prompt second session'));
+	check('AM2.6 new session reply rendered in DOM', container.text.includes('Fresh reply second session'));
+	eq('AM2.7 DOM renders exactly two messages', container.querySelectorAll('.guki-message').length, 2);
+
+	// AM3. Drawn items arrive in conversation DAG order, NOT file order (Required red/green pair b)
+	await view.handleSelectSession('sess-am-dag-order');
+	const messageEls = container.querySelectorAll('.guki-message');
+	const renderedTexts = messageEls.map((el: any) => el.text.trim());
+	eq('AM3.1 dag-order session renders four messages', renderedTexts.length, 4);
+	check('AM3.2 first rendered message is turn 1 in DAG order (not turn 4 from disk line 1)', renderedTexts[0].includes('First turn: Begun'));
+	check('AM3.3 second rendered message is turn 2 in DAG order', renderedTexts[1].includes('Second turn: Working'));
+	check('AM3.4 third rendered message is turn 3 in DAG order', renderedTexts[2].includes('Third turn: Continuing'));
+	check('AM3.5 fourth rendered message is turn 4 in DAG order', renderedTexts[3].includes('Fourth turn: Finished'));
+
+	// AM4. Re-selecting conversation already on screen does not redraw or duplicate
+	const countBefore = container.querySelectorAll('.guki-message').length;
+	const firstElBefore = container.querySelector('.guki-message');
+	await view.handleSelectSession('sess-am-dag-order');
+	eq('AM4.1 re-selection leaves message count unchanged', container.querySelectorAll('.guki-message').length, countBefore);
+	eq('AM4.2 re-selection leaves state item count unchanged', state.items.length, 4);
+	check('AM4.3 re-selection does not recreate DOM nodes', container.querySelector('.guki-message') === firstElBefore);
+
+	// AM5. Plain-language notice when readSession comes back empty
+	await view.handleSelectSession('sess-am-empty');
+	eq('AM5.1 empty session produces one notice item', state.items.length, 1);
+	eq('AM5.2 notice kind is notice', state.items[0]?.kind, 'notice');
+	eq('AM5.3 notice level is info', (state.items[0] as any)?.level, 'info');
+	check('AM5.4 DOM displays plain-language empty notice text', container.text.includes('This conversation has no messages to display.'));
+	check('AM5.5 previous conversation cleared from DOM', !container.text.includes('Fourth turn: Finished'));
+
+	// AM6. Plain-language notice when readSession throws (missing / unreadable file)
+	await view.handleSelectSession('sess-does-not-exist-xyz');
+	eq('AM6.1 missing session produces one notice item', state.items.length, 1);
+	eq('AM6.2 notice kind is notice', state.items[0]?.kind, 'notice');
+	eq('AM6.3 notice level is error', (state.items[0] as any)?.level, 'error');
+	check('AM6.4 DOM displays plain-language error notice text', container.text.includes('Could not load conversation'));
+	check('AM6.5 DOM contains error styling', container.querySelector('.guki-message-error') !== null);
+
+	// AM7. Real conversation on disk drawn on screen, newest page is a strict subset
+	await view.handleSelectSession('sess-am-long-real');
+	eq('AM7.1 UI layer page size constant is 50', HISTORY_PAGE_SIZE, 50);
+	eq('AM7.2 newest page draws exactly 50 items (strict subset of 70)', state.items.length, 50);
+	check('AM7.3 newest item is 70th turn tip', container.text.includes('Reply for turn 70'));
+	check('AM7.4 oldest drawn item is turn 21', container.text.includes('Prompt for turn 21'));
+	check('AM7.5 unpaged items turn 1-20 are omitted from drawn page', !container.text.includes('Prompt for turn 20'));
+	eq('AM7.6 cost and duration left blank without invention', (state.items[0] as any)?.costUsd, undefined);
+	eq('AM7.7 assistant duration left blank without invention', (state.items[1] as any)?.meta?.durationMs, undefined);
+	eq('AM7.8 DOM renders all 50 paged messages', container.querySelectorAll('.guki-message').length, 50);
+
+	// Also verify against an actual ~/.claude/projects/ transcript on disk if present
+	const realClaudeFile = join(homedir(), '.claude', 'projects', '-Users-emregultekir-Documents-otherprojects-guki-obsidian-chat', '011fb901-bdfe-4df1-ba50-04a1808fbc07.jsonl');
+	if (existsSync(realClaudeFile)) {
+		const realSession = {
+			state: new ChatState(),
+			busy: false,
+			blocked: false,
+			vaultPaths: async () => ({ root: '/Users/emregultekir/Documents/otherprojects/guki-obsidian-chat', outside: '/fake/outside' }),
+			getSlashCommands: () => ['clear', 'help'],
+			send: () => {},
+			interrupt: () => {},
+			decidePermission: () => {},
+			rememberPermission: async () => {},
+		} as unknown as SessionManager;
+		const realContainer = new FakeElement() as any;
+		const realLeaf = new WorkspaceLeaf(app, realContainer);
+		const realView = new ChatView(realLeaf, realSession);
+		await (realView as any).onOpen();
+		await realView.handleSelectSession('011fb901-bdfe-4df1-ba50-04a1808fbc07');
+		check('AM7.9 real transcript on disk draws message items', realSession.state.items.length >= 1);
+		check('AM7.10 real transcript DOM renders messages', realContainer.querySelectorAll('.guki-message').length >= 1);
+	}
 }
 
 // Clean up temporary test files
