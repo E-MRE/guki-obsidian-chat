@@ -13166,11 +13166,197 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	}
 }
 
+// AS. Phase 7 Task 9 Lane 2: Manual rename in the history list
+{
+	console.log('AS. Phase 7 Task 9 Lane 2: Manual rename in the history list');
+
+	const mockSummaries: SessionSummary[] = [
+		{
+			sessionId: 'sess-l2-1',
+			title: 'CLI Title 1',
+			startedAt: '2026-09-15T01:00:00.000Z',
+			costUsd: 0.12,
+		},
+		{
+			sessionId: 'sess-l2-2',
+			derivedTitle: 'Derived Prompt 2',
+			startedAt: '2026-09-15T02:00:00.000Z',
+		},
+	];
+
+	let savedSettings: any = null;
+	const settings = {
+		claudeBinaryPath: '/custom/claude',
+		permissionMode: 'plan',
+		conversationTitles: {} as Record<string, any>,
+	};
+	const titleStore = new ConversationTitleStore(
+		settings.conversationTitles,
+		async (map) => {
+			settings.conversationTitles = map;
+			savedSettings = JSON.parse(JSON.stringify(settings));
+		},
+	);
+
+	let selectedSessionId: string | null = null;
+	const container = new FakeElement() as any;
+	const dropdown = new HistoryDropdown({
+		containerEl: container,
+		getSessions: async () => mockSummaries,
+		onSelectSession: (id) => {
+			selectedSessionId = id;
+		},
+		titleStore,
+	});
+
+	await dropdown.openDropdown();
+	const dropdownEl = dropdown.getDropdownEl() as any;
+	let renderedRows = dropdownEl.children.filter((c: any) => c.hasClass('guki-history-item'));
+	eq('AS1.1 rendered row count is 2', renderedRows.length, 2);
+
+	const renameBtn0 = renderedRows[0]?.querySelector('.guki-history-rename-btn');
+	const renameBtn1 = renderedRows[1]?.querySelector('.guki-history-rename-btn');
+	check('AS1.2 first row has pencil rename button', renameBtn0 !== null);
+	check('AS1.3 second row has pencil rename button', renameBtn1 !== null);
+
+	// AS1: Clicking pencil button does NOT select the row or close the dropdown
+	renameBtn0?.click();
+	eq('AS1.4 clicking pencil does not trigger session selection', selectedSessionId, null);
+	check('AS1.5 dropdown remains open after clicking pencil', dropdown.isOpen() === true);
+
+	// AS2: Clicking pencil opens input pre-filled with row's current name and selected
+	const inputEl0 = dropdownEl.querySelector('input');
+	check('AS2.1 clicking pencil opened input in first row', inputEl0 !== null);
+	eq('AS2.2 input is pre-filled with current row name', inputEl0?.value, 'CLI Title 1');
+	eq('AS2.3 input selection starts at 0', inputEl0?.selectionStart, 0);
+	eq('AS2.4 input selection covers full title length', inputEl0?.selectionEnd, 'CLI Title 1'.length);
+
+	// AS3: While input is open, ArrowDown/ArrowUp do NOT move dropdown selection
+	const initialIndex = dropdown.getSelectedIndex();
+	dropdown.handleKeyDown({ key: 'ArrowDown', preventDefault: () => {} } as any);
+	eq('AS3.1 ArrowDown while input open does not advance selection', dropdown.getSelectedIndex(), initialIndex);
+	dropdown.handleKeyDown({ key: 'ArrowUp', preventDefault: () => {} } as any);
+	eq('AS3.2 ArrowUp while input open does not change selection', dropdown.getSelectedIndex(), initialIndex);
+
+	// AS4: Enter stores name, updates row, writes saveData, dropdown stays open
+	if (inputEl0) {
+		inputEl0.value = 'My Custom Session Name';
+	}
+	dropdown.handleKeyDown({ key: 'Enter', preventDefault: () => {} } as any);
+	await (dropdown as any).commitEdit?.();
+
+	check('AS4.1 dropdown remains open across Enter save', dropdown.isOpen() === true);
+	eq('AS4.2 row item title updated to custom name', dropdown.getItems()[0]?.title, 'My Custom Session Name');
+	eq('AS4.3 row item is NOT marked derived', dropdown.getItems()[0]?.isDerivedTitle, false);
+	eq('AS4.4 titleStore snapshot contains new custom title', titleStore.get('sess-l2-1'), 'My Custom Session Name');
+	check('AS4.5 saveData was called with full settings object', savedSettings !== null);
+	eq('AS4.6 saveData preserved claudeBinaryPath', savedSettings?.claudeBinaryPath, '/custom/claude');
+	eq('AS4.7 saveData stored new title in conversationTitles', savedSettings?.conversationTitles?.['sess-l2-1']?.title, 'My Custom Session Name');
+
+	renderedRows = dropdownEl.children.filter((c: any) => c.hasClass('guki-history-item'));
+	check('AS4.8 DOM row element displays updated title', renderedRows[0]?.text.includes('My Custom Session Name'));
+	check('AS4.9 input element removed after save', renderedRows[0]?.querySelector('input') === null);
+
+	// AS5: Escape cancels, stores nothing, restores row text, dropdown stays open
+	const renameBtn1Before = renderedRows[1]?.querySelector('.guki-history-rename-btn');
+	renameBtn1Before?.click();
+	const inputEl1 = dropdownEl.querySelector('input');
+	check('AS5.1 second row input opened', inputEl1 !== null);
+	eq('AS5.2 second row input pre-filled with derived title', inputEl1?.value, 'Derived Prompt 2');
+
+	if (inputEl1) {
+		inputEl1.value = 'Discarded Edit';
+	}
+	dropdown.handleKeyDown({ key: 'Escape', preventDefault: () => {} } as any);
+
+	check('AS5.3 dropdown remains open across Escape cancel', dropdown.isOpen() === true);
+	eq('AS5.4 row item retains original derived title', dropdown.getItems()[1]?.title, 'Derived Prompt 2');
+	eq('AS5.5 row item retains derived status', dropdown.getItems()[1]?.isDerivedTitle, true);
+	eq('AS5.6 titleStore does NOT contain canceled edit', titleStore.get('sess-l2-2'), undefined);
+	renderedRows = dropdownEl.children.filter((c: any) => c.hasClass('guki-history-item'));
+	check('AS5.7 input element removed after Escape', renderedRows[1]?.querySelector('input') === null);
+	check('AS5.8 DOM row displays original derived title', renderedRows[1]?.text.includes('Derived Prompt 2'));
+
+	// AS6: Blur stores the name
+	const renameBtn1Again = renderedRows[1]?.querySelector('.guki-history-rename-btn');
+	renameBtn1Again?.click();
+	const inputEl1Blur = dropdownEl.querySelector('input');
+	if (inputEl1Blur) {
+		inputEl1Blur.value = 'Saved By Blur';
+		inputEl1Blur.blur();
+	}
+	await (dropdown as any).commitEdit?.();
+
+	check('AS6.1 dropdown remains open after blur save', dropdown.isOpen() === true);
+	eq('AS6.2 titleStore contains name saved via blur', titleStore.get('sess-l2-2'), 'Saved By Blur');
+	eq('AS6.3 row item displays name saved via blur', dropdown.getItems()[1]?.title, 'Saved By Blur');
+	eq('AS6.4 name saved via blur is NOT marked derived', dropdown.getItems()[1]?.isDerivedTitle, false);
+
+	// AS7: Saving empty or whitespace-only box removes name and falls back correctly
+	// Case A: with CLI title (sess-l2-1 has CLI title 'CLI Title 1')
+	renderedRows = dropdownEl.children.filter((c: any) => c.hasClass('guki-history-item'));
+	const renameBtn0Again = renderedRows[0]?.querySelector('.guki-history-rename-btn');
+	renameBtn0Again?.click();
+	const inputEl0Clear = dropdownEl.querySelector('input');
+	if (inputEl0Clear) {
+		inputEl0Clear.value = '   ';
+	}
+	dropdown.handleKeyDown({ key: 'Enter', preventDefault: () => {} } as any);
+	await (dropdown as any).commitEdit?.();
+
+	check('AS7.1 whitespace save removes entry from titleStore', titleStore.get('sess-l2-1') === undefined);
+	eq('AS7.2 row falls back to CLI title', dropdown.getItems()[0]?.title, 'CLI Title 1');
+	eq('AS7.3 CLI title fallback is NOT marked derived', dropdown.getItems()[0]?.isDerivedTitle, false);
+	check('AS7.4 dropdown stays open after removing custom name', dropdown.isOpen() === true);
+
+	// Case B: with only derived trim (sess-l2-2 has only derivedTitle 'Derived Prompt 2')
+	renderedRows = dropdownEl.children.filter((c: any) => c.hasClass('guki-history-item'));
+	const renameBtn1Clear = renderedRows[1]?.querySelector('.guki-history-rename-btn');
+	renameBtn1Clear?.click();
+	const inputEl1Clear = dropdownEl.querySelector('input');
+	if (inputEl1Clear) {
+		inputEl1Clear.value = '';
+	}
+	dropdown.handleKeyDown({ key: 'Enter', preventDefault: () => {} } as any);
+	await (dropdown as any).commitEdit?.();
+
+	check('AS7.5 empty save removes entry from titleStore', titleStore.get('sess-l2-2') === undefined);
+	eq('AS7.6 row falls back to derived prompt trim', dropdown.getItems()[1]?.title, 'Derived Prompt 2');
+	eq('AS7.7 derived trim fallback IS marked derived', dropdown.getItems()[1]?.isDerivedTitle, true);
+	check('AS7.8 dropdown stays open after empty save', dropdown.isOpen() === true);
+
+	// AS8: ChatView integration passes titleStore to HistoryDropdown
+	const leafContainer = new FakeElement() as any;
+	const leafContent = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App() as any, leafContainer, leafContent);
+	const session = {
+		state: new ChatState(),
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => ['clear', 'help'],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+	const transcriptStore = new NodeTranscriptStore('/tmp/test-vault');
+	const view = new ChatView(leaf as any, session as any, transcriptStore, titleStore);
+	await (view as any).onOpen();
+	const viewDropdown = view.getHistoryDropdown();
+	check('AS8.1 view has history dropdown', viewDropdown !== null);
+	eq('AS8.2 ChatView passes titleStore to HistoryDropdown', (viewDropdown as any).options?.titleStore, titleStore);
+	await (view as any).onClose();
+
+	dropdown.close();
+}
+
 // Clean up temporary test files
 rmSync(TRANSCRIPT_TEST_DIR, { recursive: true, force: true });
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
+
 
 
 
