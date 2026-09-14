@@ -369,6 +369,22 @@ export class ChatState {
 		}
 		return false;
 	}
+
+	setItems(items: readonly ChatItem[]): void {
+		this.itemList.length = 0;
+		this.itemList.push(...items);
+		this.emitChange();
+	}
+
+	prependItems(items: readonly ChatItem[]): void {
+		this.itemList.unshift(...items);
+		this.emitChange();
+	}
+
+	clear(): void {
+		this.itemList.length = 0;
+		this.emitChange();
+	}
 }
 
 /**
