@@ -148,6 +148,7 @@ import { NodeTranscriptStore } from '../src/data/transcript-store';
 import { FileSystemAdapter, TFile } from 'obsidian';
 import { parseAskUserQuestionInput, decideAskUserQuestion } from '../src/core/ask-user-question';
 import { AskUserQuestionInline } from '../src/ui/ask-user-question';
+import { DiskTranscriptLoader, resolveTranscriptBranch } from '../src/data/disk-transcript-loader';
 
 
 let failures = 0;
@@ -10438,6 +10439,310 @@ console.log('\nC8: Compacting indicator choke-point clearing and non-clearing su
 		);
 	}
 }
+
+// --- AI. Görev 8: DiskTranscriptLoader — DAG branch resolution and paged streaming reads ---
+
+console.log('\nAI. Görev 8: DiskTranscriptLoader (DAG active branch resolution & paged reads)');
+
+const TRANSCRIPT_TEST_DIR = mkdtempSync(join(tmpdir(), 'guki-transcript-checks-'));
+
+// AI1. Synthetic fixture with a fork: abandoned branch must be absent, count lower than total records
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-fork.jsonl');
+	writeFileSync(
+		filePath,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u1', timestamp: '2026-09-01T10:00:00.000Z', message: { role: 'user', content: 'Turn 1 prompt' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a1', parentUuid: 'u1', timestamp: '2026-09-01T10:00:05.000Z', message: { role: 'assistant', content: 'Turn 1 answer' } }),
+			// Abandoned branch (Fork 1)
+			JSON.stringify({ type: 'user', uuid: 'u2-abandoned', parentUuid: 'a1', timestamp: '2026-09-01T10:01:00.000Z', message: { role: 'user', content: 'Fork 1 prompt' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a2-abandoned', parentUuid: 'u2-abandoned', timestamp: '2026-09-01T10:01:05.000Z', message: { role: 'assistant', content: 'Fork 1 answer' } }),
+			// Active branch (Fork 2)
+			JSON.stringify({ type: 'user', uuid: 'u2-active', parentUuid: 'a1', timestamp: '2026-09-01T10:02:00.000Z', message: { role: 'user', content: 'Fork 2 prompt' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a2-active', parentUuid: 'u2-active', timestamp: '2026-09-01T10:02:05.000Z', message: { role: 'assistant', content: 'Fork 2 answer' } }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a2-active', sessionId: 'session-fork' }),
+			'',
+		].join('\n'),
+	);
+
+	const loader = new DiskTranscriptLoader(filePath);
+	const branch = await loader.resolveBranch();
+
+	eq('AI1.1 active branch length is 4', branch.activeBranch.length, 4);
+	eq('AI1.2 active branch tipUuid is a2-active', branch.tipUuid, 'a2-active');
+	eq('AI1.3 fallback was not used', branch.usedFallback, false);
+	eq('AI1.4 abandonedRecordCount is 2', branch.abandonedRecordCount, 2);
+	check(
+		'AI1.5 active count (4) is lower than total conversation records (6)',
+		branch.activeBranch.length < 6,
+	);
+	const activeUuids = branch.activeBranch.map((r) => r.uuid);
+	eq('AI1.6 active branch uuids follow root -> tip chain', activeUuids.join(','), 'u1,a1,u2-active,a2-active');
+	check('AI1.7 u2-abandoned is absent from active branch', !activeUuids.includes('u2-abandoned'));
+	check('AI1.8 a2-abandoned is absent from active branch', !activeUuids.includes('a2-abandoned'));
+
+	const fullRecords = await loader.loadRange(0, 4);
+	eq('AI1.9 full record count matches active branch', fullRecords.length, 4);
+	eq(
+		'AI1.10 full record contents match active branch',
+		fullRecords.map((r) => (r.message as { content?: string })?.content).join('|'),
+		'Turn 1 prompt|Turn 1 answer|Fork 2 prompt|Fork 2 answer',
+	);
+}
+
+// AI2. Fixture whose file order contradicts chain order: result must follow chain
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-reordered.jsonl');
+	writeFileSync(
+		filePath,
+		[
+			// Reverse order on disk: A2 -> U1 -> A1 -> U2
+			JSON.stringify({ type: 'assistant', uuid: 'a2', parentUuid: 'u2', timestamp: '2026-09-01T10:00:20.000Z', message: { role: 'assistant', content: 'Fourth' } }),
+			JSON.stringify({ type: 'user', uuid: 'u1', timestamp: '2026-09-01T10:00:00.000Z', message: { role: 'user', content: 'First' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a1', parentUuid: 'u1', timestamp: '2026-09-01T10:00:05.000Z', message: { role: 'assistant', content: 'Second' } }),
+			JSON.stringify({ type: 'user', uuid: 'u2', parentUuid: 'a1', timestamp: '2026-09-01T10:00:10.000Z', message: { role: 'user', content: 'Third' } }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a2', sessionId: 'session-reordered' }),
+			'',
+		].join('\n'),
+	);
+
+	const loader = new DiskTranscriptLoader(filePath);
+	const branch = await loader.resolveBranch();
+
+	eq('AI2.1 resolved branch order follows chain causality', branch.activeBranch.map((r) => r.uuid).join(','), 'u1,a1,u2,a2');
+
+	const records = await loader.loadRange(0, 4);
+	eq(
+		'AI2.2 full records loaded in chain order, NOT file order',
+		records.map((r) => (r.message as { content?: string })?.content).join('|'),
+		'First|Second|Third|Fourth',
+	);
+}
+
+// AI3. Edge case: No last-prompt record exists -> fallback to newest leaf with diagnostic
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-no-last-prompt.jsonl');
+	writeFileSync(
+		filePath,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u1', timestamp: '2026-09-01T10:00:00.000Z' }),
+			JSON.stringify({ type: 'assistant', uuid: 'a1', parentUuid: 'u1', timestamp: '2026-09-01T10:00:05.000Z' }),
+			// Older leaf fork
+			JSON.stringify({ type: 'user', uuid: 'u2-old', parentUuid: 'a1', timestamp: '2026-09-01T10:01:00.000Z' }),
+			JSON.stringify({ type: 'assistant', uuid: 'a2-old', parentUuid: 'u2-old', timestamp: '2026-09-01T10:01:05.000Z' }),
+			// Newer leaf fork
+			JSON.stringify({ type: 'user', uuid: 'u2-new', parentUuid: 'a1', timestamp: '2026-09-01T10:02:00.000Z' }),
+			JSON.stringify({ type: 'assistant', uuid: 'a2-new', parentUuid: 'u2-new', timestamp: '2026-09-01T10:02:05.000Z' }),
+			// No last-prompt!
+			'',
+		].join('\n'),
+	);
+
+	const branch = await resolveTranscriptBranch(filePath);
+
+	eq('AI3.1 usedFallback is true when last-prompt is missing', branch.usedFallback, true);
+	eq('AI3.2 fallbackReason is no-last-prompt', branch.fallbackReason, 'no-last-prompt');
+	eq('AI3.3 tipUuid is the leaf with the newest timestamp (a2-new)', branch.tipUuid, 'a2-new');
+	eq('AI3.4 active branch follows the newest leaf path', branch.activeBranch.map((r) => r.uuid).join(','), 'u1,a1,u2-new,a2-new');
+	eq('AI3.5 older fork records marked abandoned', branch.abandonedRecordCount, 2);
+}
+
+// AI4. Edge case: last-prompt points to unknown leafUuid (torn or truncated line)
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-unknown-leaf.jsonl');
+	writeFileSync(
+		filePath,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u1', timestamp: '2026-09-01T10:00:00.000Z' }),
+			JSON.stringify({ type: 'assistant', uuid: 'a1', parentUuid: 'u1', timestamp: '2026-09-01T10:00:05.000Z' }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'nonexistent-leaf-uuid', sessionId: 'session-unknown-leaf' }),
+			'',
+		].join('\n'),
+	);
+
+	const branch = await resolveTranscriptBranch(filePath);
+
+	eq('AI4.1 usedFallback is true for unknown leafUuid', branch.usedFallback, true);
+	eq('AI4.2 fallbackReason is unknown-leaf-uuid', branch.fallbackReason, 'unknown-leaf-uuid');
+	eq('AI4.3 tipUuid falls back to newest available leaf (a1)', branch.tipUuid, 'a1');
+	eq('AI4.4 active branch resolves cleanly to a1', branch.activeBranch.map((r) => r.uuid).join(','), 'u1,a1');
+}
+
+// AI5. Edge case: Broken parentUuid chain (missing parent) -> returns break to tip, reports break
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-broken-chain.jsonl');
+	writeFileSync(
+		filePath,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u-orphaned-root', timestamp: '2026-09-01T10:00:00.000Z' }),
+			// Note: 'missing-asst' record is absent from the file
+			JSON.stringify({ type: 'user', uuid: 'u2', parentUuid: 'missing-asst', timestamp: '2026-09-01T10:01:00.000Z' }),
+			JSON.stringify({ type: 'assistant', uuid: 'a2', parentUuid: 'u2', timestamp: '2026-09-01T10:01:05.000Z' }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a2', sessionId: 'session-broken-chain' }),
+			'',
+		].join('\n'),
+	);
+
+	const branch = await resolveTranscriptBranch(filePath);
+
+	check('AI5.1 chainBreak is reported', branch.chainBreak !== undefined);
+	eq('AI5.2 chainBreak atUuid is u2', branch.chainBreak?.atUuid, 'u2');
+	eq('AI5.3 chainBreak missingParentUuid is missing-asst', branch.chainBreak?.missingParentUuid, 'missing-asst');
+	eq('AI5.4 active branch returns portion from break to tip only', branch.activeBranch.map((r) => r.uuid).join(','), 'u2,a2');
+	check('AI5.5 orphaned root above break is not returned', !branch.activeBranch.map((r) => r.uuid).includes('u-orphaned-root'));
+}
+
+// AI6. Edge case: Cycle in parentUuid -> stops on revisit, does not loop forever
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-cycle.jsonl');
+	writeFileSync(
+		filePath,
+		[
+			JSON.stringify({ type: 'user', uuid: 'node-a', parentUuid: 'node-c', timestamp: '2026-09-01T10:00:00.000Z' }),
+			JSON.stringify({ type: 'assistant', uuid: 'node-b', parentUuid: 'node-a', timestamp: '2026-09-01T10:00:05.000Z' }),
+			JSON.stringify({ type: 'user', uuid: 'node-c', parentUuid: 'node-b', timestamp: '2026-09-01T10:00:10.000Z' }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'node-c', sessionId: 'session-cycle' }),
+			'',
+		].join('\n'),
+	);
+
+	const branch = await resolveTranscriptBranch(filePath);
+
+	eq('AI6.1 cycleDetected flag is true', branch.cycleDetected, true);
+	eq('AI6.2 stops on revisit with exactly 3 nodes', branch.activeBranch.length, 3);
+	eq('AI6.3 returned chain contains cycle nodes in walked order', branch.activeBranch.map((r) => r.uuid).join(','), 'node-a,node-b,node-c');
+}
+
+// AI7. Edge case: Single unparsable line -> skips line, keeps file
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-unparsable.jsonl');
+	writeFileSync(
+		filePath,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u1', timestamp: '2026-09-01T10:00:00.000Z' }),
+			'{"type":"assistant", broken unparsable json string line',
+			JSON.stringify({ type: 'assistant', uuid: 'a1', parentUuid: 'u1', timestamp: '2026-09-01T10:00:05.000Z' }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a1', sessionId: 'session-unparsable' }),
+			'',
+		].join('\n'),
+	);
+
+	const branch = await resolveTranscriptBranch(filePath);
+
+	eq('AI7.1 skippedLines is 1', branch.skippedLines, 1);
+	eq('AI7.2 active branch resolves valid records', branch.activeBranch.map((r) => r.uuid).join(','), 'u1,a1');
+	eq('AI7.3 totalLines counts all lines', branch.totalLines, 4);
+}
+
+// AI8. Edge case: Empty file / missing file / missing directory -> empty result, never throws
+{
+	// 8a. Empty file
+	const emptyPath = join(TRANSCRIPT_TEST_DIR, 'session-empty.jsonl');
+	writeFileSync(emptyPath, '');
+
+	const emptyLoader = new DiskTranscriptLoader(emptyPath);
+	const emptyBranch = await emptyLoader.resolveBranch();
+
+	eq('AI8.1 empty file active branch length is 0', emptyBranch.activeBranch.length, 0);
+	eq('AI8.2 empty file tipUuid is null', emptyBranch.tipUuid, null);
+	eq('AI8.3 empty file totalLines is 0', emptyBranch.totalLines, 0);
+
+	const emptyPage = await emptyLoader.loadNewest(10);
+	eq('AI8.4 empty file loadNewest records is empty', emptyPage.records.length, 0);
+	eq('AI8.5 empty file hasMoreBefore is false', emptyPage.hasMoreBefore, false);
+
+	// 8b. Missing file
+	const missingPath = join(TRANSCRIPT_TEST_DIR, 'session-does-not-exist.jsonl');
+	const missingLoader = new DiskTranscriptLoader(missingPath);
+	const missingBranch = await missingLoader.resolveBranch();
+
+	eq('AI8.6 missing file returns empty active branch', missingBranch.activeBranch.length, 0);
+	eq('AI8.7 missing file tipUuid is null', missingBranch.tipUuid, null);
+
+	const missingPage = await missingLoader.loadNewest(5);
+	eq('AI8.8 missing file loadNewest does not throw and returns empty', missingPage.records.length, 0);
+
+	// 8c. Missing directory
+	const missingDirFile = join(TRANSCRIPT_TEST_DIR, 'nonexistent-subdir', 'session.jsonl');
+	const missingDirLoader = new DiskTranscriptLoader(missingDirFile);
+	const missingDirBranch = await missingDirLoader.resolveBranch();
+
+	eq('AI8.9 missing directory returns empty active branch', missingDirBranch.activeBranch.length, 0);
+	eq('AI8.10 missing directory tipUuid is null', missingDirBranch.tipUuid, null);
+}
+
+// AI9. Paging seam: newest N, then N before, with no overlap and no gap
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-paging.jsonl');
+	const lines: string[] = [];
+	for (let i = 0; i < 10; i++) {
+		lines.push(
+			JSON.stringify({
+				type: i % 2 === 0 ? 'user' : 'assistant',
+				uuid: `msg-${String(i)}`,
+				parentUuid: i === 0 ? undefined : `msg-${String(i - 1)}`,
+				timestamp: `2026-09-01T10:0${String(i)}:00.000Z`,
+				message: { content: `Content of message ${String(i)}` },
+			}),
+		);
+	}
+	lines.push(JSON.stringify({ type: 'last-prompt', leafUuid: 'msg-9', sessionId: 'session-paging' }));
+	lines.push('');
+	writeFileSync(filePath, lines.join('\n'));
+
+	const loader = new DiskTranscriptLoader(filePath);
+
+	// Page 1: newest 3 items (indices 7, 8, 9)
+	const p1 = await loader.loadNewest(3);
+	eq('AI9.1 page 1 record count is 3', p1.records.length, 3);
+	eq('AI9.2 page 1 startIndex is 7', p1.startIndex, 7);
+	eq('AI9.3 page 1 endIndex is 10', p1.endIndex, 10);
+	eq('AI9.4 page 1 hasMoreBefore is true', p1.hasMoreBefore, true);
+	eq('AI9.5 page 1 uuids are msg-7,msg-8,msg-9', p1.records.map((r) => r.uuid).join(','), 'msg-7,msg-8,msg-9');
+
+	// Page 2: 3 items before page 1's startIndex (indices 4, 5, 6)
+	const p2 = await loader.loadBefore(p1.startIndex, 3);
+	eq('AI9.6 page 2 record count is 3', p2.records.length, 3);
+	eq('AI9.7 page 2 startIndex is 4', p2.startIndex, 4);
+	eq('AI9.8 page 2 endIndex is 7', p2.endIndex, 7);
+	eq('AI9.9 page 2 endIndex matches page 1 startIndex (NO GAP, NO OVERLAP)', p2.endIndex, p1.startIndex);
+	eq('AI9.10 page 2 hasMoreBefore is true', p2.hasMoreBefore, true);
+	eq('AI9.11 page 2 uuids are msg-4,msg-5,msg-6', p2.records.map((r) => r.uuid).join(','), 'msg-4,msg-5,msg-6');
+
+	// Page 3: 3 items before page 2's startIndex (indices 1, 2, 3)
+	const p3 = await loader.loadBefore(p2.startIndex, 3);
+	eq('AI9.12 page 3 record count is 3', p3.records.length, 3);
+	eq('AI9.13 page 3 startIndex is 1', p3.startIndex, 1);
+	eq('AI9.14 page 3 endIndex is 4', p3.endIndex, 4);
+	eq('AI9.15 page 3 endIndex matches page 2 startIndex (NO GAP, NO OVERLAP)', p3.endIndex, p2.startIndex);
+	eq('AI9.16 page 3 hasMoreBefore is true', p3.hasMoreBefore, true);
+	eq('AI9.17 page 3 uuids are msg-1,msg-2,msg-3', p3.records.map((r) => r.uuid).join(','), 'msg-1,msg-2,msg-3');
+
+	// Page 4: 3 items requested before page 3's startIndex (1) -> clamped to 1 item (index 0)
+	const p4 = await loader.loadBefore(p3.startIndex, 3);
+	eq('AI9.18 page 4 record count is clamped to remaining 1', p4.records.length, 1);
+	eq('AI9.19 page 4 startIndex is 0', p4.startIndex, 0);
+	eq('AI9.20 page 4 endIndex is 1', p4.endIndex, 1);
+	eq('AI9.21 page 4 endIndex matches page 3 startIndex', p4.endIndex, p3.startIndex);
+	eq('AI9.22 page 4 hasMoreBefore is false at root', p4.hasMoreBefore, false);
+	eq('AI9.23 page 4 uuid is msg-0', p4.records.map((r) => r.uuid).join(','), 'msg-0');
+
+	// Page 5: request before index 0 -> returns empty page
+	const p5 = await loader.loadBefore(p4.startIndex, 3);
+	eq('AI9.24 page 5 record count before 0 is 0', p5.records.length, 0);
+	eq('AI9.25 page 5 hasMoreBefore is false', p5.hasMoreBefore, false);
+
+	// Reconstitution: all pages concatenated equal the complete active branch
+	const allPagedUuids = [...p4.records, ...p3.records, ...p2.records, ...p1.records].map((r) => r.uuid);
+	eq(
+		'AI9.26 concatenated pages match full active branch with zero duplicates and zero omissions',
+		allPagedUuids.join(','),
+		'msg-0,msg-1,msg-2,msg-3,msg-4,msg-5,msg-6,msg-7,msg-8,msg-9',
+	);
+}
+
+// Clean up temporary test files
+rmSync(TRANSCRIPT_TEST_DIR, { recursive: true, force: true });
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
