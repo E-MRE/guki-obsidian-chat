@@ -8828,6 +8828,993 @@ console.log('\nAD. Completed turn work group: collapsed intermediate work with M
 	check('AD10.11: bodyEl child 1 is answer block 3', bodyElI?.children[1] === block3ElI);
 }
 
+console.log('\nAE. Görev 7 — Conversation compacted divider (A1-A5)');
+{
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el?.addEventListener?.(evt, cb) } as any;
+
+	// Raw wire event lines from measured evidence (SPEC §2, raw-stream.out)
+	const RAW_COMPACT_BOUNDARY_LINE =
+		'{"type":"system","subtype":"compact_boundary","session_id":"214d9943-675d-4e9a-a7c7-b3dd55a2c363","uuid":"29916d2f-e8d8-477b-a205-e1daa675e651","compact_metadata":{"trigger":"manual","pre_tokens":26529,"post_tokens":5062,"cumulative_dropped_tokens":21467,"duration_ms":33022},"logical_parent_uuid":"2cd61295-c76d-4db6-a2a9-2121c7fdd71e"}';
+	const RAW_NEAR_MISS_STATUS_LINE =
+		'{"type":"system","subtype":"status","status":"requesting","session_id":"214d9943-675d-4e9a-a7c7-b3dd55a2c363","uuid":"2546cd8f-0466-462d-a9ba-91e20a4ede57"}';
+	const RAW_NEAR_MISS_MICROCOMPACT_LINE =
+		'{"type":"system","subtype":"microcompact_boundary","session_id":"214d9943-675d-4e9a-a7c7-b3dd55a2c363","uuid":"micro-boundary-uuid-1"}';
+	const RAW_SYNTHETIC_SUMMARY_LINE =
+		'{"type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\\n\\nSummary:\\n1. Primary Request and Intent: test probe\\n\\nContinue the conversation directly."},"session_id":"214d9943-675d-4e9a-a7c7-b3dd55a2c363","parent_tool_use_id":null,"uuid":"751baf78-b60b-4fe3-8f6e-b484da2dd784","timestamp":"2026-09-13T21:12:54.524Z","isReplay":false,"isSynthetic":true}';
+
+	// ------------------------------------------------------------------------
+	// A1. End-to-end chain check
+	// ------------------------------------------------------------------------
+	const stateA1 = new ChatState();
+	const reducerA1 = new StreamReducer(stateA1);
+	const listWrapperA1 = new FakeElement() as any;
+	const messageListA1 = new MessageList({} as any, listWrapperA1, dummyComp, { decide: () => {} } as any);
+	stateA1.subscribe(() => messageListA1.sync(stateA1.items));
+
+	stateA1.addUserMessage('Prior user prompt');
+	const asstBeforeA1 = stateA1.addAssistantMessage();
+	reducerA1.beginTurn(asstBeforeA1);
+	asstBeforeA1.blocks.set(0, { index: 0, kind: 'text', text: 'Prior assistant reply.', final: true });
+	stateA1.emitChange();
+
+	// Production entry point: parseStreamJsonLine -> reducer.apply
+	const evA1 = parseStreamJsonLine(RAW_COMPACT_BOUNDARY_LINE);
+	if (evA1) {
+		reducerA1.apply(evA1);
+	}
+
+	stateA1.addUserMessage('Subsequent user prompt');
+	stateA1.emitChange();
+
+	const dividerElA1 = listWrapperA1.querySelector('.guki-message-divider');
+	check('A1.1: divider element exists in rendered message list', dividerElA1 !== null && dividerElA1 !== undefined);
+	check('A1.2: divider label text is Conversation compacted', Boolean(dividerElA1?.text?.includes('Conversation compacted')));
+
+	const scrollContainerA1 = listWrapperA1.querySelector('.guki-messages') ?? listWrapperA1;
+	const childrenA1 = scrollContainerA1.children;
+	const idxBeforeA1 = childrenA1.findIndex((c: any) => c.hasClass('guki-message-assistant'));
+	const idxDividerA1 = childrenA1.indexOf(dividerElA1);
+	const idxAfterA1 = childrenA1.findIndex((c: any) => c.hasClass('guki-message-user') && c.text.includes('Subsequent user prompt'));
+	check('A1.3: divider is placed in correct position between prior and subsequent items',
+		idxBeforeA1 !== -1 && idxDividerA1 > idxBeforeA1 && idxAfterA1 > idxDividerA1);
+
+	// ------------------------------------------------------------------------
+	// A3. Near-miss checks
+	// ------------------------------------------------------------------------
+	const stateA3 = new ChatState();
+	const reducerA3 = new StreamReducer(stateA3);
+	const listWrapperA3 = new FakeElement() as any;
+	const messageListA3 = new MessageList({} as any, listWrapperA3, dummyComp, { decide: () => {} } as any);
+	stateA3.subscribe(() => messageListA3.sync(stateA3.items));
+
+	// (a) system line with different subtype
+	const evStatus = parseStreamJsonLine(RAW_NEAR_MISS_STATUS_LINE);
+	if (evStatus) reducerA3.apply(evStatus);
+	check('A3.1: system event with different subtype produces no divider',
+		listWrapperA3.querySelector('.guki-message-divider') === null);
+
+	// (b) microcompact_boundary line
+	const evMicro = parseStreamJsonLine(RAW_NEAR_MISS_MICROCOMPACT_LINE);
+	if (evMicro) reducerA3.apply(evMicro);
+	check('A3.2: microcompact_boundary produces no divider',
+		listWrapperA3.querySelector('.guki-message-divider') === null);
+
+	// (c) identical compact_boundary uuid delivered twice -> exactly one divider
+	if (evA1) {
+		reducerA3.apply(evA1);
+		reducerA3.apply(evA1);
+	}
+	const dividerCountA3 = listWrapperA3.querySelectorAll('.guki-message-divider').length;
+	eq('A3.3: identical compact_boundary uuid delivered twice produces exactly one divider', dividerCountA3, 1);
+
+	// ------------------------------------------------------------------------
+	// A4. Split-turn check
+	// ------------------------------------------------------------------------
+	const stateA4 = new ChatState();
+	const reducerA4 = new StreamReducer(stateA4);
+	const listWrapperA4 = new FakeElement() as any;
+	const messageListA4 = new MessageList({} as any, listWrapperA4, dummyComp, { decide: () => {} } as any);
+	stateA4.subscribe(() => messageListA4.sync(stateA4.items));
+
+	stateA4.addUserMessage('Explain quantum computing');
+	const asstA4 = stateA4.addAssistantMessage();
+	reducerA4.beginTurn(asstA4);
+
+	// Assistant produces text before compaction
+	reducerA4.apply({
+		type: 'stream_event',
+		event: {
+			type: 'content_block_start',
+			index: 0,
+			content_block: { type: 'text', text: '' },
+		},
+	} as any);
+	reducerA4.apply({
+		type: 'stream_event',
+		event: {
+			type: 'content_block_delta',
+			index: 0,
+			delta: { type: 'text_delta', text: 'Quantum computing uses qubits.' },
+		},
+	} as any);
+	reducerA4.apply({
+		type: 'assistant',
+		message: {
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Quantum computing uses qubits.' }],
+		},
+	} as any);
+
+	// Boundary arrives mid-turn!
+	const boundaryEvA4 = parseStreamJsonLine(
+		'{"type":"system","subtype":"compact_boundary","uuid":"split-turn-uuid-a4","compact_metadata":{"trigger":"auto"}}'
+	);
+	if (boundaryEvA4) {
+		reducerA4.apply(boundaryEvA4);
+	}
+
+	// Text arrives AFTER compaction in the same turn
+	reducerA4.apply({
+		type: 'stream_event',
+		event: {
+			type: 'content_block_start',
+			index: 0,
+			content_block: { type: 'text', text: '' },
+		},
+	} as any);
+	reducerA4.apply({
+		type: 'stream_event',
+		event: {
+			type: 'content_block_delta',
+			index: 0,
+			delta: { type: 'text_delta', text: 'Superposition enables parallel state evaluation.' },
+		},
+	} as any);
+	reducerA4.apply({
+		type: 'assistant',
+		message: {
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Superposition enables parallel state evaluation.' }],
+		},
+	} as any);
+
+	// Turn ends with result
+	reducerA4.apply({
+		type: 'result',
+		subtype: 'success',
+		is_error: false,
+		duration_ms: 15400,
+	} as any);
+
+	const scrollContainerA4 = listWrapperA4.querySelector('.guki-messages') ?? listWrapperA4;
+	const childrenA4 = scrollContainerA4.children;
+	const dividerElA4 = listWrapperA4.querySelector('.guki-message-divider');
+	const idxDividerA4 = childrenA4.indexOf(dividerElA4);
+	const asstBeforeElA4 = childrenA4.find((c: any) =>
+		c.hasClass('guki-message-assistant') && c.text.includes('Quantum computing uses qubits.')
+	);
+	const asstAfterElA4 = childrenA4.find((c: any) =>
+		c.hasClass('guki-message-assistant') && c.text.includes('Superposition enables parallel')
+	);
+	const idxAsstBeforeA4 = childrenA4.indexOf(asstBeforeElA4);
+	const idxAsstAfterA4 = childrenA4.indexOf(asstAfterElA4);
+
+	check('A4.1: earlier text stays above divider',
+		idxAsstBeforeA4 !== -1 && idxDividerA4 > idxAsstBeforeA4);
+	check('A4.2: text arriving after renders below divider',
+		idxAsstAfterA4 !== -1 && idxAsstAfterA4 > idxDividerA4);
+
+	// In-flight empty assistant item dropped on manual /compact:
+	stateA4.addUserMessage('/compact');
+	const asstEmpty = stateA4.addAssistantMessage();
+	reducerA4.beginTurn(asstEmpty);
+	// No text rendered; compact_boundary arrives
+	const boundaryEvManual = parseStreamJsonLine(
+		'{"type":"system","subtype":"compact_boundary","uuid":"split-turn-manual-uuid","compact_metadata":{"trigger":"manual"}}'
+	);
+	if (boundaryEvManual) {
+		reducerA4.apply(boundaryEvManual);
+	}
+	reducerA4.apply({
+		type: 'result',
+		subtype: 'success',
+		is_error: false,
+		duration_ms: 8000,
+	} as any);
+
+	// Check: empty assistant item is removed from ChatState (not left behind)
+	check('A4.3: empty assistant item is removed from ChatState after /compact turn',
+		!stateA4.items.some((i: any) => i.id === asstEmpty.id));
+
+	// Mid-turn compaction without post-boundary content (Attack 2 / FIX-1):
+	stateA4.addUserMessage('Run grep');
+	const asstMidComp = stateA4.addAssistantMessage();
+	reducerA4.beginTurn(asstMidComp);
+	reducerA4.apply({
+		type: 'stream_event',
+		event: {
+			type: 'content_block_start',
+			index: 0,
+			content_block: { type: 'tool_use', id: 'tool-call-a4', name: 'Bash' }
+		}
+	} as any);
+	reducerA4.apply({
+		type: 'stream_event',
+		event: { type: 'content_block_stop', index: 0 }
+	} as any);
+	reducerA4.apply({
+		type: 'user',
+		message: {
+			role: 'user',
+			content: [{ type: 'tool_result', tool_use_id: 'tool-call-a4', content: 'output' }]
+		}
+	} as any);
+	const boundaryEvTool = parseStreamJsonLine(
+		'{"type":"system","subtype":"compact_boundary","uuid":"split-mid-turn-uuid","compact_metadata":{"trigger":"auto"}}'
+	);
+	if (boundaryEvTool) reducerA4.apply(boundaryEvTool);
+	reducerA4.apply({
+		type: 'result',
+		subtype: 'success',
+		is_error: false,
+		duration_ms: 25000,
+		total_cost_usd: 0.12
+	} as any);
+
+	check('A4.4: mid-turn compaction without post-boundary content preserves durationMs and cost',
+		asstMidComp.meta?.durationMs === 25000 && asstMidComp.meta?.costUsd === 0.12);
+
+	stateA4.addUserMessage('Next turn prompt');
+	const asstNext = stateA4.addAssistantMessage();
+	reducerA4.beginTurn(asstNext);
+	reducerA4.apply({
+		type: 'result',
+		subtype: 'success',
+		is_error: false,
+		duration_ms: 5000,
+		total_cost_usd: 0.15
+	} as any);
+	check('A4.5: next turn bills delta cost (0.03) after mid-turn compaction',
+		asstNext.meta?.costUsd === 0.03);
+
+	// ------------------------------------------------------------------------
+	// A5. R8 check: synthetic summary message suppression vs ordinary user message
+	// ------------------------------------------------------------------------
+	const stateA5 = new ChatState();
+	const reducerA5 = new StreamReducer(stateA5);
+	const listWrapperA5 = new FakeElement() as any;
+	const messageListA5 = new MessageList({} as any, listWrapperA5, dummyComp, { decide: () => {} } as any);
+	stateA5.subscribe(() => messageListA5.sync(stateA5.items));
+
+	// Feed synthetic summary line from raw evidence
+	const evSynthetic = parseStreamJsonLine(RAW_SYNTHETIC_SUMMARY_LINE);
+	if (evSynthetic) {
+		reducerA5.apply(evSynthetic);
+	}
+	stateA5.emitChange();
+
+	const syntheticBubble = listWrapperA5.querySelector('.guki-message-user');
+	check('A5.1: synthetic summary message produces no user bubble',
+		syntheticBubble === null && stateA5.items.filter((i: any) => i.kind === 'user').length === 0);
+
+	// Reverse check: ordinary user message produces a user bubble
+	stateA5.addUserMessage('An ordinary user message');
+	const ordinaryBubble = listWrapperA5.querySelector('.guki-message-user');
+	check('A5.2: ordinary user message produces user bubble',
+		ordinaryBubble !== null && ordinaryBubble.text.includes('An ordinary user message'));
+}
+
+console.log('\nAF. Görev 7 Fix 2 — Per-segment work group durations across compaction');
+{
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el?.addEventListener?.(evt, cb) } as any;
+
+	// Check AF.1 (Check 2): Split turn shows distinct segment durations that sum to total
+	{
+		let mockTime = 1000000;
+		const origDateNow = Date.now;
+		Date.now = () => mockTime;
+
+		const state = new ChatState();
+		const reducer = new StreamReducer(state);
+		const listWrapper = new FakeElement() as any;
+		const messageList = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+		state.subscribe(() => messageList.sync(state.items));
+
+		state.addUserMessage('Explain quantum computing');
+		const asst = state.addAssistantMessage();
+		reducer.beginTurn(asst);
+
+		// Pre-compaction work block (tool use) + text answer
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'tool_use', id: 'tool-af-1', name: 'Bash' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: { type: 'content_block_stop', index: 0 }
+		} as any);
+		reducer.apply({
+			type: 'user',
+			message: {
+				role: 'user',
+				content: [{ type: 'tool_result', tool_use_id: 'tool-af-1', content: 'output' }]
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 1,
+				content_block: { type: 'text', text: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 1,
+				delta: { type: 'text_delta', text: 'Pre-compaction answer.' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'assistant',
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'tool_use', id: 'tool-af-1', name: 'Bash' },
+					{ type: 'text', text: 'Pre-compaction answer.' }
+				]
+			}
+		} as any);
+
+		// Advance time by 103 seconds (1:43)
+		mockTime += 103000;
+
+		// Boundary arrives
+		const boundaryEv = parseStreamJsonLine(
+			'{"type":"system","subtype":"compact_boundary","uuid":"boundary-uuid-af-1","compact_metadata":{"trigger":"auto"}}'
+		);
+		if (boundaryEv) reducer.apply(boundaryEv);
+
+		// Post-compaction work block (thinking) + text answer
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'thinking', thinking: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 0,
+				delta: { type: 'thinking_delta', thinking: 'Post-compaction thinking...' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: { type: 'content_block_stop', index: 0 }
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 1,
+				content_block: { type: 'text', text: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 1,
+				delta: { type: 'text_delta', text: 'Post-compaction answer.' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'assistant',
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'thinking', thinking: 'Post-compaction thinking...' },
+					{ type: 'text', text: 'Post-compaction answer.' }
+				]
+			}
+		} as any);
+
+		// Advance time by 16 seconds (0:16)
+		mockTime += 16000;
+
+		// Result event with duration_ms: 119000 (1:59 total)
+		reducer.apply({
+			type: 'result',
+			subtype: 'success',
+			is_error: false,
+			duration_ms: 119000,
+			total_cost_usd: 0.15
+		} as any);
+
+		Date.now = origDateNow;
+
+		messageList.sync(state.items);
+
+		const workHeaders = listWrapper.querySelectorAll('.guki-work-header');
+		check('AF1.1: exactly 2 work headers rendered for split turn', workHeaders.length === 2);
+		eq('AF1.2: pre-compaction work header shows its own segment duration (Worked for 1:43)',
+			workHeaders[0]?.text?.trim(), 'Worked for 1:43');
+		eq('AF1.3: post-compaction work header shows its own segment duration (Worked for 0:16)',
+			workHeaders[1]?.text?.trim(), 'Worked for 0:16');
+	}
+
+	// Check AF.2 (Check 3): No-compaction regression
+	{
+		const state = new ChatState();
+		const reducer = new StreamReducer(state);
+		const listWrapper = new FakeElement() as any;
+		const messageList = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+		state.subscribe(() => messageList.sync(state.items));
+
+		state.addUserMessage('Normal query');
+		const asst = state.addAssistantMessage();
+		reducer.beginTurn(asst);
+
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'tool_use', id: 'tool-af-norm', name: 'Read' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: { type: 'content_block_stop', index: 0 }
+		} as any);
+		reducer.apply({
+			type: 'user',
+			message: {
+				role: 'user',
+				content: [{ type: 'tool_result', tool_use_id: 'tool-af-norm', content: 'file content' }]
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 1,
+				content_block: { type: 'text', text: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 1,
+				delta: { type: 'text_delta', text: 'Normal answer.' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'assistant',
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'tool_use', id: 'tool-af-norm', name: 'Read' },
+					{ type: 'text', text: 'Normal answer.' }
+				]
+			}
+		} as any);
+
+		reducer.apply({
+			type: 'result',
+			subtype: 'success',
+			is_error: false,
+			duration_ms: 45000,
+			total_cost_usd: 0.05
+		} as any);
+
+		messageList.sync(state.items);
+
+		const workHeaders = listWrapper.querySelectorAll('.guki-work-header');
+		check('AF2.1: exactly 1 work header rendered for normal turn without compaction', workHeaders.length === 1);
+		eq('AF2.2: normal work header shows full turn duration (Worked for 0:45)',
+			workHeaders[0]?.text?.trim(), 'Worked for 0:45');
+	}
+
+	// Check AF.3 (Check 4): Two boundaries in one turn -> 3 segments
+	{
+		let mockTime = 2000000;
+		const origDateNow = Date.now;
+		Date.now = () => mockTime;
+
+		const state = new ChatState();
+		const reducer = new StreamReducer(state);
+		const listWrapper = new FakeElement() as any;
+		const messageList = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+		state.subscribe(() => messageList.sync(state.items));
+
+		state.addUserMessage('Multi-boundary turn');
+		const asst = state.addAssistantMessage();
+		reducer.beginTurn(asst);
+
+		// Segment 1: tool use + text
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'tool_use', id: 'tool-af-s1', name: 'Bash' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: { type: 'content_block_stop', index: 0 }
+		} as any);
+		reducer.apply({
+			type: 'user',
+			message: {
+				role: 'user',
+				content: [{ type: 'tool_result', tool_use_id: 'tool-af-s1', content: 'out 1' }]
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 1,
+				content_block: { type: 'text', text: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 1,
+				delta: { type: 'text_delta', text: 'Answer 1.' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'assistant',
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'tool_use', id: 'tool-af-s1', name: 'Bash' },
+					{ type: 'text', text: 'Answer 1.' }
+				]
+			}
+		} as any);
+
+		mockTime += 45000; // 45s
+
+		const boundary1 = parseStreamJsonLine(
+			'{"type":"system","subtype":"compact_boundary","uuid":"boundary-uuid-af-s1","compact_metadata":{"trigger":"auto"}}'
+		);
+		if (boundary1) reducer.apply(boundary1);
+
+		// Segment 2: tool use + text
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'tool_use', id: 'tool-af-s2', name: 'Read' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: { type: 'content_block_stop', index: 0 }
+		} as any);
+		reducer.apply({
+			type: 'user',
+			message: {
+				role: 'user',
+				content: [{ type: 'tool_result', tool_use_id: 'tool-af-s2', content: 'file content' }]
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 1,
+				content_block: { type: 'text', text: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 1,
+				delta: { type: 'text_delta', text: 'Answer 2.' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'assistant',
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'tool_use', id: 'tool-af-s2', name: 'Read' },
+					{ type: 'text', text: 'Answer 2.' }
+				]
+			}
+		} as any);
+
+		mockTime += 35000; // 35s
+
+		const boundary2 = parseStreamJsonLine(
+			'{"type":"system","subtype":"compact_boundary","uuid":"boundary-uuid-af-s2","compact_metadata":{"trigger":"auto"}}'
+		);
+		if (boundary2) reducer.apply(boundary2);
+
+		// Segment 3: thinking + text
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'thinking', thinking: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 0,
+				delta: { type: 'thinking_delta', thinking: 'Segment 3 thinking...' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: { type: 'content_block_stop', index: 0 }
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 1,
+				content_block: { type: 'text', text: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 1,
+				delta: { type: 'text_delta', text: 'Segment 3 final answer.' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'assistant',
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'thinking', thinking: 'Segment 3 thinking...' },
+					{ type: 'text', text: 'Segment 3 final answer.' }
+				]
+			}
+		} as any);
+
+		mockTime += 40000; // 40s. Total = 45s + 35s + 40s = 120s (2:00)
+
+		reducer.apply({
+			type: 'result',
+			subtype: 'success',
+			is_error: false,
+			duration_ms: 120000,
+			total_cost_usd: 0.25
+		} as any);
+
+		Date.now = origDateNow;
+
+		messageList.sync(state.items);
+
+		const workHeaders = listWrapper.querySelectorAll('.guki-work-header');
+		check('AF3.1: exactly 3 work headers rendered across two boundaries', workHeaders.length === 3);
+		eq('AF3.2: segment 1 work header shows Worked for 0:45', workHeaders[0]?.text?.trim(), 'Worked for 0:45');
+		eq('AF3.3: segment 2 work header shows Worked for 0:35', workHeaders[1]?.text?.trim(), 'Worked for 0:35');
+		eq('AF3.4: segment 3 work header shows Worked for 0:40', workHeaders[2]?.text?.trim(), 'Worked for 0:40');
+	}
+}
+
+console.log('\nAG. Görev 7 Fix 3 — Structural accounting (FIX-A) and proportional scaling (FIX-B)');
+{
+	const dummyComp = { registerDomEvent: (el: any, evt: string, cb: any) => el?.addEventListener?.(evt, cb) } as any;
+
+	// Check AG.1 (FIX-A): Structural accounting via boundaryTimestamps produces correct segment durations
+	{
+		let mockTime = 5000000;
+		const origDateNow = Date.now;
+		Date.now = () => mockTime;
+
+		const state = new ChatState();
+		const reducer = new StreamReducer(state);
+		const listWrapper = new FakeElement() as any;
+		const messageList = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+		state.subscribe(() => messageList.sync(state.items));
+
+		state.addUserMessage('Explain quantum computing');
+		const asst = state.addAssistantMessage();
+		reducer.beginTurn(asst);
+
+		// Pre-compaction: tool use + text
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'tool_use', id: 'tool-ag-1', name: 'Bash' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: { type: 'content_block_stop', index: 0 }
+		} as any);
+		reducer.apply({
+			type: 'user',
+			message: {
+				role: 'user',
+				content: [{ type: 'tool_result', tool_use_id: 'tool-ag-1', content: 'output' }]
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 1,
+				content_block: { type: 'text', text: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 1,
+				delta: { type: 'text_delta', text: 'Pre-compaction answer.' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'assistant',
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'tool_use', id: 'tool-ag-1', name: 'Bash' },
+					{ type: 'text', text: 'Pre-compaction answer.' }
+				]
+			}
+		} as any);
+
+		mockTime += 103000; // 1:43
+
+		const boundaryEv = parseStreamJsonLine(
+			'{"type":"system","subtype":"compact_boundary","uuid":"boundary-uuid-ag-1","compact_metadata":{"trigger":"auto"}}'
+		);
+		if (boundaryEv) reducer.apply(boundaryEv);
+
+		// Post-compaction: thinking + text
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'thinking', thinking: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 0,
+				delta: { type: 'thinking_delta', thinking: 'Post-compaction thinking...' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: { type: 'content_block_stop', index: 0 }
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 1,
+				content_block: { type: 'text', text: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 1,
+				delta: { type: 'text_delta', text: 'Post-compaction answer.' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'assistant',
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'thinking', thinking: 'Post-compaction thinking...' },
+					{ type: 'text', text: 'Post-compaction answer.' }
+				]
+			}
+		} as any);
+
+		mockTime += 16000; // 0:16
+
+		reducer.apply({
+			type: 'result',
+			subtype: 'success',
+			is_error: false,
+			duration_ms: 119000,
+			total_cost_usd: 0.15
+		} as any);
+
+		Date.now = origDateNow;
+		messageList.sync(state.items);
+
+		const workHeaders = listWrapper.querySelectorAll('.guki-work-header');
+		check('AG1.1: exactly 2 work headers rendered for split turn', workHeaders.length === 2);
+		eq('AG1.2: pre-compaction work header shows Worked for 1:43', workHeaders[0]?.text?.trim(), 'Worked for 1:43');
+		eq('AG1.3: post-compaction work header shows Worked for 0:16', workHeaders[1]?.text?.trim(), 'Worked for 0:16');
+	}
+
+	// Check AG.2 (FIX-B): Clock skew / local overshoot (70s local vs 50s CLI total)
+	{
+		let mockTime = 6000000;
+		const origDateNow = Date.now;
+		Date.now = () => mockTime;
+
+		const state = new ChatState();
+		const reducer = new StreamReducer(state);
+		const listWrapper = new FakeElement() as any;
+		const messageList = new MessageList({} as any, listWrapper, dummyComp, { decide: () => {} } as any);
+		state.subscribe(() => messageList.sync(state.items));
+
+		state.addUserMessage('Clock skew query');
+		const asst = state.addAssistantMessage();
+		reducer.beginTurn(asst);
+
+		// Segment 1: tool use + text
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'tool_use', id: 'tool-skew-1', name: 'Bash' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: { type: 'content_block_stop', index: 0 }
+		} as any);
+		reducer.apply({
+			type: 'user',
+			message: {
+				role: 'user',
+				content: [{ type: 'tool_result', tool_use_id: 'tool-skew-1', content: 'out' }]
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 1,
+				content_block: { type: 'text', text: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 1,
+				delta: { type: 'text_delta', text: 'Answer 1' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'assistant',
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'tool_use', id: 'tool-skew-1', name: 'Bash' },
+					{ type: 'text', text: 'Answer 1' }
+				]
+			}
+		} as any);
+
+		mockTime += 60000; // 60s local for segment 1
+
+		const boundaryEv = parseStreamJsonLine(
+			'{"type":"system","subtype":"compact_boundary","uuid":"b-skew-1","compact_metadata":{"trigger":"auto"}}'
+		);
+		if (boundaryEv) reducer.apply(boundaryEv);
+
+		// Segment 2: thinking + text
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 0,
+				content_block: { type: 'thinking', thinking: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 0,
+				delta: { type: 'thinking_delta', thinking: 'think' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: { type: 'content_block_stop', index: 0 }
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_start',
+				index: 1,
+				content_block: { type: 'text', text: '' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'stream_event',
+			event: {
+				type: 'content_block_delta',
+				index: 1,
+				delta: { type: 'text_delta', text: 'Answer 2' }
+			}
+		} as any);
+		reducer.apply({
+			type: 'assistant',
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'thinking', thinking: 'think' },
+					{ type: 'text', text: 'Answer 2' }
+				]
+			}
+		} as any);
+
+		mockTime += 10000; // 10s local for segment 2. Total local: 70s
+
+		// CLI reports duration_ms: 50,000 (50s)
+		reducer.apply({
+			type: 'result',
+			subtype: 'success',
+			is_error: false,
+			duration_ms: 50000,
+			total_cost_usd: 0.10
+		} as any);
+
+		Date.now = origDateNow;
+		messageList.sync(state.items);
+
+		const skewHeaders = listWrapper.querySelectorAll('.guki-work-header');
+		check('AG2.1: clock skew produces exactly 2 work headers', skewHeaders.length === 2);
+		const h1 = skewHeaders[0]?.text?.trim();
+		const h2 = skewHeaders[1]?.text?.trim();
+		// Crucial assertion: no segment that performed work may print "Worked for 0:00"
+		check('AG2.2: segment 1 does not print Worked for 0:00', h1 !== 'Worked for 0:00');
+		check('AG2.3: segment 2 does not print Worked for 0:00', h2 !== 'Worked for 0:00');
+		eq('AG2.4: segment 1 proportional duration is Worked for 0:43', h1, 'Worked for 0:43');
+		eq('AG2.5: segment 2 proportional duration is Worked for 0:07', h2, 'Worked for 0:07');
+
+		// Displayed segments sum to the CLI's reported total (50s)
+		const parseSec = (header: string | undefined): number => {
+			if (!header) return -1;
+			const m = header.match(/Worked for (\d+):(\d+)/);
+			return m ? parseInt(m[1]!, 10) * 60 + parseInt(m[2]!, 10) : -1;
+		};
+		const s1 = parseSec(h1);
+		const s2 = parseSec(h2);
+		check('AG2.6: displayed segment durations sum to CLI total (43s + 7s = 50s)', s1 + s2 === 50, `got ${s1} + ${s2} = ${s1 + s2}`);
+	}
+}
+
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
 
