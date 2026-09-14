@@ -38,7 +38,6 @@ export class ChatView extends ItemView {
 	private messageList: MessageList | null = null;
 	private composer: Composer | null = null;
 	private historyDropdown: HistoryDropdown | null = null;
-	private historyActionEl: HTMLElement | null = null;
 	private transcriptStore: TranscriptStore = new NodeTranscriptStore();
 	private unsubscribe: (() => void) | null = null;
 	private currentSessionId: string | null = null;
@@ -112,12 +111,6 @@ export class ChatView extends ItemView {
 			},
 		});
 		this.historyDropdown.setTriggerEl(this.historyTriggerEl);
-
-		if (typeof this.addAction === 'function') {
-			this.historyActionEl = this.addAction('history', 'Conversation history', () => {
-				void this.historyDropdown?.toggle();
-			});
-		}
 
 		// A positioned wrapper, not the scroller itself: the jump-to-bottom button has to stay put
 		// while the content behind it scrolls, so it cannot live inside the scrolling element.
@@ -257,7 +250,6 @@ export class ChatView extends ItemView {
 		this.messageList = null;
 		this.historyDropdown?.destroy();
 		this.historyDropdown = null;
-		this.historyActionEl = null;
 		this.historyTriggerEl = null;
 		this.headerEl = null;
 		// Its own ResizeObserver is not covered by Component.register* either — see the composer's
