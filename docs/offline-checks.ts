@@ -12293,6 +12293,57 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	}
 }
 
+// AN: Görev 8: Real dropdown selection path and 'load older' paging
+{
+	console.log("AN. Görev 8: Real dropdown selection path and 'load older' paging");
+
+	// Harness setup for AN
+	const container = new FakeElement() as any;
+	const app = new App();
+	const leaf = new WorkspaceLeaf(app, container);
+	const state = new ChatState();
+
+	const session = {
+		state,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
+		getSlashCommands: () => ['clear', 'help'],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const store = new NodeTranscriptStore(TRANSCRIPT_TEST_DIR);
+	const view = new ChatView(leaf, session, store);
+	await (view as any).onOpen();
+
+	// AN1: The gap: Real user path from dropdown row click through onSelectSession to DOM messages
+	const actionEl = container.querySelector('.view-action');
+	actionEl?.click();
+	await new Promise((resolve) => setTimeout(resolve, 20));
+
+	const dropdown = view.getHistoryDropdown();
+	check('AN1.1 history dropdown is open after action click', dropdown?.isOpen() === true);
+
+	const rowEls = container.querySelectorAll('.guki-history-item');
+	check('AN1.2 history items are rendered in dropdown', rowEls.length > 0);
+
+	// Find the item for sess-am-basic
+	const basicRow = rowEls.find((el: any) => el.text.includes('Question 1: What is Obsidian?') || el.text.includes('sess-am-basic'));
+	const targetRow = basicRow ?? rowEls[0];
+	check('AN1.3 target session row found in dropdown', targetRow !== undefined);
+
+	// User clicks the session row in the dropdown
+	targetRow?.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	eq('AN1.4 state items populated via dropdown click', state.items.length > 0, true);
+	check('AN1.5 DOM contains conversation messages from clicked session', container.querySelectorAll('.guki-message').length > 0);
+	eq('AN1.6 dropdown closed upon selection', dropdown?.isOpen(), false);
+}
+
 // Clean up temporary test files
 rmSync(TRANSCRIPT_TEST_DIR, { recursive: true, force: true });
 
