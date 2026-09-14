@@ -33,6 +33,7 @@ export class ChatView extends ItemView {
 	private rootEl: HTMLElement | null = null;
 	private headerEl: HTMLElement | null = null;
 	private historyTriggerEl: HTMLElement | null = null;
+	private viewActionEl: HTMLElement | null = null;
 	private resizeObserver: ResizeObserver | null = null;
 	private pendingMeasure: number | null = null;
 	private messageList: MessageList | null = null;
@@ -84,24 +85,8 @@ export class ChatView extends ItemView {
 		const root = this.contentEl.createDiv({ cls: 'guki-root' });
 		this.rootEl = root;
 
-		const header = root.createDiv({ cls: 'guki-header' });
-		this.headerEl = header;
-
-		this.historyTriggerEl = header.createEl('button', {
-			cls: 'clickable-icon guki-header-history-btn',
-			attr: {
-				'aria-label': 'Conversation history',
-				'type': 'button',
-			},
-		});
-		setIcon(this.historyTriggerEl, 'history');
-		this.registerDomEvent(this.historyTriggerEl, 'click', () => {
-			void this.historyDropdown?.toggle();
-		});
-
 		this.historyDropdown = new HistoryDropdown({
 			containerEl: root,
-			triggerEl: this.historyTriggerEl,
 			getSessions: async () => {
 				const paths = await this.session.vaultPaths();
 				return this.transcriptStore.listSessions(paths.root);
@@ -110,7 +95,6 @@ export class ChatView extends ItemView {
 				void this.handleSelectSession(sessionId);
 			},
 		});
-		this.historyDropdown.setTriggerEl(this.historyTriggerEl);
 
 		// A positioned wrapper, not the scroller itself: the jump-to-bottom button has to stay put
 		// while the content behind it scrolls, so it cannot live inside the scrolling element.
@@ -230,6 +214,7 @@ export class ChatView extends ItemView {
 		this.messageList.scrollToBottom();
 
 		this.observeWidth(root);
+		this.syncHistoryControl();
 
 		// `pinned-change` is a WorkspaceLeaf event, not a Workspace one (obsidian.d.ts:7369).
 		// Registering it on the view means it is released when the leaf goes away.
@@ -250,8 +235,15 @@ export class ChatView extends ItemView {
 		this.messageList = null;
 		this.historyDropdown?.destroy();
 		this.historyDropdown = null;
+		if (this.viewActionEl) {
+			this.viewActionEl.remove();
+			this.viewActionEl = null;
+		}
+		if (this.headerEl) {
+			this.headerEl.remove();
+			this.headerEl = null;
+		}
 		this.historyTriggerEl = null;
-		this.headerEl = null;
 		// Its own ResizeObserver is not covered by Component.register* either — see the composer's
 		// own comment on `destroy`.
 		this.composer?.destroy();
@@ -261,7 +253,9 @@ export class ChatView extends ItemView {
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
 		if (this.pendingMeasure !== null) {
-			window.cancelAnimationFrame(this.pendingMeasure);
+			if (typeof window.cancelAnimationFrame === 'function') {
+				window.cancelAnimationFrame(this.pendingMeasure);
+			}
 			this.pendingMeasure = null;
 		}
 		if (this.loadOlderEl) {
@@ -400,7 +394,15 @@ export class ChatView extends ItemView {
 	}
 
 	getHistoryTriggerEl(): HTMLElement | null {
-		return this.historyTriggerEl;
+		return this.historyTriggerEl ?? this.viewActionEl;
+	}
+
+	getViewActionEl(): HTMLElement | null {
+		return this.viewActionEl;
+	}
+
+	getHeaderEl(): HTMLElement | null {
+		return this.headerEl;
 	}
 
 	/**
@@ -578,7 +580,84 @@ export class ChatView extends ItemView {
 	 * between the main area and a sidebar (obsidian.d.ts:6715).
 	 */
 	onResize(): void {
+		this.syncHistoryControl();
 		this.refreshWidthClass();
+	}
+
+	/**
+	 * Determines whether the history control should be placed in Obsidian's view-action area.
+	 *
+	 * Placement rule & Trap 1 safeguard:
+	 * Placed in Obsidian's view action when docked in the main editor area with width
+	 * >= NARROW_BREAKPOINT_PX (480px); falls back to the in-panel header button when docked
+	 * in a side panel or when the main-area leaf is narrower than 480px (trap 1 safeguard).
+	 */
+	shouldUseViewAction(): boolean {
+		const isMain = Boolean(
+			this.leaf &&
+			typeof this.leaf.getRoot === 'function' &&
+			this.leaf.getRoot() === this.app?.workspace?.rootSplit,
+		);
+		if (!isMain) {
+			return false;
+		}
+		const width = this.rootEl?.clientWidth || this.containerEl?.clientWidth || 0;
+		if (width > 0 && width < NARROW_BREAKPOINT_PX) {
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Synchronizes the placement of the conversation history control between Obsidian's
+	 * view-action chrome and an in-panel header strip.
+	 * Exactly one control is present at a time: never two, never zero.
+	 */
+	syncHistoryControl(): void {
+		if (!this.rootEl || !this.historyDropdown) {
+			return;
+		}
+
+		if (this.shouldUseViewAction()) {
+			// Docked in main editor area and wide -> Obsidian view action, NO in-panel header strip
+			if (this.headerEl) {
+				this.headerEl.remove();
+				this.headerEl = null;
+				this.historyTriggerEl = null;
+			}
+			if (!this.viewActionEl) {
+				this.viewActionEl = this.addAction('history', 'Conversation history', () => {
+					void this.historyDropdown?.toggle();
+				});
+			}
+			this.historyDropdown.setTriggerEl(this.viewActionEl);
+		} else {
+			// Docked in side panel or cramped main editor (trap 1) -> in-panel header button, NO view action
+			if (this.viewActionEl) {
+				this.viewActionEl.remove();
+				this.viewActionEl = null;
+			}
+			if (!this.headerEl) {
+				const header = this.rootEl.createDiv({ cls: 'guki-header' });
+				if (this.rootEl.children[0] !== header) {
+					this.rootEl.insertBefore(header, this.rootEl.children[0] ?? null);
+				}
+				this.headerEl = header;
+
+				this.historyTriggerEl = header.createEl('button', {
+					cls: 'clickable-icon guki-header-history-btn',
+					attr: {
+						'aria-label': 'Conversation history',
+						'type': 'button',
+					},
+				});
+				setIcon(this.historyTriggerEl, 'history');
+				this.registerDomEvent(this.historyTriggerEl, 'click', () => {
+					void this.historyDropdown?.toggle();
+				});
+			}
+			this.historyDropdown.setTriggerEl(this.historyTriggerEl);
+		}
 	}
 
 	/**
@@ -593,16 +672,21 @@ export class ChatView extends ItemView {
 	 */
 	private observeWidth(target: HTMLElement): void {
 		this.applyWidthClass(target.clientWidth);
+		this.syncHistoryControl();
 		this.resizeObserver = new ResizeObserver((entries) => {
 			const entry = entries[0];
 			if (entry) {
 				this.applyWidthClass(entry.contentRect.width);
+				this.syncHistoryControl();
 			}
 		});
 		this.resizeObserver.observe(target);
 
 		this.registerEvent(
-			this.app.workspace.on('layout-change', () => this.refreshWidthClass()),
+			this.app.workspace.on('layout-change', () => {
+				this.syncHistoryControl();
+				this.refreshWidthClass();
+			}),
 		);
 	}
 
@@ -619,6 +703,7 @@ export class ChatView extends ItemView {
 			this.pendingMeasure = null;
 			if (this.rootEl) {
 				this.applyWidthClass(this.rootEl.clientWidth);
+				this.syncHistoryControl();
 			}
 		});
 	}

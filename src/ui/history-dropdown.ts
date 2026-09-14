@@ -23,7 +23,7 @@ export interface HistoryRowItem {
 
 export interface HistoryDropdownOptions {
 	containerEl: HTMLElement;
-	triggerEl?: HTMLElement;
+	triggerEl?: HTMLElement | null;
 	getSessions: () => Promise<SessionSummary[]>;
 	onSelectSession: (sessionId: string) => void;
 	onClose?: () => void;
@@ -90,8 +90,12 @@ export class HistoryDropdown {
 		});
 	}
 
-	setTriggerEl(el: HTMLElement): void {
+	setTriggerEl(el: HTMLElement | null): void {
 		this.triggerEl = el;
+	}
+
+	getTriggerEl(): HTMLElement | null {
+		return this.triggerEl;
 	}
 
 	getDropdownEl(): HTMLElement {
