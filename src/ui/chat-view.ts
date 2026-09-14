@@ -299,6 +299,7 @@ export class ChatView extends ItemView {
 				this.session.state.setItems(page);
 			}
 			this.currentSessionId = sessionId;
+			this.session.switchConversation?.(sessionId);
 			this.updateLoadOlderControl();
 			this.messageList?.scrollToBottom();
 		} catch (err: unknown) {
@@ -308,6 +309,7 @@ export class ChatView extends ItemView {
 			const msg = err instanceof Error ? err.message : String(err);
 			this.session.state.addNotice('error', 'Could not load conversation.', msg);
 			this.currentSessionId = sessionId;
+			this.session.switchConversation?.(null);
 			this.messageList?.scrollToBottom();
 		}
 	}

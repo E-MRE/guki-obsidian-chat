@@ -5265,8 +5265,14 @@ class FakeElement {
 	setAttribute(name: string, value: string) {
 		this.attributes[name] = String(value);
 	}
+	setAttr(name: string, value: string) {
+		this.setAttribute(name, value);
+	}
 	getAttribute(name: string): string | null {
 		return this.attributes[name] ?? null;
+	}
+	getAttr(name: string): string | null {
+		return this.getAttribute(name);
 	}
 	get nextSibling(): any {
 		const p = this.parentElement ?? this.parent;
@@ -12509,11 +12515,149 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	const dropdown = view.getHistoryDropdown();
 	check('AO.4 history dropdown initially closed', dropdown?.isOpen() === false);
 	triggerEl?.click();
-	await new Promise((resolve) => setTimeout(resolve, 20));
+	await new Promise((resolve) => setTimeout(resolve, 50));
 	check('AO.5 clicking in-panel trigger element toggles history dropdown open', dropdown?.isOpen() === true);
 
 	await (view as any).onClose();
 	check('AO.6 onClose cleans up history trigger reference', view.getHistoryTriggerEl() === null);
+}
+
+// AP. Görev 8 Round T4b: Resume past conversation on first message
+{
+	console.log('AP. Görev 8 Round T4b: Resume past conversation on first message');
+
+	const { EventEmitter } = createRequire(import.meta.url)('node:events');
+	const cp = (window as any).require('child_process');
+	const origSpawn = cp.spawn;
+	const spawnCalls: Array<{ binary: string; argv: string[]; options: any }> = [];
+	let activeChild: any = null;
+
+	cp.spawn = (binary: string, argv: string[], options: any) => {
+		const stdout = new EventEmitter() as any;
+		stdout.setEncoding = () => {};
+		const stderr = new EventEmitter() as any;
+		stderr.setEncoding = () => {};
+		const stdin = new EventEmitter() as any;
+		stdin.write = () => true;
+		stdin.end = () => {
+			if (activeChild && !activeChild._exited) {
+				activeChild._exited = true;
+				activeChild.emit('exit', 0, null);
+			}
+		};
+
+		const child = new EventEmitter() as any;
+		child.stdout = stdout;
+		child.stderr = stderr;
+		child.stdin = stdin;
+		child.pid = 99000 + spawnCalls.length;
+		child.kill = (sig?: string) => {
+			if (!child._exited) {
+				child._exited = true;
+				child.emit('exit', 0, sig ?? null);
+			}
+		};
+		spawnCalls.push({ binary, argv: [...argv], options });
+		activeChild = child;
+		return child;
+	};
+
+	const realAdapter = new FileSystemAdapter();
+	realAdapter.getBasePath = () => TRANSCRIPT_TEST_DIR;
+	(realAdapter as any).read = () => Promise.resolve(
+		readFileSync(join(process.cwd(), 'src', 'cli', 'mcp-permission-server.mjs'), 'utf8'),
+	);
+
+	const app = {
+		vault: {
+			adapter: realAdapter,
+			configDir: '.obsidian',
+		},
+	} as unknown as App;
+
+	const container = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(app, container);
+	const session = new SessionManager(app, undefined, process.execPath);
+	const store = new NodeTranscriptStore(TRANSCRIPT_TEST_DIR);
+	const view = new ChatView(leaf, session, store);
+	await (view as any).onOpen();
+
+	const targetSessionId = 'sess-am-basic';
+
+	// (a) Selection alone spawns NOTHING
+	await view.handleSelectSession(targetSessionId);
+	eq('AP.1 selection alone spawns nothing', spawnCalls.length, 0);
+
+	const textarea = container.querySelector('textarea');
+	const sendBtn = container.querySelector('.guki-composer-send');
+
+	// Drive real send path: composer textarea input -> send button click
+	textarea.value = 'First message continuing sess-am-basic';
+	textarea.listeners['input']?.();
+	sendBtn.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	// (b) First message after selection spawns exactly once with --resume <id> and broker flags
+	eq('AP.2 first message after selection spawns exactly once', spawnCalls.length, 1);
+	const firstSpawnArgv = spawnCalls[0]?.argv ?? [];
+	const resumeIndex = firstSpawnArgv.indexOf('--resume');
+	check('AP.3 --resume flag is present in argv', resumeIndex !== -1);
+	eq('AP.4 --resume argument matches selected session ID', firstSpawnArgv[resumeIndex + 1], targetSessionId);
+	const resumeCount = firstSpawnArgv.filter((a) => a === '--resume').length;
+	eq('AP.5 --resume flag appears exactly once', resumeCount, 1);
+	check('AP.6 broker flags present alongside --resume', firstSpawnArgv.includes('--permission-prompt-tool'));
+
+	// (d) Second message of a resumed conversation does not respawn and does not re-add flag
+	textarea.value = 'Second message in resumed conversation';
+	textarea.listeners['input']?.();
+	sendBtn.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	eq('AP.7 second message does not respawn process', spawnCalls.length, 1);
+
+	// (e) Switching away from a live conversation ends the running process, and manager can still send
+	const prevChild = activeChild;
+	let prevChildStopped = false;
+	if (prevChild) {
+		prevChild.on('exit', () => { prevChildStopped = true; });
+	}
+	await view.handleSelectSession('sess-am-second');
+	check('AP.8 switching away stops the running process', prevChildStopped === true || prevChild?._exited === true);
+	eq('AP.9 switching conversation alone does not spawn', spawnCalls.length, 1);
+
+	textarea.value = 'Message in second resumed session';
+	textarea.listeners['input']?.();
+	sendBtn.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	eq('AP.10 manager spawns for newly selected session', spawnCalls.length, 2);
+	const secondSpawnArgv = spawnCalls[1]?.argv ?? [];
+	const secondResumeIndex = secondSpawnArgv.indexOf('--resume');
+	check('AP.11 second session argv has --resume', secondResumeIndex !== -1);
+	eq('AP.12 second session argv has second session ID', secondSpawnArgv[secondResumeIndex + 1], 'sess-am-second');
+	check('AP.13 broker flags survived and present in second session', secondSpawnArgv.includes('--permission-prompt-tool'));
+
+	// (c) A fresh conversation with no selection spawns with NO --resume anywhere in argv
+	const freshContainer = new FakeElement() as any;
+	const freshLeaf = new WorkspaceLeaf(app, freshContainer);
+	const freshSession = new SessionManager(app, undefined, process.execPath);
+	const freshView = new ChatView(freshLeaf, freshSession, store);
+	await (freshView as any).onOpen();
+
+	const freshTextarea = freshContainer.querySelector('textarea');
+	const freshSendBtn = freshContainer.querySelector('.guki-composer-send');
+	freshTextarea.value = 'Message in fresh unresumed conversation';
+	freshTextarea.listeners['input']?.();
+	freshSendBtn.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	eq('AP.14 fresh conversation spawns on first message', spawnCalls.length, 3);
+	const freshArgv = spawnCalls[2]?.argv ?? [];
+	check('AP.15 fresh conversation has NO --resume flag in argv', !freshArgv.includes('--resume'));
+	check('AP.16 fresh conversation has broker flags', freshArgv.includes('--permission-prompt-tool'));
+
+	// Teardown
+	session.dispose();
+	freshSession.dispose();
+	cp.spawn = origSpawn;
 }
 
 // Clean up temporary test files
