@@ -31,6 +31,7 @@ import {
 	type RenderedPermissionCard,
 } from './permission-card';
 import { toolSummary } from '../core/tool-policy';
+import { formatAskUserQuestionSummary } from '../core/ask-user-question';
 import { createToolCard, updateToolCard, type RenderedToolCard } from './tool-card';
 
 /** Treat the view as "at the bottom" within this many pixels, so new content keeps following. */
@@ -759,30 +760,7 @@ export class MessageList {
 		// Build one-line collapsed summary text
 		let headerText = '';
 		if (item.toolName === 'AskUserQuestion') {
-			if (item.askQuestions && item.askQuestions.length > 0) {
-				if (item.status === 'allowed') {
-					const parts = item.askQuestions.map((q, idx) => {
-						const ans = item.answers
-							? item.answers[String(idx)] ?? (q.id ? item.answers[q.id] : undefined) ?? item.answers[q.question]
-							: undefined;
-						const ansStr = Array.isArray(ans) ? ans.join(', ') : typeof ans === 'string' ? ans : '';
-						return `${q.question} → ${ansStr}`;
-					});
-					headerText = `Question: ${parts.join(' · ')}`;
-				} else if (item.status === 'denied') {
-					headerText = `Question: ${item.askQuestions.map((q) => q.question).join(' · ')} → Denied`;
-				} else {
-					headerText = `Question: ${item.askQuestions.map((q) => q.question).join(' · ')} → Not answered (turn ended)`;
-				}
-			} else {
-				if (item.status === 'allowed') {
-					headerText = 'Question: Answered';
-				} else if (item.status === 'denied') {
-					headerText = 'Question: (unreadable question) → Denied';
-				} else {
-					headerText = 'Question: (unreadable question) → Not answered (turn ended)';
-				}
-			}
+			headerText = formatAskUserQuestionSummary(item.askQuestions, item.answers, item.status);
 		} else {
 			const target = toolSummary(item.toolName, item.input);
 			const targetStr = target.length > 0 ? `: ${target}` : '';
