@@ -12660,6 +12660,189 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	cp.spawn = origSpawn;
 }
 
+// AQ: Görev 8: Dynamic conversation-history button placement
+{
+	console.log('AQ. Görev 8: Dynamic conversation-history button placement');
+
+	const app = new App();
+	const state = new ChatState();
+	const session = {
+		state,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
+		getSlashCommands: () => ['clear', 'help'],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+	const store = new NodeTranscriptStore(TRANSCRIPT_TEST_DIR);
+
+	// (a) Docked in a side panel -> in-panel button present, no view action registered
+	{
+		const container = new FakeElement() as any;
+		const leaf = new WorkspaceLeaf(app, container);
+		(leaf as any).setRoot((app.workspace as any).rightSplit);
+		const view = new ChatView(leaf, session, store);
+		await (view as any).onOpen();
+
+		const inPanelBtn = container.querySelector('.guki-header-history-btn');
+		const viewActionEl = container.querySelector('.view-action');
+		const headerEl = container.querySelector('.guki-header');
+
+		check('AQ.a1 in-panel button present when docked in side panel', inPanelBtn !== null);
+		check('AQ.a2 in-panel header strip present in side panel', headerEl !== null);
+		check('AQ.a3 no view action registered in side panel', viewActionEl === null);
+		check('AQ.a4 exactly one control in side panel', inPanelBtn !== null && viewActionEl === null);
+
+		await (view as any).onClose();
+	}
+
+	// (b) Docked in the main area -> view action registered, no in-panel header strip in the DOM
+	{
+		const container = new FakeElement() as any;
+		const leaf = new WorkspaceLeaf(app, container);
+		(leaf as any).setRoot((app.workspace as any).rootSplit);
+		const view = new ChatView(leaf, session, store);
+		await (view as any).onOpen();
+
+		const inPanelBtn = container.querySelector('.guki-header-history-btn');
+		const headerEl = container.querySelector('.guki-header');
+		const viewActionEl = container.querySelector('.view-action');
+
+		check('AQ.b1 view action registered when docked in main area', viewActionEl !== null);
+		check('AQ.b2 no in-panel header strip in DOM in main area', headerEl === null);
+		check('AQ.b3 no in-panel button in main area', inPanelBtn === null);
+		check('AQ.b4 exactly one control in main area', viewActionEl !== null && inPanelBtn === null);
+
+		await (view as any).onClose();
+	}
+
+	// (c) In both placements, clicking the visible control opens the dropdown, and trigger is that control
+	{
+		// Side panel placement
+		const sideContainer = new FakeElement() as any;
+		const sideLeaf = new WorkspaceLeaf(app, sideContainer);
+		(sideLeaf as any).setRoot((app.workspace as any).rightSplit);
+		const sideView = new ChatView(sideLeaf, session, store);
+		await (sideView as any).onOpen();
+
+		const sideDropdown = sideView.getHistoryDropdown();
+		const sideControl = sideView.getHistoryTriggerEl();
+		check('AQ.c1 side panel dropdown trigger matches visible control', sideDropdown?.getTriggerEl() === sideControl && sideControl !== null);
+		check('AQ.c2 side panel history dropdown initially closed', sideDropdown?.isOpen() === false);
+		sideControl?.click();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		check('AQ.c3 clicking side panel trigger opens dropdown', sideDropdown?.isOpen() === true);
+		await (sideView as any).onClose();
+
+		// Main area placement
+		const mainContainer = new FakeElement() as any;
+		const mainLeaf = new WorkspaceLeaf(app, mainContainer);
+		(mainLeaf as any).setRoot((app.workspace as any).rootSplit);
+		const mainView = new ChatView(mainLeaf, session, store);
+		await (mainView as any).onOpen();
+
+		const mainDropdown = mainView.getHistoryDropdown();
+		const mainControl = mainView.getHistoryTriggerEl();
+		check('AQ.c4 main area dropdown trigger matches visible control', mainDropdown?.getTriggerEl() === mainControl && mainControl !== null);
+		check('AQ.c5 main area dropdown trigger is the view action', mainControl === mainContainer.querySelector('.view-action'));
+		check('AQ.c6 main area history dropdown initially closed', mainDropdown?.isOpen() === false);
+		mainControl?.click();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		check('AQ.c7 clicking main area view action opens dropdown', mainDropdown?.isOpen() === true);
+		await (mainView as any).onClose();
+	}
+
+	// (d) Moving the panel sidebar -> main -> sidebar leaves exactly one control after each move
+	{
+		const container = new FakeElement() as any;
+		const leaf = new WorkspaceLeaf(app, container);
+		(leaf as any).setRoot((app.workspace as any).rightSplit);
+		const view = new ChatView(leaf, session, store);
+		await (view as any).onOpen();
+
+		// Initial: sidebar
+		const sideBtn = container.querySelector('.guki-header-history-btn');
+		const sideAction = container.querySelector('.view-action');
+		check('AQ.d1 initially in sidebar has in-panel button and no view action', sideBtn !== null && sideAction === null);
+
+		// Move to main area
+		(leaf as any).setRoot((app.workspace as any).rootSplit);
+		(app.workspace as any).trigger('layout-change');
+
+		const mainBtn = container.querySelector('.guki-header-history-btn');
+		const mainHeader = container.querySelector('.guki-header');
+		const mainAction = container.querySelector('.view-action');
+		const dropdown = view.getHistoryDropdown();
+		const activeTriggerAfterMoveToMain = view.getHistoryTriggerEl();
+		const controlsCountAfterMoveToMain = container.querySelectorAll('.view-action').length + container.querySelectorAll('.guki-header-history-btn').length;
+
+		eq('AQ.d2 move sidebar to main leaves exactly one control (old control torn down)', controlsCountAfterMoveToMain, 1);
+		check('AQ.d3 move sidebar to main has view action and no in-panel header', mainAction !== null && mainBtn === null && mainHeader === null);
+		check('AQ.d4 dropdown trigger updated to view action after move to main', dropdown?.getTriggerEl() === mainAction && activeTriggerAfterMoveToMain === mainAction);
+
+		// Move back to sidebar
+		(leaf as any).setRoot((app.workspace as any).rightSplit);
+		(app.workspace as any).trigger('layout-change');
+
+		const returnBtn = container.querySelector('.guki-header-history-btn');
+		const returnHeader = container.querySelector('.guki-header');
+		const returnAction = container.querySelector('.view-action');
+		const activeTriggerAfterReturn = view.getHistoryTriggerEl();
+		const controlsCountAfterReturn = container.querySelectorAll('.view-action').length + container.querySelectorAll('.guki-header-history-btn').length;
+
+		eq('AQ.d5 move main back to sidebar leaves exactly one control (view action torn down)', controlsCountAfterReturn, 1);
+		check('AQ.d6 move main back to sidebar has in-panel button and no view action', returnBtn !== null && returnHeader !== null && returnAction === null);
+		check('AQ.d7 dropdown trigger updated to in-panel button after return', dropdown?.getTriggerEl() === returnBtn && activeTriggerAfterReturn === returnBtn);
+
+		await (view as any).onClose();
+	}
+
+	// (e) Trap 1 safeguard: cramped main area leaf falls back to in-panel button (never zero controls)
+	{
+		const container = new FakeElement() as any;
+		const leaf = new WorkspaceLeaf(app, container);
+		(leaf as any).setRoot((app.workspace as any).rootSplit);
+		const view = new ChatView(leaf, session, store);
+		await (view as any).onOpen();
+
+		// Initially wide main area -> view action present
+		check('AQ.e1 wide main area has view action', container.querySelector('.view-action') !== null);
+
+		// Resize main leaf to narrow (< 480px)
+		container.clientWidth = 320;
+		(view as any).rootEl.clientWidth = 320;
+		view.onResize();
+
+		const narrowInPanelBtn = container.querySelector('.guki-header-history-btn');
+		const narrowViewAction = container.querySelector('.view-action');
+		const dropdown = view.getHistoryDropdown();
+		const narrowControlsCount = container.querySelectorAll('.view-action').length + container.querySelectorAll('.guki-header-history-btn').length;
+
+		check('AQ.e2 narrow main leaf falls back to in-panel button', narrowInPanelBtn !== null);
+		check('AQ.e3 narrow main leaf tears down view action', narrowViewAction === null);
+		eq('AQ.e4 narrow main leaf has exactly one control (never zero)', narrowControlsCount, 1);
+		check('AQ.e5 dropdown trigger updated to in-panel button in narrow main leaf', dropdown?.getTriggerEl() === narrowInPanelBtn);
+
+		// Resize back to wide (>= 480px)
+		container.clientWidth = 800;
+		(view as any).rootEl.clientWidth = 800;
+		view.onResize();
+
+		const wideInPanelBtn = container.querySelector('.guki-header-history-btn');
+		const wideViewAction = container.querySelector('.view-action');
+		const wideControlsCount = container.querySelectorAll('.view-action').length + container.querySelectorAll('.guki-header-history-btn').length;
+
+		check('AQ.e6 wide main leaf restores view action', wideViewAction !== null);
+		check('AQ.e7 wide main leaf removes in-panel button', wideInPanelBtn === null);
+		eq('AQ.e8 wide main leaf has exactly one control (never zero)', wideControlsCount, 1);
+
+		await (view as any).onClose();
+	}
+}
+
 // Clean up temporary test files
 rmSync(TRANSCRIPT_TEST_DIR, { recursive: true, force: true });
 

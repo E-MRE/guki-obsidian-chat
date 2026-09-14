@@ -75,6 +75,9 @@ if (typeof globalThis.window.requestAnimationFrame === 'undefined') {
 if (typeof globalThis.window.cancelAnimationFrame === 'undefined') {
 	globalThis.window.cancelAnimationFrame = (id) => clearTimeout(id);
 }
+if (typeof globalThis.cancelAnimationFrame === 'undefined') {
+	globalThis.cancelAnimationFrame = (id) => clearTimeout(id);
+}
 if (typeof globalThis.ResizeObserver === 'undefined') {
 	globalThis.ResizeObserver = class {
 		observe() {}
@@ -202,6 +205,9 @@ export class Workspace extends Events {
 	constructor(app) {
 		super();
 		this.app = app;
+		this.rootSplit = { type: 'root' };
+		this.leftSplit = { type: 'sidedock' };
+		this.rightSplit = { type: 'sidedock' };
 	}
 }
 
@@ -272,6 +278,13 @@ export class WorkspaceLeaf extends Events {
 		this.contentEl = contentEl ?? null;
 		this.pinned = false;
 		this.view = null;
+		this._root = this.app?.workspace?.rightSplit ?? null;
+	}
+	getRoot() {
+		return this._root ?? this.app?.workspace?.rightSplit ?? null;
+	}
+	setRoot(root) {
+		this._root = root;
 	}
 	setPinned(pinned) {
 		this.pinned = pinned;

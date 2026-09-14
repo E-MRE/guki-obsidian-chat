@@ -1833,6 +1833,10 @@
 	flex-direction: column;
 }
 
+.guki-root:not(:has(.guki-header)) .guki-history-dropdown {
+	top: var(--size-4-2);
+}
+
 .guki-history-item {
 	display: flex;
 	align-items: center;
