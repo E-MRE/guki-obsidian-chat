@@ -11,7 +11,9 @@
  * - Performance: Styled with `content-visibility: auto` so large directories with hundreds of
  *   session files render without layout stalls.
  */
+import { setIcon } from 'obsidian';
 import { resolveSessionTitle, type SessionSummary } from '../data/session-index';
+import type { ConversationTitleStore } from '../data/conversation-titles';
 
 export interface HistoryRowItem {
 	sessionId: string;
@@ -27,6 +29,8 @@ export interface HistoryDropdownOptions {
 	getSessions: () => Promise<SessionSummary[]>;
 	onSelectSession: (sessionId: string) => void;
 	onClose?: () => void;
+	titleStore?: ConversationTitleStore;
+	onSaveTitle?: (sessionId: string, title: string) => Promise<void>;
 }
 
 /** Formats ISO timestamp to human-readable date `YYYY-MM-DD HH:mm`. */
@@ -76,8 +80,12 @@ export class HistoryDropdown {
 	private triggerEl: HTMLElement | null = null;
 	private open = false;
 	private items: HistoryRowItem[] = [];
+	private summaries: SessionSummary[] = [];
 	private itemEls: HTMLElement[] = [];
 	private selectedIndex = 0;
+	private editingSessionId: string | null = null;
+	private isCanceling = false;
+	private savePromise: Promise<void> | null = null;
 	private boundOnKeyDown: ((event: KeyboardEvent) => void) | null = null;
 	private boundOnDocClick: ((event: MouseEvent) => void) | null = null;
 
@@ -116,6 +124,14 @@ export class HistoryDropdown {
 		return this.selectedIndex;
 	}
 
+	isEditing(): boolean {
+		return this.editingSessionId !== null;
+	}
+
+	getEditingSessionId(): string | null {
+		return this.editingSessionId;
+	}
+
 	async toggle(): Promise<void> {
 		if (this.open) {
 			this.close();
@@ -127,11 +143,91 @@ export class HistoryDropdown {
 	async openDropdown(): Promise<void> {
 		const rawSummaries = await this.options.getSessions();
 		// Order newest first: `session-index.ts` already sorts that way; do not re-sort!
+		this.summaries = rawSummaries;
 		this.items = rawSummaries.map(shapeSessionRow);
 		this.open = true;
 		this.selectedIndex = 0;
+		this.editingSessionId = null;
 		this.render();
 		this.attachListeners();
+	}
+
+	startEditing(sessionId: string): void {
+		if (this.editingSessionId === sessionId) {
+			return;
+		}
+		if (this.editingSessionId !== null) {
+			void this.commitEdit();
+		}
+		this.editingSessionId = sessionId;
+		this.render();
+		const inputEl = this.dropdownEl.querySelector('input');
+		if (inputEl) {
+			inputEl.focus?.();
+			inputEl.select?.();
+			inputEl.setSelectionRange?.(0, inputEl.value.length);
+		}
+	}
+
+	cancelEdit(): void {
+		if (this.editingSessionId === null) {
+			return;
+		}
+		this.isCanceling = true;
+		this.editingSessionId = null;
+		this.render();
+		this.isCanceling = false;
+	}
+
+	async commitEdit(): Promise<void> {
+		if (this.savePromise) {
+			return this.savePromise;
+		}
+		if (this.editingSessionId === null || this.isCanceling) {
+			return;
+		}
+		const sessionId = this.editingSessionId;
+		const inputEl = this.dropdownEl.querySelector('input');
+		const newTitle = inputEl ? inputEl.value : '';
+		this.editingSessionId = null;
+
+		const trimmed = newTitle.trim();
+		const summary = this.summaries.find(s => s.sessionId === sessionId);
+		if (summary) {
+			summary.customTitle = trimmed.length > 0 ? trimmed : undefined;
+		}
+		const itemIndex = this.items.findIndex(item => item.sessionId === sessionId);
+		if (itemIndex !== -1) {
+			if (summary) {
+				this.items[itemIndex] = shapeSessionRow(summary);
+			} else {
+				this.items[itemIndex] = {
+					...this.items[itemIndex]!,
+					title: trimmed.length > 0 ? trimmed : (this.items[itemIndex]?.title ?? 'Untitled session'),
+					isDerivedTitle: false,
+				};
+			}
+		}
+		this.render();
+
+		this.savePromise = (async () => {
+			try {
+				await this.saveTitle(sessionId, trimmed);
+			} finally {
+				this.savePromise = null;
+			}
+		})();
+
+		return this.savePromise;
+	}
+
+	private async saveTitle(sessionId: string, title: string): Promise<void> {
+		if (this.options.titleStore) {
+			await this.options.titleStore.set(sessionId, title);
+		}
+		if (this.options.onSaveTitle) {
+			await this.options.onSaveTitle(sessionId, title);
+		}
 	}
 
 	selectNext(): void {
@@ -147,6 +243,9 @@ export class HistoryDropdown {
 	}
 
 	selectIndex(index: number): boolean {
+		if (this.editingSessionId !== null) {
+			return false;
+		}
 		const item = this.items[index];
 		if (!item) {
 			return false;
@@ -165,8 +264,10 @@ export class HistoryDropdown {
 		this.detachListeners();
 		this.open = false;
 		this.items = [];
+		this.summaries = [];
 		this.itemEls = [];
 		this.selectedIndex = 0;
+		this.editingSessionId = null;
 		this.dropdownEl.empty();
 		this.dropdownEl.addClass('guki-hidden');
 		this.options.onClose?.();
@@ -179,6 +280,23 @@ export class HistoryDropdown {
 
 	handleKeyDown(event: KeyboardEvent): boolean {
 		if (!this.open) {
+			return false;
+		}
+		if (this.editingSessionId !== null) {
+			if (event.key === 'Enter') {
+				event.preventDefault?.();
+				void this.commitEdit();
+				return true;
+			}
+			if (event.key === 'Escape') {
+				event.preventDefault?.();
+				this.cancelEdit();
+				return true;
+			}
+			if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+				event.preventDefault?.();
+				return true;
+			}
 			return false;
 		}
 		if (event.key === 'ArrowDown') {
@@ -218,34 +336,88 @@ export class HistoryDropdown {
 
 		for (let i = 0; i < this.items.length; i++) {
 			const item = this.items[i]!;
+			const isEditingThis = this.editingSessionId === item.sessionId;
 			const itemEl = this.dropdownEl.createDiv({
-				cls: 'guki-history-item' + (i === this.selectedIndex ? ' is-selected' : ''),
+				cls: 'guki-history-item' + (i === this.selectedIndex ? ' is-selected' : '') + (isEditingThis ? ' is-editing' : ''),
 			});
 
-			const titleEl = itemEl.createSpan({
-				cls: 'guki-history-title' + (item.isDerivedTitle ? ' is-derived' : ''),
-				text: item.title,
-			});
-			if (item.isDerivedTitle) {
-				titleEl.setAttribute('title', `Derived: ${item.title}`);
-			}
+			if (isEditingThis) {
+				const inputEl = itemEl.createEl('input', {
+					cls: 'guki-history-rename-input',
+					attr: {
+						type: 'text',
+						'aria-label': 'Rename session',
+					},
+				});
+				inputEl.value = item.title;
 
-			itemEl.createSpan({
-				cls: 'guki-history-date',
-				text: item.dateText,
-			});
+				inputEl.addEventListener('keydown', (e: KeyboardEvent) => {
+					if (e.key === 'Enter') {
+						e.preventDefault?.();
+						e.stopPropagation?.();
+						void this.commitEdit();
+					} else if (e.key === 'Escape') {
+						e.preventDefault?.();
+						e.stopPropagation?.();
+						this.cancelEdit();
+					} else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+						e.stopPropagation?.();
+					}
+				});
 
-			if (item.costText !== null) {
+				inputEl.addEventListener('blur', () => {
+					void this.commitEdit();
+				});
+
+				inputEl.addEventListener('click', (e: MouseEvent) => {
+					e.stopPropagation?.();
+				});
+			} else {
+				const titleEl = itemEl.createSpan({
+					cls: 'guki-history-title' + (item.isDerivedTitle ? ' is-derived' : ''),
+					text: item.title,
+				});
+				if (item.isDerivedTitle) {
+					titleEl.setAttribute('title', `Derived: ${item.title}`);
+				}
+
 				itemEl.createSpan({
-					cls: 'guki-history-cost',
-					text: item.costText,
+					cls: 'guki-history-date',
+					text: item.dateText,
+				});
+
+				if (item.costText !== null) {
+					itemEl.createSpan({
+						cls: 'guki-history-cost',
+						text: item.costText,
+					});
+				}
+
+				const renameBtn = itemEl.createEl('button', {
+					cls: 'clickable-icon guki-history-rename-btn',
+					attr: {
+						type: 'button',
+						'aria-label': 'Rename conversation',
+					},
+				});
+				setIcon(renameBtn, 'pencil');
+
+				renameBtn.addEventListener('click', (evt: MouseEvent) => {
+					evt.preventDefault?.();
+					evt.stopPropagation?.();
+					this.startEditing(item.sessionId);
+				});
+
+				itemEl.addEventListener('click', (evt: MouseEvent) => {
+					if (this.editingSessionId !== null) return;
+					const target = evt.target as HTMLElement | null;
+					if (target === renameBtn || renameBtn.contains(target) || target?.tagName === 'INPUT') {
+						return;
+					}
+					evt.preventDefault?.();
+					this.selectIndex(i);
 				});
 			}
-
-			itemEl.addEventListener('click', (evt: MouseEvent) => {
-				evt.preventDefault?.();
-				this.selectIndex(i);
-			});
 
 			this.itemEls.push(itemEl);
 		}

@@ -1889,4 +1889,55 @@
 	text-align: center;
 }
 
+.guki-history-item.is-editing {
+	padding: var(--size-2-1) var(--size-4-3);
+	cursor: default;
+}
+
+.guki-history-rename-btn {
+	display: none;
+	align-items: center;
+	justify-content: center;
+	width: var(--size-4-5);
+	height: var(--size-4-5);
+	padding: 0;
+	margin: 0;
+	background: transparent;
+	border: none;
+	border-radius: var(--radius-s);
+	color: var(--icon-color, var(--text-muted));
+	cursor: var(--cursor);
+	flex-shrink: 0;
+}
+
+.guki-history-rename-btn .svg-icon {
+	width: var(--icon-xs, 14px);
+	height: var(--icon-xs, 14px);
+}
+
+.guki-history-item:hover .guki-history-rename-btn,
+.guki-history-item:focus-within .guki-history-rename-btn {
+	display: inline-flex;
+}
+
+.guki-history-rename-btn:hover {
+	color: var(--text-normal);
+	background-color: var(--background-modifier-hover);
+}
+
+.guki-history-rename-input {
+	width: 100%;
+	flex: 1 1 auto;
+	font-size: var(--font-ui-small);
+	font-family: inherit;
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	border: 1px solid var(--interactive-accent);
+	border-radius: var(--radius-s);
+	padding: var(--size-2-1) var(--size-2-2);
+	outline: none;
+	box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+
+
 

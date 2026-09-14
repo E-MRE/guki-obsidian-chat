@@ -100,6 +100,7 @@ export class ChatView extends ItemView {
 			onSelectSession: (sessionId: string) => {
 				void this.handleSelectSession(sessionId);
 			},
+			titleStore: this.titleStore,
 		});
 
 		// A positioned wrapper, not the scroller itself: the jump-to-bottom button has to stay put
