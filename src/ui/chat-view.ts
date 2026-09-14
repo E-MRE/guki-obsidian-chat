@@ -22,6 +22,8 @@ import { formatModelName } from '../cli/events';
 import { decideAskUserQuestion } from '../core/ask-user-question';
 import type { SessionManager } from '../core/session-manager';
 import { Composer, type ComposerStatus } from './composer';
+import { HistoryDropdown } from './history-dropdown';
+import { NodeTranscriptStore, type TranscriptStore } from '../data/transcript-store';
 import { MessageList } from './message-list';
 
 export class ChatView extends ItemView {
@@ -30,7 +32,16 @@ export class ChatView extends ItemView {
 	private pendingMeasure: number | null = null;
 	private messageList: MessageList | null = null;
 	private composer: Composer | null = null;
+	private historyDropdown: HistoryDropdown | null = null;
+	private historyActionEl: HTMLElement | null = null;
+	private transcriptStore: TranscriptStore = new NodeTranscriptStore();
 	private unsubscribe: (() => void) | null = null;
+
+	/**
+	 * Seam for selecting a past session (Phase 8 Görev 8).
+	 * Emits the chosen session ID; drawing the historical conversation is wired in the next lane.
+	 */
+	onSessionSelected?: (sessionId: string) => void;
 
 	/**
 	 * The session lives on the plugin, not here: the subprocess and the transcript must survive
@@ -58,6 +69,26 @@ export class ChatView extends ItemView {
 
 		const root = this.contentEl.createDiv({ cls: 'guki-root' });
 		this.rootEl = root;
+
+		this.historyDropdown = new HistoryDropdown({
+			containerEl: root,
+			getSessions: async () => {
+				const paths = await this.session.vaultPaths();
+				return this.transcriptStore.listSessions(paths.root);
+			},
+			onSelectSession: (sessionId: string) => {
+				this.handleSelectSession(sessionId);
+			},
+		});
+
+		if (typeof this.addAction === 'function') {
+			this.historyActionEl = this.addAction('history', 'Conversation history', () => {
+				void this.historyDropdown?.toggle();
+			});
+			if (this.historyActionEl && this.historyDropdown) {
+				this.historyDropdown.setTriggerEl(this.historyActionEl);
+			}
+		}
 
 		// A positioned wrapper, not the scroller itself: the jump-to-bottom button has to stay put
 		// while the content behind it scrolls, so it cannot live inside the scrolling element.
@@ -195,6 +226,9 @@ export class ChatView extends ItemView {
 		this.unsubscribe?.();
 		this.unsubscribe = null;
 		this.messageList = null;
+		this.historyDropdown?.destroy();
+		this.historyDropdown = null;
+		this.historyActionEl = null;
 		// Its own ResizeObserver is not covered by Component.register* either — see the composer's
 		// own comment on `destroy`.
 		this.composer?.destroy();
@@ -209,6 +243,18 @@ export class ChatView extends ItemView {
 		}
 		this.rootEl = null;
 		this.contentEl.empty();
+	}
+
+	private handleSelectSession(sessionId: string): void {
+		this.onSessionSelected?.(sessionId);
+	}
+
+	toggleHistory(): Promise<void> {
+		return this.historyDropdown ? this.historyDropdown.toggle() : Promise.resolve();
+	}
+
+	getHistoryDropdown(): HistoryDropdown | null {
+		return this.historyDropdown;
 	}
 
 	/**
