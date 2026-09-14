@@ -81,9 +81,14 @@ export class ConversationTitleStore {
 		return changed;
 	}
 
-	/** Defensive copy for checks and for persistence. */
+	/** Defensive copy for checks and for persistence.
+	 *
+	 *  Null-prototype on purpose: a session id is a filename from the CLI's project directory, so
+	 *  an id of `__proto__` is possible, and `copy['__proto__'] = entry` on a normal object literal
+	 *  sets the prototype instead of an own key — the title would vanish from `Object.keys` and
+	 *  from `JSON.stringify`. Checks AR6.10/AR6.11 cover it. */
 	snapshot(): ConversationTitleMap {
-		const copy: ConversationTitleMap = {};
+		const copy: ConversationTitleMap = Object.create(null) as ConversationTitleMap;
 		for (const [id, entry] of this.titles) {
 			copy[id] = {
 				title: entry.title,
