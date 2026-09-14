@@ -105,3 +105,67 @@ export function decideAskUserQuestion(
 		updatedInput: { ...(input as Record<string, unknown>), answers },
 	};
 }
+
+/**
+ * Renders the authoritative one-line summary for AskUserQuestion cards.
+ * Reused across both live permission summaries and historical transcript reconstruction.
+ */
+export function formatAskUserQuestionSummary(
+	askQuestions?: AskQuestionDef[],
+	answers?: Record<string, string | string[]>,
+	status: 'pending' | 'allowed' | 'denied' | 'cancelled' = 'allowed',
+): string {
+	if (askQuestions && askQuestions.length > 0) {
+		if (status === 'allowed') {
+			const parts = askQuestions.map((q, idx) => {
+				const ans = answers
+					? answers[String(idx)] ?? (q.id ? answers[q.id] : undefined) ?? answers[q.question]
+					: undefined;
+				const ansStr = Array.isArray(ans) ? ans.join(', ') : typeof ans === 'string' ? ans : '';
+				return `${q.question} → ${ansStr}`;
+			});
+			return `Question: ${parts.join(' · ')}`;
+		} else if (status === 'denied') {
+			return `Question: ${askQuestions.map((q) => q.question).join(' · ')} → Denied`;
+		} else {
+			return `Question: ${askQuestions.map((q) => q.question).join(' · ')} → Not answered (turn ended)`;
+		}
+	} else {
+		if (status === 'allowed') {
+			return 'Question: Answered';
+		} else if (status === 'denied') {
+			return 'Question: (unreadable question) → Denied';
+		} else {
+			return 'Question: (unreadable question) → Not answered (turn ended)';
+		}
+	}
+}
+
+/**
+ * Extracts answered question/answer pairs from on-disk tool_result content.
+ */
+export function parseAskUserQuestionAnswers(content: unknown): Record<string, string> {
+	const text = typeof content === 'string'
+		? content
+		: (Array.isArray(content)
+			? content.map(c => typeof c === 'string' ? c : (c && typeof c === 'object' && 'text' in c ? String((c as Record<string, unknown>).text) : '')).join(' ')
+			: '');
+	const answers: Record<string, string> = {};
+	if (!text) return answers;
+
+	const regex = /"([^"\\]*(?:\\.[^"\\]*)*)"="([^"\\]*(?:\\.[^"\\]*)*)"/g;
+	let match: RegExpExecArray | null;
+	let idx = 0;
+	while ((match = regex.exec(text)) !== null) {
+		const q = match[1];
+		const a = match[2];
+		if (q !== undefined && a !== undefined) {
+			const qText = q.replace(/\\"/g, '"');
+			const aText = a.replace(/\\"/g, '"');
+			answers[qText] = aText;
+			answers[String(idx)] = aText;
+			idx++;
+		}
+	}
+	return answers;
+}

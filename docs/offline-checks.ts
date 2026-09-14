@@ -162,9 +162,11 @@ import {
 } from '../src/ui/history-dropdown';
 import { NodeTranscriptStore } from '../src/data/transcript-store';
 import { FileSystemAdapter, TFile } from 'obsidian';
-import { parseAskUserQuestionInput, decideAskUserQuestion } from '../src/core/ask-user-question';
+import { parseAskUserQuestionInput, decideAskUserQuestion, formatAskUserQuestionSummary, parseAskUserQuestionAnswers } from '../src/core/ask-user-question';
 import { AskUserQuestionInline } from '../src/ui/ask-user-question';
 import { DiskTranscriptLoader, resolveTranscriptBranch } from '../src/data/disk-transcript-loader';
+import { translateTranscriptRecords, parsePersistedOutput, resolveSidecarContent } from '../src/data/transcript-translator';
+import type { ChatItem, UserItem, AssistantItem, DividerItem, PermissionItem } from '../src/core/chat-state';
 
 
 let failures = 0;
@@ -11298,6 +11300,754 @@ console.log('\nAJ. Görev 8: Title fallback, history list UI, and scrub gitignor
 	eq('AJ4.21 task-notification skipped, subsequent user prompt derived', sTaskNotif?.derivedTitle, 'Invented user prompt after notification');
 
 	rmSync(dir, { recursive: true, force: true });
+}
+
+console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecars, and readSession');
+
+// AK1: One per ChatItem variant in the mappability table, built from measured real shapes
+{
+	console.log('AK1. Mappability table ChatItem variants from measured real shapes');
+
+	const userTextRec = {
+		type: 'user',
+		uuid: 'u-text-1',
+		parentUuid: undefined,
+		timestamp: '2026-09-14T10:00:00.000Z',
+		message: {
+			role: 'user',
+			content: 'Invented user question text for testing',
+		},
+	};
+
+	const userImgRec = {
+		type: 'user',
+		uuid: 'u-img-1',
+		parentUuid: 'u-text-1',
+		timestamp: '2026-09-14T10:00:05.000Z',
+		message: {
+			role: 'user',
+			content: [
+				{ type: 'text', text: 'Invented text preceding image' },
+				{
+					type: 'image',
+					source: {
+						type: 'base64',
+						media_type: 'image/png',
+						data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+					},
+				},
+			],
+		},
+	};
+
+	const asstRec = {
+		type: 'assistant',
+		uuid: 'a-1',
+		parentUuid: 'u-img-1',
+		timestamp: '2026-09-14T10:00:10.000Z',
+		message: {
+			role: 'assistant',
+			content: [
+				{ type: 'thinking', thinking: '', signature: 'invented-sig-1' },
+				{
+					type: 'tool_use',
+					id: 'toolu_1',
+					name: 'Glob',
+					input: { pattern: '*.md' },
+				},
+				{ type: 'text', text: 'Invented assistant concluding answer' },
+			],
+		},
+	};
+
+	const toolResultRec = {
+		type: 'user',
+		uuid: 'u-res-1',
+		parentUuid: 'a-1',
+		timestamp: '2026-09-14T10:00:12.000Z',
+		toolUseResult: { status: 'success' },
+		message: {
+			role: 'user',
+			content: [
+				{
+					type: 'tool_result',
+					tool_use_id: 'toolu_1',
+					content: 'file1.md\nfile2.md',
+				},
+			],
+		},
+	};
+
+	const dividerRec = {
+		type: 'system',
+		subtype: 'compact_boundary',
+		uuid: 'div-1',
+		parentUuid: 'u-res-1',
+		timestamp: '2026-09-14T10:00:15.000Z',
+		compactMetadata: {
+			preTokens: 10000,
+			postTokens: 2000,
+			durationMs: 15000,
+		},
+	};
+
+	const asstAskRec = {
+		type: 'assistant',
+		uuid: 'a-ask-1',
+		parentUuid: 'div-1',
+		timestamp: '2026-09-14T10:00:20.000Z',
+		message: {
+			role: 'assistant',
+			content: [
+				{
+					type: 'tool_use',
+					id: 'toolu_ask_1',
+					name: 'AskUserQuestion',
+					input: {
+						questions: [
+							{
+								question: 'Invented question: proceed with changes?',
+								header: 'Confirmation',
+								options: [{ label: 'Yes', value: 'yes' }, { label: 'No', value: 'no' }],
+							},
+						],
+					},
+				},
+			],
+		},
+	};
+
+	const toolResultAskRec = {
+		type: 'user',
+		uuid: 'u-ask-res-1',
+		parentUuid: 'a-ask-1',
+		timestamp: '2026-09-14T10:00:25.000Z',
+		toolUseResult: { status: 'success' },
+		message: {
+			role: 'user',
+			content: [
+				{
+					type: 'tool_result',
+					tool_use_id: 'toolu_ask_1',
+					content: 'The user answered: "Invented question: proceed with changes?"="Yes". You can now continue.',
+				},
+			],
+		},
+	};
+
+	const items = await translateTranscriptRecords([
+		userTextRec,
+		userImgRec,
+		asstRec,
+		toolResultRec,
+		dividerRec,
+		asstAskRec,
+		toolResultAskRec,
+	]);
+
+	const uText = items.find((it): it is UserItem => it.kind === 'user' && it.id === 'u-text-1');
+	check('AK1.1 UserItem text mapped from string content', uText !== undefined && uText.text === 'Invented user question text for testing');
+
+	const uImg = items.find((it): it is UserItem => it.kind === 'user' && it.id === 'u-img-1');
+	check('AK1.2 UserItem with image has images array', uImg !== undefined && Array.isArray(uImg.images) && uImg.images.length === 1);
+	eq('AK1.3 UserItem synthetic displayName image-1.png', uImg?.images?.[0]?.displayName, 'image-1.png');
+	eq('AK1.4 UserItem image mediaType image/png', uImg?.images?.[0]?.mediaType, 'image/png');
+
+	const asst = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-1');
+	check('AK1.5 AssistantItem mapped directly from uuid', asst !== undefined && asst.id === 'a-1');
+	eq('AK1.6 AssistantItem historical status is complete', asst?.status, 'complete');
+	eq('AK1.7 AssistantItem blocks count is 3', asst?.blocks.size, 3);
+	eq('AK1.8 AssistantItem block 0 is thinking', asst?.blocks.get(0)?.kind, 'thinking');
+	eq('AK1.9 AssistantItem block 1 is tool_use', asst?.blocks.get(1)?.kind, 'tool_use');
+	eq('AK1.10 AssistantItem block 1 toolResultText matches inline result', asst?.blocks.get(1)?.toolResultText, 'file1.md\nfile2.md');
+	eq('AK1.11 AssistantItem block 2 is text', asst?.blocks.get(2)?.kind, 'text');
+
+	const div = items.find((it): it is DividerItem => it.kind === 'divider');
+	check('AK1.12 DividerItem mapped from compact_boundary', div !== undefined && div.id === 'div-1');
+	eq('AK1.13 DividerItem text is Conversation compacted', div?.text, 'Conversation compacted');
+
+	const perm = items.find((it): it is PermissionItem => it.kind === 'permission');
+	check('AK1.14 PermissionItem produced for AskUserQuestion', perm !== undefined && perm.toolName === 'AskUserQuestion');
+	eq('AK1.15 PermissionItem status is allowed', perm?.status, 'allowed');
+	eq('AK1.16 PermissionItem question extracted', perm?.askQuestions?.[0]?.question, 'Invented question: proceed with changes?');
+	eq('AK1.17 PermissionItem answer extracted', perm?.answers?.['Invented question: proceed with changes?'], 'Yes');
+}
+
+// AK2: The absences asserted as absences
+{
+	console.log('AK2. Absences asserted as absences');
+
+	const userRec = {
+		type: 'user',
+		uuid: 'u-abs-1',
+		message: { role: 'user', content: 'Invented question' },
+	};
+	const asstRec = {
+		type: 'assistant',
+		uuid: 'a-abs-1',
+		parentUuid: 'u-abs-1',
+		message: { role: 'assistant', content: [{ type: 'text', text: 'Invented reply' }] },
+	};
+	const divRec = {
+		type: 'system',
+		subtype: 'compact_boundary',
+		uuid: 'div-abs-1',
+		parentUuid: 'a-abs-1',
+		compactMetadata: { durationMs: 99999 },
+	};
+	const asstWithDurRec = {
+		type: 'assistant',
+		uuid: 'a-dur-1',
+		parentUuid: 'div-abs-1',
+		message: { role: 'assistant', content: [{ type: 'text', text: 'Invented reply with duration' }] },
+	};
+	const durRec = {
+		type: 'system',
+		subtype: 'turn_duration',
+		uuid: 's-dur-1',
+		parentUuid: 'a-dur-1',
+		durationMs: 4500,
+	};
+	const permToolRec = {
+		type: 'assistant',
+		uuid: 'a-perm-1',
+		parentUuid: 's-dur-1',
+		message: {
+			role: 'assistant',
+			content: [
+				{
+					type: 'tool_use',
+					id: 'toolu_abs_perm',
+					name: 'AskUserQuestion',
+					input: { questions: [{ question: 'Invented?' }] },
+				},
+			],
+		},
+	};
+
+	const items = await translateTranscriptRecords([
+		userRec,
+		asstRec,
+		divRec,
+		asstWithDurRec,
+		durRec,
+		permToolRec,
+	]);
+
+	const u = items.find((it): it is UserItem => it.kind === 'user');
+	const asstNoDur = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-abs-1');
+	const div = items.find((it): it is DividerItem => it.kind === 'divider');
+	const asstDur = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-dur-1');
+	const perm = items.find((it): it is PermissionItem => it.kind === 'permission');
+
+	check('AK2.1 user item has no costUsd', (u as Record<string, unknown>)?.costUsd === undefined);
+	check('AK2.2 assistant without duration has no meta costUsd', asstNoDur?.meta?.costUsd === undefined);
+	check('AK2.3 divider item has no costUsd', (div as Record<string, unknown>)?.costUsd === undefined);
+	check('AK2.4 permission item has no costUsd', (perm as Record<string, unknown>)?.costUsd === undefined);
+
+	check('AK2.5 assistant without turn_duration leaves durationMs undefined', asstNoDur?.meta?.durationMs === undefined);
+	check('AK2.6 assistant without turn_duration leaves meta undefined entirely', asstNoDur?.meta === undefined);
+
+	eq('AK2.7 duration present where turn_duration links via parentUuid', asstDur?.meta?.durationMs, 4500);
+	check('AK2.8 assistant with duration still has no costUsd', asstDur?.meta?.costUsd === undefined);
+
+	check('AK2.9 divider has no durationMs', (div as Record<string, unknown>)?.durationMs === undefined);
+}
+
+// AK3: Thinking block handling (empty vs non-empty)
+{
+	console.log('AK3. Thinking block empty vs non-empty');
+
+	const user1 = { type: 'user', uuid: 'u-think-1', message: { role: 'user', content: 'Invented question 1' } };
+	const asstEmptyThinking = {
+		type: 'assistant',
+		uuid: 'a-think-empty',
+		parentUuid: 'u-think-1',
+		message: {
+			role: 'assistant',
+			content: [
+				{ type: 'thinking', thinking: '', signature: 'sig-empty' },
+				{ type: 'text', text: 'Invented answer after empty thinking' },
+			],
+		},
+	};
+	const user2 = { type: 'user', uuid: 'u-think-2', parentUuid: 'a-think-empty', message: { role: 'user', content: 'Invented question 2' } };
+	const asstNonEmptyThinking = {
+		type: 'assistant',
+		uuid: 'a-think-nonempty',
+		parentUuid: 'u-think-2',
+		message: {
+			role: 'assistant',
+			content: [
+				{ type: 'thinking', thinking: 'Invented thought process monologue', signature: 'sig-nonempty' },
+				{ type: 'text', text: 'Invented answer after non-empty thinking' },
+			],
+		},
+	};
+
+	const items = await translateTranscriptRecords([user1, asstEmptyThinking, user2, asstNonEmptyThinking]);
+
+	const emptyAsst = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-think-empty');
+	const emptyBlock = emptyAsst?.blocks.get(0);
+	eq('AK3.1 empty thinking block renders text as empty string', emptyBlock?.text, '');
+	eq('AK3.2 empty thinking block kind is thinking', emptyBlock?.kind, 'thinking');
+	check('AK3.3 empty thinking block timing startedAt is undefined', emptyBlock?.startedAt === undefined);
+
+	const nonEmptyAsst = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-think-nonempty');
+	const nonEmptyBlock = nonEmptyAsst?.blocks.get(0);
+	eq('AK3.4 non-empty thinking block renders text as-is', nonEmptyBlock?.text, 'Invented thought process monologue');
+	eq('AK3.5 non-empty thinking block kind is thinking', nonEmptyBlock?.kind, 'thinking');
+}
+
+// AK4: Sidecar tool result reading
+{
+	console.log('AK4. Sidecar tool results reading');
+
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-sidecar-')));
+	const toolResultsDir = join(dir, 'tool-results');
+	mkdirSync(toolResultsDir, { recursive: true });
+
+	const sidecarFilePath = join(toolResultsDir, 'toolu_sc_1.txt');
+	writeFileSync(sidecarFilePath, 'Invented large tool output read from disk sidecar file');
+
+	const asstRec = {
+		type: 'assistant',
+		uuid: 'a-sidecar-1',
+		message: {
+			role: 'assistant',
+			content: [
+				{ type: 'tool_use', id: 'toolu_sc_1', name: 'Bash', input: { command: 'test' } },
+				{ type: 'tool_use', id: 'toolu_sc_missing', name: 'Bash', input: { command: 'test2' } },
+			],
+		},
+	};
+
+	const userResultPresent = {
+		type: 'user',
+		uuid: 'u-sc-1',
+		toolUseResult: { status: 'success' },
+		message: {
+			role: 'user',
+			content: [
+				{
+					type: 'tool_result',
+					tool_use_id: 'toolu_sc_1',
+					content: `<persisted-output>\nOutput too large (55KB). Full output saved to: ${sidecarFilePath}\n\nPreview (first 2KB):\nInvented preview output text\n</persisted-output>`,
+				},
+				{
+					type: 'tool_result',
+					tool_use_id: 'toolu_sc_missing',
+					content: `<persisted-output>\nOutput too large (55KB). Full output saved to: ${join(toolResultsDir, 'toolu_sc_nonexistent.txt')}\n\nPreview (first 2KB):\nInvented fallback preview text\n</persisted-output>`,
+				},
+			],
+		},
+	};
+
+	let sidecarReadCount = 0;
+	const items = await translateTranscriptRecords([asstRec, userResultPresent], {
+		sessionDir: dir,
+		onSidecarRead: () => {
+			sidecarReadCount++;
+		},
+	});
+
+	const asst = items.find((it): it is AssistantItem => it.kind === 'assistant');
+	const bPresent = asst?.blocks.get(0);
+	const bMissing = asst?.blocks.get(1);
+
+	eq('AK4.1 present sidecar file is read in full', bPresent?.toolResultText, 'Invented large tool output read from disk sidecar file');
+	eq('AK4.2 missing sidecar file falls back to embedded preview', bMissing?.toolResultText, 'Invented fallback preview text');
+	eq('AK4.3 exactly one sidecar file was read from disk', sidecarReadCount, 1);
+
+	// Untouched records test: record whose sidecar is never requested causes 0 reads
+	let untouchedReadCount = 0;
+	const plainAsst = {
+		type: 'assistant',
+		uuid: 'a-plain-1',
+		message: {
+			role: 'assistant',
+			content: [{ type: 'tool_use', id: 'toolu_plain', name: 'Glob', input: {} }],
+		},
+	};
+	const plainResult = {
+		type: 'user',
+		uuid: 'u-plain-1',
+		toolUseResult: { status: 'success' },
+		message: {
+			role: 'user',
+			content: [{ type: 'tool_result', tool_use_id: 'toolu_plain', content: 'inline-content' }],
+		},
+	};
+	await translateTranscriptRecords([plainAsst, plainResult], {
+		sessionDir: dir,
+		onSidecarRead: () => {
+			untouchedReadCount++;
+		},
+	});
+	eq('AK4.4 record without sidecar causes zero sidecar reads', untouchedReadCount, 0);
+
+	rmSync(dir, { recursive: true, force: true });
+}
+
+// AK5: Denied tool, cancelled turn, AskUserQuestion summary
+{
+	console.log('AK5. Denied tool, cancelled turn, AskUserQuestion summary');
+
+	const userPrompt1 = { type: 'user', uuid: 'u-prompt-1', message: { role: 'user', content: 'Invented prompt 1' } };
+	const asstDeniedRec = {
+		type: 'assistant',
+		uuid: 'a-denied-1',
+		parentUuid: 'u-prompt-1',
+		message: {
+			role: 'assistant',
+			content: [{ type: 'tool_use', id: 'toolu_denied_1', name: 'Write', input: { path: 'foo.txt' } }],
+		},
+	};
+	const userDeniedRec = {
+		type: 'user',
+		uuid: 'u-denied-1',
+		parentUuid: 'a-denied-1',
+		toolUseResult: { status: 'error' },
+		toolDenialKind: 'user-rejected',
+		message: {
+			role: 'user',
+			content: [
+				{
+					type: 'tool_result',
+					tool_use_id: 'toolu_denied_1',
+					is_error: true,
+					content: 'User rejected the write operation.',
+				},
+			],
+		},
+	};
+
+	const userPrompt2 = { type: 'user', uuid: 'u-prompt-2', parentUuid: 'u-denied-1', message: { role: 'user', content: 'Invented prompt 2' } };
+	const asstCancelledRec = {
+		type: 'assistant',
+		uuid: 'a-cancelled-1',
+		parentUuid: 'u-prompt-2',
+		message: {
+			role: 'assistant',
+			content: [{ type: 'tool_use', id: 'toolu_cancelled_1', name: 'Bash', input: { command: 'sleep 10' } }],
+		},
+	};
+	const userInterruptRec = {
+		type: 'user',
+		uuid: 'u-interrupt-1',
+		parentUuid: 'a-cancelled-1',
+		message: {
+			role: 'user',
+			content: '[Request interrupted by user]',
+		},
+	};
+
+	const items = await translateTranscriptRecords([
+		userPrompt1,
+		asstDeniedRec,
+		userDeniedRec,
+		userPrompt2,
+		asstCancelledRec,
+		userInterruptRec,
+	]);
+
+	const deniedAsst = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-denied-1');
+	const deniedBlock = deniedAsst?.blocks.get(0);
+	check('AK5.1 denied tool has toolDenied true', deniedBlock?.toolDenied === true);
+	check('AK5.2 denied tool has toolIsError false (cleared for denial)', deniedBlock?.toolIsError === false);
+	check('AK5.3 denied tool has toolPending false', deniedBlock?.toolPending === false);
+	eq('AK5.4 denied assistant turn status is complete', deniedAsst?.status, 'complete');
+
+	const cancelledAsst = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-cancelled-1');
+	const cancelledBlock = cancelledAsst?.blocks.get(0);
+	eq('AK5.5 cancelled assistant turn status is stopped', cancelledAsst?.status, 'stopped');
+	check('AK5.6 cancelled tool has toolPending false', cancelledBlock?.toolPending === false);
+
+	// Test AskUserQuestion summary helper
+	const sampleQ = [{ question: 'Invented question: accept refactor?' }];
+	const sampleA = { 'Invented question: accept refactor?': 'Accepted' };
+
+	eq('AK5.7 formatAskUserQuestionSummary allowed', formatAskUserQuestionSummary(sampleQ, sampleA, 'allowed'), 'Question: Invented question: accept refactor? → Accepted');
+	eq('AK5.8 formatAskUserQuestionSummary denied', formatAskUserQuestionSummary(sampleQ, sampleA, 'denied'), 'Question: Invented question: accept refactor? → Denied');
+	eq('AK5.9 formatAskUserQuestionSummary cancelled', formatAskUserQuestionSummary(sampleQ, sampleA, 'cancelled'), 'Question: Invented question: accept refactor? → Not answered (turn ended)');
+	eq('AK5.10 formatAskUserQuestionSummary empty questions allowed', formatAskUserQuestionSummary([], {}, 'allowed'), 'Question: Answered');
+	eq('AK5.11 formatAskUserQuestionSummary empty questions denied', formatAskUserQuestionSummary([], {}, 'denied'), 'Question: (unreadable question) → Denied');
+}
+
+// AK6: readSession on real-shaped, empty, and missing transcript
+{
+	console.log('AK6. readSession on real-shaped, empty, and missing transcript');
+
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-readsession-')));
+
+	// 1. Real-shaped transcript
+	const realFile = join(dir, 'sess-real.jsonl');
+	writeFileSync(
+		realFile,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u-1', message: { role: 'user', content: 'Invented prompt text' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a-1', parentUuid: 'u-1', message: { role: 'assistant', content: [{ type: 'text', text: 'Invented answer' }] } }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a-1', sessionId: 'sess-real' }),
+			'',
+		].join('\n'),
+	);
+
+	// 2. Empty transcript (0 bytes)
+	const emptyFile = join(dir, 'sess-empty.jsonl');
+	writeFileSync(emptyFile, '');
+
+	const store = new NodeTranscriptStore(dir);
+
+	// Real session read
+	const realItems = await store.readSession('sess-real');
+	check('AK6.1 readSession on real transcript returns items array', Array.isArray(realItems) && realItems.length === 2);
+	eq('AK6.2 real transcript first item is UserItem', realItems[0]?.kind, 'user');
+	eq('AK6.3 real transcript second item is AssistantItem', realItems[1]?.kind, 'assistant');
+	eq('AK6.4 UserItem text matches', (realItems[0] as UserItem)?.text, 'Invented prompt text');
+	eq('AK6.5 AssistantItem block text matches', (realItems[1] as AssistantItem)?.blocks.get(0)?.text, 'Invented answer');
+
+	// Empty session read
+	const emptyItems = await store.readSession('sess-empty');
+	check('AK6.6 readSession on empty transcript returns empty array', Array.isArray(emptyItems) && emptyItems.length === 0);
+
+	// Missing session read
+	let threwMissing = false;
+	let missingError = '';
+	try {
+		await store.readSession('sess-missing-xyz');
+	} catch (err) {
+		threwMissing = true;
+		missingError = String(err);
+	}
+	check('AK6.7 readSession on missing transcript throws', threwMissing);
+	check('AK6.8 readSession missing error mentions session id', missingError.includes('sess-missing-xyz'));
+	check('AK6.9 readSession missing error includes v2', missingError.includes('v2'));
+
+	rmSync(dir, { recursive: true, force: true });
+}
+
+// AK7: Defect 1 - readSession paging seam prevents eager loading of full active branch
+{
+	console.log('AK7. Defect 1: readSession paging seam');
+
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-paging-')));
+	const pagedFile = join(dir, 'sess-paged.jsonl');
+
+	// 10 active records (5 user-assistant pairs)
+	const lines: string[] = [];
+	for (let i = 1; i <= 5; i++) {
+		const uId = `u-paged-${String(i)}`;
+		const aId = `a-paged-${String(i)}`;
+		const prevId = i === 1 ? undefined : `a-paged-${String(i - 1)}`;
+		lines.push(JSON.stringify({
+			type: 'user',
+			uuid: uId,
+			parentUuid: prevId,
+			message: { role: 'user', content: `Invented prompt ${String(i)}` },
+		}));
+		lines.push(JSON.stringify({
+			type: 'assistant',
+			uuid: aId,
+			parentUuid: uId,
+			message: { role: 'assistant', content: [{ type: 'text', text: `Invented answer ${String(i)}` }] },
+		}));
+	}
+	lines.push(JSON.stringify({ type: 'last-prompt', leafUuid: 'a-paged-5', sessionId: 'sess-paged' }));
+	lines.push('');
+	writeFileSync(pagedFile, lines.join('\n'));
+
+	const store = new NodeTranscriptStore(dir);
+	const page: any = await (store as any).readSession('sess-paged', undefined, { count: 4 });
+
+	// Assert mechanism: requested 4 newest records (2 turns = 4 chat items)
+	check('AK7.1 readSession returns requested slice not whole branch', page && page.length === 4, `got length ${page?.length}`);
+	check('AK7.2 page exposes startIndex', page && page.startIndex === 6, `got ${page?.startIndex}`);
+	check('AK7.3 page exposes endIndex', page && page.endIndex === 10, `got ${page?.endIndex}`);
+	check('AK7.4 page exposes hasMoreBefore', page && page.hasMoreBefore === true, `got ${page?.hasMoreBefore}`);
+	check('AK7.5 page exposes totalActiveRecords', page && page.totalActiveRecords === 10, `got ${page?.totalActiveRecords}`);
+
+	if (page && typeof page.loadBefore === 'function') {
+		const olderPage: any = await page.loadBefore(4);
+		check('AK7.6 loadBefore loads previous slice', olderPage && olderPage.startIndex === 2 && olderPage.endIndex === 6);
+		check('AK7.7 loadBefore preserves hasMoreBefore', olderPage && olderPage.hasMoreBefore === true);
+	} else {
+		check('AK7.6 loadBefore loads previous slice', false, 'loadBefore method missing on page');
+		check('AK7.7 loadBefore preserves hasMoreBefore', false, 'loadBefore method missing on page');
+	}
+
+	rmSync(dir, { recursive: true, force: true });
+}
+
+// AK8: Defect 2 - Sidecar read only for records returned in requested page
+{
+	console.log('AK8. Defect 2: Sidecar read only for records in requested page');
+
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-sidecar-paged-')));
+	const toolResultsDir = join(dir, 'tool-results');
+	mkdirSync(toolResultsDir, { recursive: true });
+
+	const oldSidecarPath = join(toolResultsDir, 'toolu_sc_old.txt');
+	writeFileSync(oldSidecarPath, 'Invented old tool result payload on disk');
+
+	const lines = [
+		// Turn 1: user, assistant with tool_use, user tool_result with sidecar
+		JSON.stringify({ type: 'user', uuid: 'u-sc-turn1', message: { role: 'user', content: 'Invented prompt 1' } }),
+		JSON.stringify({
+			type: 'assistant',
+			uuid: 'a-sc-turn1',
+			parentUuid: 'u-sc-turn1',
+			message: {
+				role: 'assistant',
+				content: [{ type: 'tool_use', id: 'toolu_sc_old', name: 'Bash', input: { command: 'invented' } }],
+			},
+		}),
+		JSON.stringify({
+			type: 'user',
+			uuid: 'u-sc-res1',
+			parentUuid: 'a-sc-turn1',
+			toolUseResult: { status: 'success' },
+			message: {
+				role: 'user',
+				content: [{
+					type: 'tool_result',
+					tool_use_id: 'toolu_sc_old',
+					content: `<persisted-output>\nFull output saved to: ${oldSidecarPath}\nPreview:\nInvented preview\n</persisted-output>`,
+				}],
+			},
+		}),
+		// Turn 2: user, assistant simple text
+		JSON.stringify({ type: 'user', uuid: 'u-sc-turn2', parentUuid: 'u-sc-res1', message: { role: 'user', content: 'Invented prompt 2' } }),
+		JSON.stringify({
+			type: 'assistant',
+			uuid: 'a-sc-turn2',
+			parentUuid: 'u-sc-turn2',
+			message: { role: 'assistant', content: [{ type: 'text', text: 'Invented final answer' }] },
+		}),
+		JSON.stringify({ type: 'last-prompt', leafUuid: 'a-sc-turn2', sessionId: 'sess-sc-paged' }),
+		'',
+	];
+	writeFileSync(join(dir, 'sess-sc-paged.jsonl'), lines.join('\n'));
+
+	let sidecarReads = 0;
+	const store = new NodeTranscriptStore(dir);
+
+	// Request ONLY Turn 2 (newest 2 records)
+	const page2: any = await (store as any).readSession('sess-sc-paged', undefined, {
+		count: 2,
+		sessionDir: dir,
+		onSidecarRead: () => {
+			sidecarReads++;
+		},
+	});
+
+	// Assert mechanism: Turn 1 was not requested -> zero sidecar reads must have occurred
+	check('AK8.1 unrequested older record sidecar is NOT read from disk', sidecarReads === 0, `expected 0 sidecar reads, got ${String(sidecarReads)}`);
+
+	// Now ask for older page including Turn 1
+	if (page2 && typeof page2.loadBefore === 'function') {
+		await page2.loadBefore(3);
+		check('AK8.2 requested older record sidecar IS read when requested', sidecarReads === 1, `expected 1 sidecar read, got ${String(sidecarReads)}`);
+	} else {
+		check('AK8.2 requested older record sidecar IS read when requested', false, 'loadBefore missing');
+	}
+
+	rmSync(dir, { recursive: true, force: true });
+}
+
+// AK9: Defect 3 - Mappability table missing checks (isApiErrorMessage, un-denied tool error, toolPermissionRequested)
+{
+	console.log('AK9. Defect 3: Mappability rows without checks');
+
+	// Row 1: isApiErrorMessage: true with error undefined and content block array
+	const apiErrRec = {
+		type: 'assistant',
+		uuid: 'a-api-err-1',
+		isApiErrorMessage: true,
+		apiErrorStatus: 400,
+		message: {
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Invented API error description' }],
+		},
+	};
+	const items1 = await translateTranscriptRecords([apiErrRec]);
+	const asstErr = items1.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-api-err-1');
+	eq('AK9.1 isApiErrorMessage sets status to error', asstErr?.status, 'error');
+	eq('AK9.2 isApiErrorMessage extracts errorText from content block', asstErr?.errorText, 'Invented API error description');
+
+	// Row 2: un-denied tool error (is_error: true on tool_result without toolDenialKind)
+	const asstToolUse = {
+		type: 'assistant',
+		uuid: 'a-tool-use-err',
+		message: {
+			role: 'assistant',
+			content: [{ type: 'tool_use', id: 'toolu_fail_1', name: 'Bash', input: { command: 'invented' } }],
+		},
+	};
+	const userToolErr = {
+		type: 'user',
+		uuid: 'u-tool-res-err',
+		parentUuid: 'a-tool-use-err',
+		toolUseResult: { status: 'error' },
+		message: {
+			role: 'user',
+			content: [{
+				type: 'tool_result',
+				tool_use_id: 'toolu_fail_1',
+				is_error: true,
+				content: 'Invented execution failure message',
+			}],
+		},
+	};
+	const items2 = await translateTranscriptRecords([asstToolUse, userToolErr]);
+	const asstTool = items2.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-tool-use-err');
+	const blockErr = asstTool?.blocks.get(0);
+	check('AK9.3 un-denied tool result preserves toolIsError true', blockErr?.toolIsError === true);
+	check('AK9.4 un-denied tool result leaves toolDenied undefined', blockErr?.toolDenied === undefined);
+
+	// Row 3: toolPermissionRequested is false
+	check('AK9.5 toolPermissionRequested is false', blockErr?.toolPermissionRequested === false);
+}
+
+// AK10: Defect 4 - Synthetic task-notification records omitted
+{
+	console.log('AK10. Defect 4: Synthetic task-notification records omitted');
+
+	const notifRec = {
+		type: 'user',
+		uuid: 'u-task-notif-1',
+		timestamp: '2026-09-14T10:00:00.000Z',
+		origin: { kind: 'task-notification' },
+		message: { role: 'user', content: 'Invented machine notification: subagent complete' },
+	};
+	const humanPrompt = {
+		type: 'user',
+		uuid: 'u-human-1',
+		parentUuid: 'u-task-notif-1',
+		timestamp: '2026-09-14T10:00:05.000Z',
+		message: { role: 'user', content: 'Invented genuine human prompt' },
+	};
+	const items = await translateTranscriptRecords([notifRec, humanPrompt]);
+	eq('AK10.1 task-notification record omitted yielding single human item', items.length, 1);
+	eq('AK10.2 retained item is genuine human user prompt', (items[0] as UserItem)?.text, 'Invented genuine human prompt');
+}
+
+// AK11: Defect 5 - AssistantItem string content handling
+{
+	console.log('AK11. Defect 5: AssistantItem string content handling');
+
+	const asstStrRec = {
+		type: 'assistant',
+		uuid: 'a-str-content-1',
+		message: {
+			role: 'assistant',
+			content: 'Invented assistant reply as plain string',
+		},
+	};
+	const items = await translateTranscriptRecords([asstStrRec]);
+	const asst = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-str-content-1');
+	eq('AK11.1 assistant string content yields one block', asst?.blocks.size, 1);
+	eq('AK11.2 assistant string block kind is text', asst?.blocks.get(0)?.kind, 'text');
+	eq('AK11.3 assistant string block text matches', asst?.blocks.get(0)?.text, 'Invented assistant reply as plain string');
 }
 
 // Clean up temporary test files

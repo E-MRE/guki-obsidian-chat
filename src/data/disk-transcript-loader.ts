@@ -7,8 +7,8 @@
  * 1. An on-disk transcript (~/.claude/projects/<slug>/<session-id>.jsonl) is NOT a linear
  *    chat log. It is an append-only DAG linked by `parentUuid` -> `uuid`. When a session
  *    is resumed or forked, new records branch off an earlier node, and all abandoned
- *    branches remain in the file permanently. In sample session Sample 4, 259 abandoned
- *    records were found across 18 distinct forks. A naive sequential reader would interleave
+ *    branches remain in the file permanently. In sample session 2661ce2d (Example B), 259 abandoned
+ *    records were found across 18 distinct forks (Sample 4 had 5). A naive sequential reader would interleave
  *    these dead turns, rendering a conversation that never actually happened.
  * 2. File order is NOT chronological. Timestamp reversals between successive records were
  *    measured in 7 of 8 sampled files (up to 77 reversals in Sample 4). File order reflects
