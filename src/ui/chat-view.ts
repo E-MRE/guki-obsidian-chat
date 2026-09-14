@@ -24,6 +24,7 @@ import type { SessionManager } from '../core/session-manager';
 import { Composer, type ComposerStatus } from './composer';
 import { HistoryDropdown } from './history-dropdown';
 import { NodeTranscriptStore, type SessionPage, type TranscriptStore } from '../data/transcript-store';
+import type { ConversationTitleStore } from '../data/conversation-titles';
 import { MessageList } from './message-list';
 
 /** Page size for historical conversation paging (UI layer policy, Görev 8). */
@@ -39,7 +40,8 @@ export class ChatView extends ItemView {
 	private messageList: MessageList | null = null;
 	private composer: Composer | null = null;
 	private historyDropdown: HistoryDropdown | null = null;
-	private transcriptStore: TranscriptStore = new NodeTranscriptStore();
+	private transcriptStore: TranscriptStore;
+	private titleStore?: ConversationTitleStore;
 	private unsubscribe: (() => void) | null = null;
 	private currentSessionId: string | null = null;
 	private currentPage: SessionPage | null = null;
@@ -59,11 +61,15 @@ export class ChatView extends ItemView {
 		leaf: WorkspaceLeaf,
 		private readonly session: SessionManager,
 		transcriptStore?: TranscriptStore,
+		conversationTitles?: ConversationTitleStore,
 	) {
 		super(leaf);
-		if (transcriptStore) {
-			this.transcriptStore = transcriptStore;
-		}
+		this.titleStore = conversationTitles;
+		this.transcriptStore = transcriptStore ?? new NodeTranscriptStore(undefined, conversationTitles);
+	}
+
+	getConversationTitleStore(): ConversationTitleStore | undefined {
+		return this.titleStore;
 	}
 
 	getViewType(): string {

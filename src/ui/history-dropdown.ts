@@ -11,7 +11,7 @@
  * - Performance: Styled with `content-visibility: auto` so large directories with hundreds of
  *   session files render without layout stalls.
  */
-import type { SessionSummary } from '../data/session-index';
+import { resolveSessionTitle, type SessionSummary } from '../data/session-index';
 
 export interface HistoryRowItem {
 	sessionId: string;
@@ -50,17 +50,15 @@ export function formatSessionDate(isoString: string): string {
 /**
  * Shapes a SessionSummary into display-ready row data.
  *
- * Real `ai-title` wins when present; otherwise `derivedTitle` is used.
- * If neither is present, falls back to "Untitled session".
- * Preserves the distinction with `isDerivedTitle`.
+ * Delegates title resolution to `resolveSessionTitle` (Contract §4):
+ * - `customTitle` > `title` > `derivedTitle` > 'Untitled session'
+ * - `isDerivedTitle` is true only when source is 'derived'
  * Formats `costUsd` as `$X.XX` if present, or `null` if absent.
  */
 export function shapeSessionRow(summary: SessionSummary): HistoryRowItem {
-	const hasRealTitle = summary.title !== undefined && summary.title.length > 0;
-	const isDerivedTitle = !hasRealTitle && summary.derivedTitle !== undefined && summary.derivedTitle.length > 0;
-	const title = hasRealTitle
-		? summary.title!
-		: (isDerivedTitle ? summary.derivedTitle! : 'Untitled session');
+	const resolved = resolveSessionTitle(summary);
+	const title = resolved.text;
+	const isDerivedTitle = resolved.source === 'derived';
 	const dateText = formatSessionDate(summary.startedAt);
 	const costText = summary.costUsd !== undefined ? `$${summary.costUsd.toFixed(2)}` : null;
 

@@ -22,6 +22,7 @@ export interface SessionSummary {
 	 *  Preserved in a distinct field to maintain semantic honesty: callers can distinguish
 	 *  a genuine `ai-title` from a derived one without silent conflation (Phase 8 Görev 8). */
 	derivedTitle?: string;
+	customTitle?: string;
 	/** ISO timestamp of the first `type: "user"` record in the file. Every sampled file has one; a
 	 *  file that somehow doesn't is left out of the result rather than given a fabricated time. */
 	startedAt: string;
@@ -157,19 +158,52 @@ export function sanitizeDerivedTitle(text: string): string | undefined {
 	return collapsed.slice(0, MAX_DERIVED_TITLE_LENGTH);
 }
 
+export type TitleSource = 'custom' | 'ai' | 'derived' | 'none';
+
 /**
- * Returns the effective display title and whether it was derived.
- * Preserves semantic honesty: real `ai-title` has `isDerived: false`, fallback has `isDerived: true`.
- * Returns `null` if the session has neither title nor usable prompt text.
+ * Resolves the effective session title and its provenance following the single precedence rule:
+ * customTitle > title (ai-title) > derivedTitle (prompt fallback) > 'Untitled session' (none).
  */
-export function sessionDisplayTitle(summary: SessionSummary): { text: string; isDerived: boolean } | null {
-	if (summary.title !== undefined && summary.title.length > 0) {
-		return { text: summary.title, isDerived: false };
+export function resolveSessionTitle(s: SessionSummary): { text: string; source: TitleSource } {
+	if (typeof s.customTitle === 'string' && s.customTitle.trim().length > 0) {
+		return { text: s.customTitle.trim(), source: 'custom' };
 	}
-	if (summary.derivedTitle !== undefined && summary.derivedTitle.length > 0) {
-		return { text: summary.derivedTitle, isDerived: true };
+	if (typeof s.title === 'string' && s.title.trim().length > 0) {
+		return { text: s.title, source: 'ai' };
+	}
+	if (typeof s.derivedTitle === 'string' && s.derivedTitle.trim().length > 0) {
+		return { text: s.derivedTitle, source: 'derived' };
+	}
+	return { text: 'Untitled session', source: 'none' };
+}
+
+/**
+ * Returns the conversation name for the panel header, or null if the session has no proper name.
+ * Returns text when source is 'custom' or 'ai'. Returns null for 'derived' (a heuristic trim is
+ * not a name and must never appear in the header) or 'none'.
+ */
+export function panelTitleFor(s: SessionSummary | null | undefined): string | null {
+	if (!s) {
+		return null;
+	}
+	const resolved = resolveSessionTitle(s);
+	if (resolved.source === 'custom' || resolved.source === 'ai') {
+		return resolved.text;
 	}
 	return null;
+}
+
+/**
+ * Returns the effective display title and whether it was derived.
+ * Preserves semantic honesty: delegates to `resolveSessionTitle`.
+ * Returns `null` if the session has neither title nor usable prompt text (source 'none').
+ */
+export function sessionDisplayTitle(summary: SessionSummary): { text: string; isDerived: boolean } | null {
+	const resolved = resolveSessionTitle(summary);
+	if (resolved.source === 'none') {
+		return null;
+	}
+	return { text: resolved.text, isDerived: resolved.source === 'derived' };
 }
 
 /** In the absolute vault path, every `/` becomes `-` (verified against the real directory name). */
