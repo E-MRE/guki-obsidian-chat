@@ -13483,11 +13483,10 @@ console.log('AU. Phase 7 Task 9 Lane 3: History dropdown refresh and panel heade
 
 	// Dropdown closed + turn ends -> scan count is exactly zero
 	scanCount = 0;
-	if (mockReducer.onTurnEnd) {
-		mockReducer.onTurnEnd();
-	} else if (typeof (view as any).handleTurnEnd === 'function') {
-		await (view as any).handleTurnEnd();
-	}
+	// Unconditional on purpose: if the view never wires a turn-end handler, this must go red.
+	// Guarding the call would let the check pass by doing nothing at all.
+	check('AU1.0c view attached a turn-end handler to the reducer', typeof mockReducer.onTurnEnd === 'function');
+	mockReducer.onTurnEnd!();
 	eq('AU1.1 dropdown closed + turn ends has scan count exactly zero', scanCount, 0);
 
 	// Open dropdown -> initial scan
@@ -13556,9 +13555,7 @@ console.log('AU. Phase 7 Task 9 Lane 3: History dropdown refresh and panel heade
 	];
 
 	check('AU2.5a dropdown has refresh method', typeof (dropdown as any).refresh === 'function');
-	if (typeof (dropdown as any).refresh === 'function') {
-		await (dropdown as any).refresh();
-	}
+	await (dropdown as any).refresh();
 	eq('AU2.5 selected item after refresh is still sess-b', dropdown.getItems()[dropdown.getSelectedIndex()]?.sessionId, 'sess-b');
 	eq('AU2.6 selected index followed sess-b to 2', dropdown.getSelectedIndex(), 2);
 
@@ -13569,9 +13566,7 @@ console.log('AU. Phase 7 Task 9 Lane 3: History dropdown refresh and panel heade
 		{ sessionId: 'sess-c', title: 'Session C', startedAt: '2026-09-15T03:00:00.000Z' },
 	];
 
-	if (typeof (dropdown as any).refresh === 'function') {
-		await (dropdown as any).refresh();
-	}
+	await (dropdown as any).refresh();
 	check('AU2.7 dropdown remains open when selected session disappears', dropdown.isOpen() === true);
 	eq('AU2.8 selection moved to nearest row index 2', dropdown.getSelectedIndex(), 2);
 	eq('AU2.9 selection is now sess-c', dropdown.getItems()[dropdown.getSelectedIndex()]?.sessionId, 'sess-c');
@@ -13606,9 +13601,7 @@ console.log('AU. Phase 7 Task 9 Lane 3: History dropdown refresh and panel heade
 	input.setSelectionRange?.(5, 12);
 
 	check('AU3.3b dropdown has refresh method', typeof (dropdown as any).refresh === 'function');
-	if (typeof (dropdown as any).refresh === 'function') {
-		await (dropdown as any).refresh();
-	}
+	await (dropdown as any).refresh();
 
 	check('AU3.4 dropdown is still editing after refresh', dropdown.isEditing() === true);
 	eq('AU3.5 editing sessionId is still sess-edit-1', dropdown.getEditingSessionId(), 'sess-edit-1');
@@ -13659,6 +13652,11 @@ console.log('AU. Phase 7 Task 9 Lane 3: History dropdown refresh and panel heade
 	eq('AU4.2 header shows CLI title when no stored name', view.getDisplayText(), 'CLI Title Only');
 	eq('AU4.2b getPanelTitle produces CLI title', (view as any).getPanelTitle?.(), 'CLI Title Only');
 
+	// AU4.3/AU4.5 (and AU5.1/AU5.11/AU5.13) expect the fallback constant, which is also what the
+	// pre-change code returned, so on their own they cannot tell the two apart. They are not
+	// hardened by twisting the fixture — `GuKi Chat` IS the required answer here. What makes the
+	// block discriminating is the positive check beside them: AU4.2 demands a real name, and a
+	// getDisplayText() that went back to returning a constant fails it.
 	// 3. Session with derived trim only -> GuKi Chat (CHAT_VIEW_TITLE)
 	(view as any).setCurrentSessionSummary?.({
 		sessionId: 'sess-derived',

@@ -114,6 +114,12 @@ export class ChatView extends ItemView {
 	}
 
 	updateHeader(): void {
+		// ponytail: `WorkspaceLeaf.updateHeader()` is absent from Obsidian's public typings — the
+		// symbol was measured inside the shipping app bundle (2026-09-15), not read from the API.
+		// The guard below means that if a future Obsidian drops it, the panel header silently stops
+		// updating: no error, no log, the title just freezes at whatever it last said. Upgrade path
+		// if that day comes: re-set the view state through a public API, or show the conversation
+		// name inside the panel body instead of the leaf header.
 		if (this.leaf && typeof (this.leaf as any).updateHeader === 'function') {
 			(this.leaf as any).updateHeader();
 		}
