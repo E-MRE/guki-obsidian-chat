@@ -8,6 +8,8 @@ import { DiskTranscriptLoader, type PagedTranscriptResult } from './disk-transcr
 import { translateTranscriptRecords, type TranslateOptions } from './transcript-translator';
 import type { ChatItem } from '../core/chat-state';
 
+import type { ConversationTitleStore } from './conversation-titles';
+
 export type { SessionSummary };
 
 /** Left abstract — v2 parses the record shapes found in transcripts;
@@ -82,13 +84,31 @@ export interface TranscriptStore {
 }
 
 export class NodeTranscriptStore implements TranscriptStore {
-	constructor(private readonly basePath?: string) {}
+	constructor(
+		private readonly basePath?: string,
+		private readonly titles?: ConversationTitleStore,
+	) {}
 
 	async listSessions(vaultPath: string): Promise<SessionSummary[]> {
 		const os = await nodeOs();
 		const path = await nodePath();
 		const projectsDir = this.basePath ?? path.join(os.homedir(), '.claude', 'projects', projectSlug(vaultPath));
-		return scanSessionsDir(projectsDir);
+		const summaries = await scanSessionsDir(projectsDir);
+
+		if (this.titles) {
+			for (const summary of summaries) {
+				const custom = this.titles.get(summary.sessionId);
+				if (custom !== undefined) {
+					summary.customTitle = custom;
+				}
+			}
+			if (summaries.length > 0) {
+				const scannedIds = summaries.map((s) => s.sessionId);
+				await this.titles.pruneTo(scannedIds);
+			}
+		}
+
+		return summaries;
 	}
 
 	async resolveSessionFilePath(sessionId: string, vaultPath?: string): Promise<string | null> {

@@ -152,8 +152,12 @@ import {
 	sanitizeDerivedTitle,
 	scanSessionsDir,
 	sessionDisplayTitle,
+	resolveSessionTitle,
+	panelTitleFor,
 	type SessionSummary,
+	type TitleSource,
 } from '../src/data/session-index';
+import { ConversationTitleStore, type ConversationTitleMap } from '../src/data/conversation-titles';
 import {
 	formatSessionDate,
 	HistoryDropdown,
@@ -12840,6 +12844,315 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 		eq('AQ.e8 wide main leaf has exactly one control (never zero)', wideControlsCount, 1);
 
 		await (view as any).onClose();
+	}
+}
+
+// AR: Phase 7 Task 9 Lane 1: Title data layer, precedence, and listSessions overlay
+{
+	console.log('AR. Phase 7 Task 9 Lane 1: Title data layer and listSessions overlay');
+
+	// --- AR1: ConversationTitleStore exact surface and semantics ---
+	{
+		let savedMap: ConversationTitleMap | null = null;
+		let saveCount = 0;
+		const mockSave = async (map: ConversationTitleMap) => {
+			savedMap = map;
+			saveCount++;
+		};
+
+		// Degradation of malformed initial data
+		const badStore1 = new ConversationTitleStore(null as any, mockSave);
+		eq('AR1.1 malformed null initial data degrades to empty snapshot', Object.keys(badStore1.snapshot()).length, 0);
+
+		const badStore2 = new ConversationTitleStore('not-an-object' as any, mockSave);
+		eq('AR1.2 malformed non-object initial data degrades to empty snapshot', Object.keys(badStore2.snapshot()).length, 0);
+
+		const badStore3 = new ConversationTitleStore({ 's1': { bad: true } } as any, mockSave);
+		eq('AR1.3 entries missing title degrade to empty', Object.keys(badStore3.snapshot()).length, 0);
+
+		// Basic get on empty store
+		const store = new ConversationTitleStore({}, mockSave);
+		eq('AR1.4 get returns undefined for non-existent session', store.get('unknown-session'), undefined);
+
+		// Set trims title and stamps updatedAt
+		const beforeSet = Date.now();
+		await store.set('session-1', '  User Given Name  ');
+		const afterSet = Date.now();
+
+		eq('AR1.5 get returns stored trimmed name', store.get('session-1'), 'User Given Name');
+		const snap = store.snapshot();
+		eq('AR1.6 snapshot contains stored entry', snap['session-1']?.title, 'User Given Name');
+		check('AR1.7 updatedAt is stamped with current time', (snap['session-1']?.updatedAt ?? 0) >= beforeSet && (snap['session-1']?.updatedAt ?? 0) <= afterSet);
+		eq('AR1.8 save callback was called once', saveCount, 1);
+		eq('AR1.9 save callback received current snapshot', savedMap?.['session-1']?.title, 'User Given Name');
+
+		// Snapshot is a defensive copy
+		if (snap['session-1']) {
+			snap['session-1'].title = 'Mutated Snapshot';
+		}
+		eq('AR1.10 mutating snapshot does not affect store', store.get('session-1'), 'User Given Name');
+
+		// Undo path: empty or whitespace-only title removes the entry
+		await store.set('session-1', '');
+		eq('AR1.11 setting empty string removes the entry', store.get('session-1'), undefined);
+		eq('AR1.12 save callback was called on removal', saveCount, 2);
+		eq('AR1.13 snapshot after empty set has no session-1', store.snapshot()['session-1'], undefined);
+
+		// Re-set, then whitespace-only undo
+		await store.set('session-1', 'Temp Title');
+		eq('AR1.14 entry re-added', store.get('session-1'), 'Temp Title');
+		await store.set('session-1', '   \t\n  ');
+		eq('AR1.15 setting whitespace-only string removes the entry', store.get('session-1'), undefined);
+
+		// Remove method
+		await store.set('session-2', 'Keep Me');
+		saveCount = 0;
+		await store.remove('session-2');
+		eq('AR1.16 remove method deletes entry', store.get('session-2'), undefined);
+		eq('AR1.17 remove calls save callback when entry was present', saveCount, 1);
+
+		saveCount = 0;
+		await store.remove('session-nonexistent');
+		eq('AR1.18 remove does not call save when nothing was deleted', saveCount, 0);
+
+		// PruneTo
+		await store.set('s-keep-1', 'Keep 1');
+		await store.set('s-keep-2', 'Keep 2');
+		await store.set('s-drop-1', 'Drop 1');
+		saveCount = 0;
+
+		const pruned = await store.pruneTo(['s-keep-1', 's-keep-2', 's-other']);
+		eq('AR1.19 pruneTo returns true when entries were dropped', pruned, true);
+		eq('AR1.20 dropped entry removed from store', store.get('s-drop-1'), undefined);
+		eq('AR1.21 kept entry 1 remains', store.get('s-keep-1'), 'Keep 1');
+		eq('AR1.22 kept entry 2 remains', store.get('s-keep-2'), 'Keep 2');
+		eq('AR1.23 pruneTo called save callback once', saveCount, 1);
+
+		saveCount = 0;
+		const prunedNothing = await store.pruneTo(['s-keep-1', 's-keep-2']);
+		eq('AR1.24 pruneTo returns false when nothing removed', prunedNothing, false);
+		eq('AR1.25 pruneTo does not call save when nothing changed', saveCount, 0);
+	}
+
+	// --- AR2: Precedence and helpers in session-index.ts ---
+	{
+		const summaryCustomAi: SessionSummary = {
+			sessionId: 's-c-ai',
+			customTitle: 'My Custom Name',
+			title: 'AI Given Title',
+			derivedTitle: 'Derived prompt text',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		};
+		const rCustomAi = resolveSessionTitle(summaryCustomAi);
+		eq('AR2.1 custom+ai precedence: custom wins text', rCustomAi.text, 'My Custom Name');
+		eq('AR2.2 custom+ai precedence: source is custom', rCustomAi.source, 'custom');
+		eq('AR2.3 panelTitleFor returns custom title', panelTitleFor(summaryCustomAi), 'My Custom Name');
+		const dtCustom = sessionDisplayTitle(summaryCustomAi);
+		eq('AR2.4 sessionDisplayTitle on custom returns text', dtCustom?.text, 'My Custom Name');
+		eq('AR2.5 sessionDisplayTitle on custom isDerived is false', dtCustom?.isDerived, false);
+
+		const summaryCustomDerived: SessionSummary = {
+			sessionId: 's-c-der',
+			customTitle: 'Renamed Project',
+			derivedTitle: 'First user prompt text',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		};
+		const rCustomDer = resolveSessionTitle(summaryCustomDerived);
+		eq('AR2.6 custom+derived precedence: custom wins text', rCustomDer.text, 'Renamed Project');
+		eq('AR2.7 custom+derived precedence: source is custom', rCustomDer.source, 'custom');
+		eq('AR2.8 panelTitleFor on custom+derived returns custom title', panelTitleFor(summaryCustomDerived), 'Renamed Project');
+
+		const summaryAiOnly: SessionSummary = {
+			sessionId: 's-ai',
+			title: 'Claude AI Generated Title',
+			derivedTitle: 'First message trim',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		};
+		const rAi = resolveSessionTitle(summaryAiOnly);
+		eq('AR2.9 ai-only precedence: ai title wins text', rAi.text, 'Claude AI Generated Title');
+		eq('AR2.10 ai-only precedence: source is ai', rAi.source, 'ai');
+		eq('AR2.11 panelTitleFor on ai returns ai title', panelTitleFor(summaryAiOnly), 'Claude AI Generated Title');
+		const dtAi = sessionDisplayTitle(summaryAiOnly);
+		eq('AR2.12 sessionDisplayTitle on ai returns text', dtAi?.text, 'Claude AI Generated Title');
+		eq('AR2.13 sessionDisplayTitle on ai isDerived is false', dtAi?.isDerived, false);
+
+		const summaryDerivedOnly: SessionSummary = {
+			sessionId: 's-der',
+			derivedTitle: 'Help me fix the compiler error',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		};
+		const rDer = resolveSessionTitle(summaryDerivedOnly);
+		eq('AR2.14 derived-only precedence: derived text wins', rDer.text, 'Help me fix the compiler error');
+		eq('AR2.15 derived-only precedence: source is derived', rDer.source, 'derived');
+		eq('AR2.16 panelTitleFor on derived returns null (never show trim in header)', panelTitleFor(summaryDerivedOnly), null);
+		const dtDer = sessionDisplayTitle(summaryDerivedOnly);
+		eq('AR2.17 sessionDisplayTitle on derived returns text', dtDer?.text, 'Help me fix the compiler error');
+		eq('AR2.18 sessionDisplayTitle on derived isDerived is true', dtDer?.isDerived, true);
+
+		const summaryNone: SessionSummary = {
+			sessionId: 's-none',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		};
+		const rNone = resolveSessionTitle(summaryNone);
+		eq('AR2.19 none precedence: text is Untitled session', rNone.text, 'Untitled session');
+		eq('AR2.20 none precedence: source is none', rNone.source, 'none');
+		eq('AR2.21 panelTitleFor on none returns null', panelTitleFor(summaryNone), null);
+		eq('AR2.22 panelTitleFor on null returns null', panelTitleFor(null), null);
+		eq('AR2.23 panelTitleFor on undefined returns null', panelTitleFor(undefined), null);
+		eq('AR2.24 sessionDisplayTitle on none returns null', sessionDisplayTitle(summaryNone), null);
+	}
+
+	// --- AR3: shapeSessionRow delegates to resolveSessionTitle ---
+	{
+		const rowCustom = shapeSessionRow({
+			sessionId: 's1',
+			customTitle: 'Manual Session Title',
+			title: 'AI Title',
+			derivedTitle: 'Trimmed prompt',
+			startedAt: '2026-09-01T10:00:00.000Z',
+			costUsd: 0.15,
+		});
+		eq('AR3.1 shapeSessionRow uses customTitle when present', rowCustom.title, 'Manual Session Title');
+		eq('AR3.2 shapeSessionRow isDerivedTitle is false for customTitle', rowCustom.isDerivedTitle, false);
+		check('AR3.3 derived trim is absent from row title', !rowCustom.title.includes('Trimmed prompt'));
+
+		const rowAi = shapeSessionRow({
+			sessionId: 's2',
+			title: 'AI Title',
+			derivedTitle: 'Trimmed prompt',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		});
+		eq('AR3.4 shapeSessionRow uses AI title when customTitle absent', rowAi.title, 'AI Title');
+		eq('AR3.5 shapeSessionRow isDerivedTitle is false for AI title', rowAi.isDerivedTitle, false);
+
+		const rowDerived = shapeSessionRow({
+			sessionId: 's3',
+			derivedTitle: 'Trimmed prompt',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		});
+		eq('AR3.6 shapeSessionRow uses derivedTitle when both custom and ai absent', rowDerived.title, 'Trimmed prompt');
+		eq('AR3.7 shapeSessionRow isDerivedTitle is true for derivedTitle', rowDerived.isDerivedTitle, true);
+
+		const rowNone = shapeSessionRow({
+			sessionId: 's4',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		});
+		eq('AR3.8 shapeSessionRow falls back to Untitled session', rowNone.title, 'Untitled session');
+		eq('AR3.9 shapeSessionRow isDerivedTitle is false for Untitled session', rowNone.isDerivedTitle, false);
+	}
+
+	// --- AR4: scanSessionsDir isolation and customTitle never set by scanner ---
+	{
+		const fixtureDir = mkdtempSync(join(tmpdir(), 'guki-ar-scan-'));
+		const s1File = join(fixtureDir, 'session-scan-1.jsonl');
+		writeFileSync(
+			s1File,
+			[
+				JSON.stringify({ type: 'user', timestamp: '2026-09-01T10:00:00.000Z', message: 'Hello world prompt' }),
+				JSON.stringify({ type: 'ai-title', aiTitle: 'Scanned AI Title' }),
+			].join('\n') + '\n',
+			'utf8',
+		);
+
+		const scanned = await scanSessionsDir(fixtureDir);
+		eq('AR4.1 scanned sessions count is 1', scanned.length, 1);
+		eq('AR4.2 scanned session title is aiTitle', scanned[0]?.title, 'Scanned AI Title');
+		eq('AR4.3 scanSessionsDir NEVER sets customTitle', scanned[0]?.customTitle, undefined);
+
+		rmSync(fixtureDir, { recursive: true, force: true });
+	}
+
+	// --- AR5: NodeTranscriptStore overlay and pruning semantics ---
+	{
+		const fixtureDir = mkdtempSync(join(tmpdir(), 'guki-ar-store-'));
+		const sLive1 = join(fixtureDir, 'live-1.jsonl');
+		const sLive2 = join(fixtureDir, 'live-2.jsonl');
+		writeFileSync(sLive1, JSON.stringify({ type: 'user', timestamp: '2026-09-01T10:00:00.000Z', message: 'First prompt' }) + '\n', 'utf8');
+		writeFileSync(sLive2, JSON.stringify({ type: 'user', timestamp: '2026-09-01T11:00:00.000Z', message: 'Second prompt' }) + '\n', 'utf8');
+
+		let saveCount = 0;
+		let lastSavedMap: ConversationTitleMap | null = null;
+		const mockSave = async (map: ConversationTitleMap) => {
+			saveCount++;
+			lastSavedMap = map;
+		};
+
+		const titleStore = new ConversationTitleStore(
+			{
+				'live-1': { title: 'Custom One', updatedAt: 1000 },
+				'dead-session': { title: 'Ghost Session', updatedAt: 2000 },
+			},
+			mockSave,
+		);
+
+		const store = new NodeTranscriptStore(fixtureDir, titleStore);
+		const list = await store.listSessions('dummy-vault');
+
+		eq('AR5.1 listSessions returned two scanned sessions', list.length, 2);
+		const live1Summary = list.find((s) => s.sessionId === 'live-1');
+		const live2Summary = list.find((s) => s.sessionId === 'live-2');
+		eq('AR5.2 live-1 has customTitle overlaid from store', live1Summary?.customTitle, 'Custom One');
+		eq('AR5.3 live-2 without customTitle has customTitle undefined', live2Summary?.customTitle, undefined);
+
+		// Pruning occurred on scan because dead-session was not in scanned sessions
+		eq('AR5.4 dead-session was pruned from titleStore', titleStore.get('dead-session'), undefined);
+		eq('AR5.5 live-1 survived in titleStore', titleStore.get('live-1'), 'Custom One');
+		eq('AR5.6 save callback called once on scan pruning dead entry', saveCount, 1);
+		eq('AR5.7 saved map does not contain dead-session', lastSavedMap?.['dead-session'], undefined);
+		eq('AR5.8 saved map contains live-1', lastSavedMap?.['live-1']?.title, 'Custom One');
+
+		// Prune safety invariant: scanning an empty directory MUST NOT prune titles!
+		const emptyDir = mkdtempSync(join(tmpdir(), 'guki-ar-empty-'));
+		saveCount = 0;
+		const emptyStore = new NodeTranscriptStore(emptyDir, titleStore);
+		const emptyList = await emptyStore.listSessions('dummy-vault');
+
+		eq('AR5.9 empty scan returned 0 sessions', emptyList.length, 0);
+		eq('AR5.10 prune safety invariant: save callback was NOT called on zero sessions scan', saveCount, 0);
+		eq('AR5.11 stored titles survive empty scan', titleStore.get('live-1'), 'Custom One');
+
+		rmSync(fixtureDir, { recursive: true, force: true });
+		rmSync(emptyDir, { recursive: true, force: true });
+	}
+
+	// --- AR6: Settings persistence through saveData in GukiChatPlugin ---
+	{
+		const plugin = new GukiChatPlugin(createMockPluginApp() as any, { dir: 'plugins/guki-chat' } as any);
+
+		let savedData: any = null;
+		plugin.loadData = async () => ({
+			claudeBinaryPath: '/custom/claude',
+			slashCommands: ['help', 'clear'],
+			permissionMode: 'plan',
+			conversationTitles: {
+				's-existing': { title: 'Existing Name', updatedAt: 12345 },
+			},
+		});
+		plugin.saveData = async (data: any) => {
+			savedData = data;
+		};
+
+		await plugin.onload();
+
+		// Invariant: whole settings object is preserved
+		eq('AR6.1 loadSettings restores conversationTitles', plugin.settings.conversationTitles?.['s-existing']?.title, 'Existing Name');
+		eq('AR6.2 loadSettings preserves claudeBinaryPath', plugin.settings.claudeBinaryPath, '/custom/claude');
+		eq('AR6.3 loadSettings preserves slashCommands', plugin.settings.slashCommands?.length, 2);
+
+		// Now simulate updating a title via titleStore save callback
+		const titleStore = (plugin as any).titleStore as ConversationTitleStore;
+		check('AR6.4 plugin created titleStore', titleStore !== undefined && titleStore !== null);
+
+		if (titleStore) {
+			await titleStore.set('s-new', 'Newly Added Title');
+			check('AR6.5 saveData was called with whole settings object', savedData !== null);
+			eq('AR6.6 saved data has newly added title', savedData?.conversationTitles?.['s-new']?.title, 'Newly Added Title');
+			eq('AR6.7 saved data preserves claudeBinaryPath', savedData?.claudeBinaryPath, '/custom/claude');
+			eq('AR6.8 saved data preserves slashCommands', savedData?.slashCommands?.length, 2);
+			eq('AR6.9 saved data preserves permissionMode', savedData?.permissionMode, 'plan');
+		}
+
+		plugin.onunload();
 	}
 }
 
