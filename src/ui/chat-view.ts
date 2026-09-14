@@ -17,6 +17,7 @@ import {
 	type ImageTriage,
 } from '../core/attachment-resolver';
 import type { Attachment } from '../core/attachments';
+import type { ChatState } from '../core/chat-state';
 import { formatModelName } from '../cli/events';
 import { decideAskUserQuestion } from '../core/ask-user-question';
 import type { SessionManager } from '../core/session-manager';
@@ -377,16 +378,7 @@ export class ChatView extends ItemView {
 	 * nothing more.
 	 */
 	private currentStatus(): ComposerStatus {
-		const state = this.session.state;
-		const quota = state.quotaSnapshot;
-		return {
-			model: state.model !== null ? formatModelName(state.model) : null,
-			contextPercent: state.contextPercent,
-			fiveHourPercent:
-				quota?.fiveHourUtilization !== undefined ? Math.round(quota.fiveHourUtilization * 100) : null,
-			sevenDayPercent:
-				quota?.sevenDayUtilization !== undefined ? Math.round(quota.sevenDayUtilization * 100) : null,
-		};
+		return currentStatus(this.session.state);
 	}
 
 	/**
@@ -446,4 +438,22 @@ export class ChatView extends ItemView {
 		this.rootEl.toggleClass('guki-narrow', width < NARROW_BREAKPOINT_PX);
 		this.rootEl.toggleClass('guki-wide', width >= NARROW_BREAKPOINT_PX);
 	}
+}
+
+/**
+ * Folds task 5's quota strip into the composer's status line (task 7) — one place for "model ·
+ * context % · 5h · 7d" rather than two elements both reporting on the session. Also carries the
+ * transient "Compacting conversation…" indicator when compaction is active (SPEC §2 F1, §3 R1).
+ */
+export function currentStatus(state: ChatState): ComposerStatus {
+	const quota = state.quotaSnapshot;
+	return {
+		compacting: state.compacting,
+		model: state.model !== null ? formatModelName(state.model) : null,
+		contextPercent: state.contextPercent,
+		fiveHourPercent:
+			quota?.fiveHourUtilization !== undefined ? Math.round(quota.fiveHourUtilization * 100) : null,
+		sevenDayPercent:
+			quota?.sevenDayUtilization !== undefined ? Math.round(quota.sevenDayUtilization * 100) : null,
+	};
 }
