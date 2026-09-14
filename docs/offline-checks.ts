@@ -13143,13 +13143,23 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 		const titleStore = (plugin as any).titleStore as ConversationTitleStore;
 		check('AR6.4 plugin created titleStore', titleStore !== undefined && titleStore !== null);
 
-		if (titleStore) {
-			await titleStore.set('s-new', 'Newly Added Title');
-			check('AR6.5 saveData was called with whole settings object', savedData !== null);
-			eq('AR6.6 saved data has newly added title', savedData?.conversationTitles?.['s-new']?.title, 'Newly Added Title');
-			eq('AR6.7 saved data preserves claudeBinaryPath', savedData?.claudeBinaryPath, '/custom/claude');
-			eq('AR6.8 saved data preserves slashCommands', savedData?.slashCommands?.length, 2);
-			eq('AR6.9 saved data preserves permissionMode', savedData?.permissionMode, 'plan');
+		// Deliberately NOT guarded by `if (titleStore)`: a check that skips itself when the thing
+		// it guards is missing proves nothing. If the wiring regresses, these must go red, not quiet.
+		await titleStore?.set('s-new', 'Newly Added Title');
+		check('AR6.5 saveData was called with whole settings object', savedData !== null);
+		eq('AR6.6 saved data has newly added title', savedData?.conversationTitles?.['s-new']?.title, 'Newly Added Title');
+		eq('AR6.7 saved data preserves claudeBinaryPath', savedData?.claudeBinaryPath, '/custom/claude');
+		eq('AR6.8 saved data preserves slashCommands', savedData?.slashCommands?.length, 2);
+		eq('AR6.9 saved data preserves permissionMode', savedData?.permissionMode, 'plan');
+
+		// A session id that collides with a JS object key must survive a snapshot round trip:
+		// `copy['__proto__'] = v` on a plain object sets the prototype instead of an own key.
+		{
+			const protoStore = new ConversationTitleStore(undefined, async () => {});
+			await protoStore.set('__proto__', 'Prototype Named Session');
+			const snap = protoStore.snapshot();
+			eq('AR6.10 snapshot keeps a __proto__ session id as an own key', Object.keys(snap).includes('__proto__'), true);
+			eq('AR6.11 snapshot survives JSON round trip for __proto__ id', JSON.parse(JSON.stringify(snap))['__proto__']?.title, 'Prototype Named Session');
 		}
 
 		plugin.onunload();
