@@ -233,6 +233,9 @@ export class ChatState {
 	/** The most recent turn's context percentage (`contextUsageFromResult`). Sticky across turns. */
 	private contextPct: number | null = null;
 
+	/** True while conversation compaction is running (SPEC §3 R1). */
+	private isCompacting = false;
+
 	get items(): readonly ChatItem[] {
 		return this.itemList;
 	}
@@ -264,6 +267,18 @@ export class ChatState {
 
 	setContextPercent(percent: number): void {
 		this.contextPct = percent;
+		this.emitChange();
+	}
+
+	get compacting(): boolean {
+		return this.isCompacting;
+	}
+
+	setCompacting(compacting: boolean): void {
+		if (this.isCompacting === compacting) {
+			return;
+		}
+		this.isCompacting = compacting;
 		this.emitChange();
 	}
 

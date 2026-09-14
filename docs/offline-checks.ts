@@ -95,6 +95,7 @@ import { toolPermissionBodyText, toolResultTitle, toolStatusText } from '../src/
 import { canRememberPermission, createPermissionCard, permissionDiff, rememberLabelText, shortenPathForLabel, type PermissionActions } from '../src/ui/permission-card';
 import { clearRememberedDecisions, DEFAULT_SETTINGS, formatRememberedDecision, removeRememberedDecision } from '../src/ui/settings-tab';
 import GukiChatPlugin from '../src/main';
+import { currentStatus } from '../src/ui/chat-view';
 import { renderQuotaBar } from '../src/ui/composer';
 import { formatTurnMeta, MessageList, withTurnMeta } from '../src/ui/message-list';
 import {
@@ -9812,6 +9813,629 @@ console.log('\nAG. Görev 7 Fix 3 — Structural accounting (FIX-A) and proporti
 		const s1 = parseSec(h1);
 		const s2 = parseSec(h2);
 		check('AG2.6: displayed segment durations sum to CLI total (43s + 7s = 50s)', s1 + s2 === 50, `got ${s1} + ${s2} = ${s1 + s2}`);
+	}
+}
+
+// --- AH. Görev 7b — Compacting conversation indicator (C1-C6) -------------
+
+console.log('\nAH. Görev 7b — Compacting conversation indicator (C1-C6)');
+{
+	// C1: Replay docs/capture-phase7b-compaction-status.jsonl through real reducer
+	const capture7b = readFileSync(join(process.cwd(), 'docs', 'capture-phase7b-compaction-status.jsonl'), 'utf8')
+		.split('\n')
+		.filter((l) => l.trim().length > 0);
+
+	const state = new ChatState();
+	const reducer = new StreamReducer(state);
+	let changeCount = 0;
+	state.subscribe(() => {
+		changeCount += 1;
+	});
+
+	const asst = state.addAssistantMessage();
+	reducer.beginTurn(asst);
+	changeCount = 0;
+
+	// Line 1: system/status status: "compacting"
+	const ev1 = parseStreamJsonLine(capture7b[0]!);
+	reducer.apply(ev1!);
+	eq('C1.1: after line 1, compacting flag is true', state.compacting, true);
+	eq('C1.1: state change emitted once on start', changeCount, 1);
+
+	// Line 2: second system/status status: "compacting" (idempotent)
+	const ev2 = parseStreamJsonLine(capture7b[1]!);
+	reducer.apply(ev2!);
+	eq('C1.2: after line 2, compacting flag is still true', state.compacting, true);
+	eq('C1.2: no extra state change emitted on duplicate compacting status', changeCount, 1);
+
+	// Line 3: system/status status: null, compact_result: "success"
+	const ev3 = parseStreamJsonLine(capture7b[2]!);
+	reducer.apply(ev3!);
+	eq('C1.3: after line 3 (compact_result), compacting flag is false', state.compacting, false);
+	eq('C1.3: state change emitted on clear', changeCount, 2);
+
+	// Line 4: system/init
+	const ev4 = parseStreamJsonLine(capture7b[3]!);
+	reducer.apply(ev4!);
+	eq('C1.4: after line 4 (init), compacting flag remains false', state.compacting, false);
+
+	// Line 5: system/compact_boundary
+	const ev5 = parseStreamJsonLine(capture7b[4]!);
+	reducer.apply(ev5!);
+	eq('C1.5: after line 5 (compact_boundary), compacting flag remains false', state.compacting, false);
+}
+
+{
+	// C2: status:"requesting" never sets the flag
+	const state = new ChatState();
+	const reducer = new StreamReducer(state);
+	const asst = state.addAssistantMessage();
+	reducer.beginTurn(asst);
+
+	const requestingEvent = parseStreamJsonLine(
+		'{"type":"system","subtype":"status","status":"requesting","session_id":"test-session","uuid":"req-1"}'
+	);
+	reducer.apply(requestingEvent!);
+	eq('C2: status:"requesting" never sets compacting flag', state.compacting, false);
+}
+
+{
+	// C3: compact_result with value other than "success" clears the flag
+	const state = new ChatState();
+	const reducer = new StreamReducer(state);
+	const asst = state.addAssistantMessage();
+	reducer.beginTurn(asst);
+
+	const startEv = parseStreamJsonLine(
+		'{"type":"system","subtype":"status","status":"compacting","session_id":"test-session","uuid":"start-1"}'
+	);
+	reducer.apply(startEv!);
+	check('C3 precondition: compacting is true', state.compacting === true);
+
+	const failEv = parseStreamJsonLine(
+		'{"type":"system","subtype":"status","status":null,"compact_result":"failed","session_id":"test-session","uuid":"end-fail"}'
+	);
+	reducer.apply(failEv!);
+	eq('C3: compact_result with non-success value clears flag', state.compacting, false);
+}
+
+{
+	// C4: result event clears the flag when no compact_result ever arrived
+	const state = new ChatState();
+	const reducer = new StreamReducer(state);
+	const asst = state.addAssistantMessage();
+	reducer.beginTurn(asst);
+
+	const startEv = parseStreamJsonLine(
+		'{"type":"system","subtype":"status","status":"compacting","session_id":"test-session","uuid":"start-2"}'
+	);
+	reducer.apply(startEv!);
+	check('C4 precondition: compacting is true', state.compacting === true);
+
+	const resultEv = parseStreamJsonLine(
+		'{"type":"result","subtype":"success","duration_ms":1000,"total_cost_usd":0.05}'
+	);
+	reducer.apply(resultEv!);
+	eq('C4: result event clears compacting flag', state.compacting, false);
+}
+
+{
+	// C5: failActiveTurn() clears the flag
+	const state = new ChatState();
+	const reducer = new StreamReducer(state);
+	const asst = state.addAssistantMessage();
+	reducer.beginTurn(asst);
+
+	const startEv = parseStreamJsonLine(
+		'{"type":"system","subtype":"status","status":"compacting","session_id":"test-session","uuid":"start-3"}'
+	);
+	reducer.apply(startEv!);
+	check('C5 precondition: compacting is true', state.compacting === true);
+
+	reducer.failActiveTurn('CLI process crashed');
+	eq('C5: failActiveTurn() clears compacting flag', state.compacting, false);
+}
+
+{
+	// F4: system/compact_boundary clears the flag
+	const state = new ChatState();
+	const reducer = new StreamReducer(state);
+	const asst = state.addAssistantMessage();
+	reducer.beginTurn(asst);
+
+	const startEv = parseStreamJsonLine(
+		'{"type":"system","subtype":"status","status":"compacting","session_id":"test-session","uuid":"start-4"}'
+	);
+	reducer.apply(startEv!);
+	check('F4 boundary precondition: compacting is true', state.compacting === true);
+
+	const boundaryEv = parseStreamJsonLine(
+		'{"type":"system","subtype":"compact_boundary","uuid":"bound-1"}'
+	);
+	reducer.apply(boundaryEv!);
+	eq('F4: system/compact_boundary clears compacting flag', state.compacting, false);
+}
+
+{
+	// C6: Chain check — observable output in Composer status line
+	const state = new ChatState();
+	const reducer = new StreamReducer(state);
+	const asst = state.addAssistantMessage();
+	reducer.beginTurn(asst);
+
+	const container = new FakeElement() as any;
+	const panel = new FakeElement() as any;
+	const dummyComp = {
+		registerDomEvent: (el: any, evt: string, cb: any) => {
+			if (el?.addEventListener) el.addEventListener(evt, cb);
+		},
+	} as any;
+
+	const composer = new Composer(container, panel, dummyComp, {
+		onSubmit: () => true,
+		onStop: () => {},
+		onDropped: () => {},
+		onPasted: () => false,
+		onAttachActiveNote: () => {},
+		onPickedFiles: () => {},
+	});
+
+	// Trigger compaction
+	const startEv = parseStreamJsonLine(
+		'{"type":"system","subtype":"status","status":"compacting","session_id":"test-session","uuid":"start-c6"}'
+	);
+	reducer.apply(startEv!);
+
+	// Production path: currentStatus(state) -> composer.setStatusLine
+	const statusCompacting = currentStatus(state);
+	composer.setStatusLine(statusCompacting);
+
+	const statusEl = container.querySelector('.guki-composer-status');
+	check('C6.1: status element exists in composer toolbar', statusEl !== null);
+	const textWhileCompacting = statusEl?.text?.trim() ?? '';
+	check(
+		'C6.2: rendered status text starts with "Compacting conversation…" while compacting',
+		textWhileCompacting.startsWith('Compacting conversation…'),
+		`got ${JSON.stringify(textWhileCompacting)}`,
+	);
+
+	// Compaction ends
+	const endEv = parseStreamJsonLine(
+		'{"type":"system","subtype":"status","status":null,"compact_result":"success","session_id":"test-session","uuid":"end-c6"}'
+	);
+	reducer.apply(endEv!);
+
+	const statusCleared = currentStatus(state);
+	composer.setStatusLine(statusCleared);
+
+	const textAfterCleared = statusEl?.text?.trim() ?? '';
+	check(
+		'C6.3: rendered status text does not contain "Compacting conversation…" once cleared',
+		!textAfterCleared.includes('Compacting conversation…'),
+		`got ${JSON.stringify(textAfterCleared)}`,
+	);
+}
+
+{
+	// Fix 1: streamed assistant content with NO end signal clears compacting flag
+	const state = new ChatState();
+	const reducer = new StreamReducer(state);
+	const asst = state.addAssistantMessage();
+	reducer.beginTurn(asst);
+
+	const container = new FakeElement() as any;
+	const panel = new FakeElement() as any;
+	const dummyComp = {
+		registerDomEvent: (el: any, evt: string, cb: any) => {
+			if (el?.addEventListener) el.addEventListener(evt, cb);
+		},
+	} as any;
+
+	const composer = new Composer(container, panel, dummyComp, {
+		onSubmit: () => true,
+		onStop: () => {},
+		onDropped: () => {},
+		onPasted: () => false,
+		onAttachActiveNote: () => {},
+		onPickedFiles: () => {},
+	});
+
+	state.subscribe(() => {
+		composer.setStatusLine(currentStatus(state));
+	});
+
+	// Compacting start signal
+	const compactingEv = parseStreamJsonLine(
+		'{"type":"system","subtype":"status","status":"compacting","session_id":"test-session","uuid":"start-fix1"}'
+	);
+	reducer.apply(compactingEv!);
+	check('Fix 1 precondition: compacting is true', state.compacting === true);
+
+	const statusEl = container.querySelector('.guki-composer-status');
+	const textBefore = statusEl?.text?.trim() ?? '';
+	check('Fix 1 precondition: status line shows compacting', textBefore.startsWith('Compacting conversation…'));
+
+	// Streamed assistant content arrives with NO end signal
+	const streamEv = parseStreamJsonLine(
+		'{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello world"}}}'
+	);
+	reducer.apply(streamEv!);
+
+	eq('Fix 1: compacting flag is false once content streams', state.compacting, false);
+	const textAfter = statusEl?.text?.trim() ?? '';
+	check(
+		'Fix 1: rendered status text no longer contains "Compacting conversation…"',
+		!textAfter.includes('Compacting conversation…'),
+		`got ${JSON.stringify(textAfter)}`,
+	);
+}
+
+{
+	// Fix 2: beginTurn directly clears compacting flag
+	const state = new ChatState();
+	const reducer = new StreamReducer(state);
+
+	state.setCompacting(true);
+	check('Fix 2 precondition: compacting is true', state.compacting === true);
+
+	const asst = state.addAssistantMessage();
+	reducer.beginTurn(asst);
+
+	eq('Fix 2: beginTurn directly clears compacting flag', state.compacting, false);
+}
+
+{
+	// Non-streamed assistant message (text, thinking) clears compacting flag and rendered composer status
+	const createRig = () => {
+		const state = new ChatState();
+		const reducer = new StreamReducer(state);
+		const asst = state.addAssistantMessage();
+		reducer.beginTurn(asst);
+
+		const container = new FakeElement() as any;
+		const panel = new FakeElement() as any;
+		const dummyComp = {
+			registerDomEvent: (el: any, evt: string, cb: any) => {
+				if (el?.addEventListener) el.addEventListener(evt, cb);
+			},
+		} as any;
+
+		const composer = new Composer(container, panel, dummyComp, {
+			onSubmit: () => true,
+			onStop: () => {},
+			onDropped: () => {},
+			onPasted: () => false,
+			onAttachActiveNote: () => {},
+			onPickedFiles: () => {},
+		});
+
+		state.subscribe(() => {
+			composer.setStatusLine(currentStatus(state));
+		});
+
+		return { state, reducer, container };
+	};
+
+	// Case 1: non-streamed text
+	{
+		const { state, reducer, container } = createRig();
+		const compactingEv = parseStreamJsonLine(
+			'{"type":"system","subtype":"status","status":"compacting","session_id":"test-session","uuid":"start-ns-text"}'
+		);
+		reducer.apply(compactingEv!);
+		check('Non-streamed text precondition: compacting is true', state.compacting === true);
+
+		const statusEl = container.querySelector('.guki-composer-status');
+		const textBefore = statusEl?.text?.trim() ?? '';
+		check('Non-streamed text precondition: status line shows compacting', textBefore.startsWith('Compacting conversation…'));
+
+		const asstEv = parseStreamJsonLine(
+			'{"type":"assistant","message":{"model":"claude-opus-5","id":"msg-ns-text","type":"message","role":"assistant","content":[{"type":"text","text":"Non-streamed answer"}]}}'
+		);
+		reducer.apply(asstEv!);
+
+		eq('Non-streamed text: compacting flag is false once assistant content arrives', state.compacting, false);
+		const textAfter = statusEl?.text?.trim() ?? '';
+		check(
+			'Non-streamed text: rendered status text no longer contains "Compacting conversation…"',
+			!textAfter.includes('Compacting conversation…'),
+			`got ${JSON.stringify(textAfter)}`,
+		);
+	}
+
+	// Case 2: non-streamed thinking
+	{
+		const { state, reducer, container } = createRig();
+		const compactingEv = parseStreamJsonLine(
+			'{"type":"system","subtype":"status","status":"compacting","session_id":"test-session","uuid":"start-ns-thinking"}'
+		);
+		reducer.apply(compactingEv!);
+		check('Non-streamed thinking precondition: compacting is true', state.compacting === true);
+
+		const statusEl = container.querySelector('.guki-composer-status');
+		const textBefore = statusEl?.text?.trim() ?? '';
+		check('Non-streamed thinking precondition: status line shows compacting', textBefore.startsWith('Compacting conversation…'));
+
+		const asstEv = parseStreamJsonLine(
+			'{"type":"assistant","message":{"model":"claude-opus-5","id":"msg-ns-thinking","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"Non-streamed thought"}]}}'
+		);
+		reducer.apply(asstEv!);
+
+		eq('Non-streamed thinking: compacting flag is false once assistant content arrives', state.compacting, false);
+		const textAfter = statusEl?.text?.trim() ?? '';
+		check(
+			'Non-streamed thinking: rendered status text no longer contains "Compacting conversation…"',
+			!textAfter.includes('Compacting conversation…'),
+			`got ${JSON.stringify(textAfter)}`,
+		);
+	}
+
+	// Case 3: non-streamed tool_use
+	{
+		const { state, reducer, container } = createRig();
+		const compactingEv = parseStreamJsonLine(
+			'{"type":"system","subtype":"status","status":"compacting","session_id":"test-session","uuid":"start-ns-tool"}'
+		);
+		reducer.apply(compactingEv!);
+		check('Non-streamed tool_use precondition: compacting is true', state.compacting === true);
+
+		const statusEl = container.querySelector('.guki-composer-status');
+		const textBefore = statusEl?.text?.trim() ?? '';
+		check('Non-streamed tool_use precondition: status line shows compacting', textBefore.startsWith('Compacting conversation…'));
+
+		let sawCompactingWhileContentEmitted = false;
+		const emittedStatuses: string[] = [];
+		state.subscribe(() => {
+			const text = statusEl?.text?.trim() ?? '';
+			emittedStatuses.push(text);
+			if (text.includes('Compacting conversation…')) {
+				sawCompactingWhileContentEmitted = true;
+			}
+		});
+
+		const asstEv = parseStreamJsonLine(
+			'{"type":"assistant","message":{"model":"claude-opus-5","id":"msg-ns-tool","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"ls -la"}}]}}'
+		);
+		reducer.apply(asstEv!);
+
+		eq('Non-streamed tool_use: compacting flag is false once assistant content arrives', state.compacting, false);
+		const textAfter = statusEl?.text?.trim() ?? '';
+		check(
+			'Non-streamed tool_use: rendered status text no longer contains "Compacting conversation…"',
+			!textAfter.includes('Compacting conversation…'),
+			`got ${JSON.stringify(textAfter)}`,
+		);
+		check(
+			'Non-streamed tool_use: rendered composer status text does not contain "Compacting conversation…" at any point a state change was emitted',
+			!sawCompactingWhileContentEmitted,
+			`saw compacting in emitted statuses: ${JSON.stringify(emittedStatuses)}`,
+		);
+	}
+}
+
+// --- C8: SPEC §7 R8 single-site clearing and non-clearing survival checks ---
+console.log('\nC8: Compacting indicator choke-point clearing and non-clearing survival (SPEC §7)');
+{
+	const createRig = () => {
+		const state = new ChatState();
+		const reducer = new StreamReducer(state);
+		const asst = state.addAssistantMessage();
+		reducer.beginTurn(asst);
+
+		const container = new FakeElement() as any;
+		const panel = new FakeElement() as any;
+		const dummyComp = {
+			registerDomEvent: (el: any, evt: string, cb: any) => {
+				if (el?.addEventListener) el.addEventListener(evt, cb);
+			},
+		} as any;
+
+		const composer = new Composer(container, panel, dummyComp, {
+			onSubmit: () => true,
+			onStop: () => {},
+			onDropped: () => {},
+			onPasted: () => false,
+			onAttachActiveNote: () => {},
+			onPickedFiles: () => {},
+		});
+
+		state.setCompacting(true);
+		composer.setStatusLine(currentStatus(state));
+
+		const statusEl = container.querySelector('.guki-composer-status');
+		const initialText = statusEl?.text?.trim() ?? '';
+		check('C8 precondition: status line shows compacting', initialText.startsWith('Compacting conversation…'));
+
+		const emittedStatuses: string[] = [];
+		let sawCompactingWhileEmitted = false;
+		state.subscribe(() => {
+			composer.setStatusLine(currentStatus(state));
+			const text = statusEl?.text?.trim() ?? '';
+			emittedStatuses.push(text);
+			if (text.includes('Compacting conversation…')) {
+				sawCompactingWhileEmitted = true;
+			}
+		});
+
+		return {
+			state,
+			reducer,
+			container,
+			composer,
+			statusEl,
+			emittedStatuses,
+			sawCompactingWhileEmitted: () => sawCompactingWhileEmitted,
+		};
+	};
+
+	// C8 survival 1: system with subtype status (status: "compacting")
+	{
+		const { state, reducer, statusEl } = createRig();
+		const statusEv = parseStreamJsonLine(
+			'{"type":"system","subtype":"status","status":"compacting","session_id":"214d9943-675d-4e9a-a7c7-b3dd55a2c363","uuid":"847bc4b3-1937-4315-b5bd-cb6086c7d99d"}'
+		);
+		reducer.apply(statusEv!);
+		eq('C8 survival: system/status does not clear compacting flag', state.compacting, true);
+		check('C8 survival: status line still shows compacting for system/status', (statusEl?.text?.trim() ?? '').startsWith('Compacting conversation…'));
+	}
+
+	// C8 survival 2: system with hook_* subtypes (hook_started, hook_progress, hook_response)
+	{
+		const { state, reducer, statusEl } = createRig();
+		const hookStartedEv = parseStreamJsonLine(
+			'{"type":"system","subtype":"hook_started","hook_id":"1edaf4d3-f84c-4624-9054-4a7a7290d51f","hook_name":"SessionStart:compact","hook_event":"SessionStart","uuid":"242f6f59-5fee-468a-8dea-ba9b772a82ad","session_id":"32fd66df-10d3-4db6-808d-5b62927361d1"}'
+		);
+		reducer.apply(hookStartedEv!);
+		eq('C8 survival: hook_started does not clear compacting flag', state.compacting, true);
+
+		const hookProgressEv = parseStreamJsonLine(
+			'{"type":"system","subtype":"hook_progress","hook_id":"b9abdbb5-1a4b-440d-ac3e-733fcaf9d309","hook_name":"SessionStart:compact","hook_event":"SessionStart","stdout":"","stderr":"","output":"","uuid":"ffd0e41f-bc39-47ef-b8e8-e2c91c4a9b15","session_id":"32fd66df-10d3-4db6-808d-5b62927361d1"}'
+		);
+		reducer.apply(hookProgressEv!);
+		eq('C8 survival: hook_progress does not clear compacting flag', state.compacting, true);
+
+		const hookResponseEv = parseStreamJsonLine(
+			'{"type":"system","subtype":"hook_response","hook_id":"42c85ceb-c7b0-4243-9441-e1bf74401b47","hook_name":"SessionStart:compact","hook_event":"SessionStart","output":"","stdout":"","stderr":"","exit_code":0,"outcome":"success","uuid":"19681699-5f18-4aea-9568-0879badc4434","session_id":"32fd66df-10d3-4db6-808d-5b62927361d1"}'
+		);
+		reducer.apply(hookResponseEv!);
+		eq('C8 survival: hook_response does not clear compacting flag', state.compacting, true);
+		check('C8 survival: status line still shows compacting for hook_*', (statusEl?.text?.trim() ?? '').startsWith('Compacting conversation…'));
+	}
+
+	// C8 survival 3: rate_limit_event
+	{
+		const { state, reducer, statusEl } = createRig();
+		const rateLimitEv = parseStreamJsonLine(
+			'{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1787927400,"rateLimitType":"five_hour","utilization":0.91,"isUsingOverage":false,"surpassedThreshold":0.9,"unifiedWindows":{"five_hour":{"utilization":0.91,"resetsAt":1787927400},"seven_day":{"utilization":0.88,"resetsAt":1788051600}}},"uuid":"02bb3a69-1375-42b3-bd88-d7c281dd0dc2","session_id":"32fd66df-10d3-4db6-808d-5b62927361d1"}'
+		);
+		reducer.apply(rateLimitEv!);
+		eq('C8 survival: rate_limit_event does not clear compacting flag', state.compacting, true);
+		check('C8 survival: status line still shows compacting for rate_limit_event', (statusEl?.text?.trim() ?? '').startsWith('Compacting conversation…'));
+	}
+
+	// C8 survival 4: control_response
+	{
+		const { state, reducer, statusEl } = createRig();
+		const controlRespEv = parseStreamJsonLine(
+			'{"type":"control_response","response":{"subtype":"success","request_id":"guki-int-1","response":{"still_queued":[]}}}'
+		);
+		reducer.apply(controlRespEv!);
+		eq('C8 survival: control_response does not clear compacting flag', state.compacting, true);
+		check('C8 survival: status line still shows compacting for control_response', (statusEl?.text?.trim() ?? '').startsWith('Compacting conversation…'));
+	}
+
+	// C8 clear 1: assistant
+	{
+		const { state, reducer, statusEl, sawCompactingWhileEmitted, emittedStatuses } = createRig();
+		const asstEv = parseStreamJsonLine(
+			'{"type":"assistant","message":{"model":"claude-opus-5","id":"msg-c8-asst","type":"message","role":"assistant","content":[{"type":"text","text":"Authoritative answer"}]}}'
+		);
+		reducer.apply(asstEv!);
+		eq('C8 clear assistant: compacting flag is false', state.compacting, false);
+		check(
+			'C8 clear assistant: rendered status text does not contain "Compacting conversation…" at any emitted state change',
+			!sawCompactingWhileEmitted(),
+			`saw compacting in emitted statuses: ${JSON.stringify(emittedStatuses)}`
+		);
+		check(
+			'C8 clear assistant: final rendered status text does not contain "Compacting conversation…"',
+			!(statusEl?.text?.trim() ?? '').includes('Compacting conversation…')
+		);
+	}
+
+	// C8 clear 2: stream_event (text content_block_start)
+	{
+		const { state, reducer, statusEl, sawCompactingWhileEmitted, emittedStatuses } = createRig();
+		const streamTextEv = parseStreamJsonLine(
+			'{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}'
+		);
+		reducer.apply(streamTextEv!);
+		eq('C8 clear stream_event text: compacting flag is false', state.compacting, false);
+		check(
+			'C8 clear stream_event text: rendered status text does not contain "Compacting conversation…" at any emitted state change',
+			!sawCompactingWhileEmitted(),
+			`saw compacting in emitted statuses: ${JSON.stringify(emittedStatuses)}`
+		);
+		check(
+			'C8 clear stream_event text: final rendered status text does not contain "Compacting conversation…"',
+			!(statusEl?.text?.trim() ?? '').includes('Compacting conversation…')
+		);
+	}
+
+	// C8 clear 3: stream_event (thinking content_block_start)
+	{
+		const { state, reducer, statusEl, sawCompactingWhileEmitted, emittedStatuses } = createRig();
+		const streamThinkingEv = parseStreamJsonLine(
+			'{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}}'
+		);
+		reducer.apply(streamThinkingEv!);
+		eq('C8 clear stream_event thinking: compacting flag is false', state.compacting, false);
+		check(
+			'C8 clear stream_event thinking: rendered status text does not contain "Compacting conversation…" at any emitted state change',
+			!sawCompactingWhileEmitted(),
+			`saw compacting in emitted statuses: ${JSON.stringify(emittedStatuses)}`
+		);
+		check(
+			'C8 clear stream_event thinking: final rendered status text does not contain "Compacting conversation…"',
+			!(statusEl?.text?.trim() ?? '').includes('Compacting conversation…')
+		);
+	}
+
+	// C8 clear 4: stream_event (tool_use content_block_start)
+	{
+		const { state, reducer, statusEl, sawCompactingWhileEmitted, emittedStatuses } = createRig();
+		const streamToolEv = parseStreamJsonLine(
+			'{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-c8-leak","name":"Bash","input":{}}}}'
+		);
+		reducer.apply(streamToolEv!);
+		eq('C8 clear stream_event tool_use: compacting flag is false', state.compacting, false);
+		check(
+			'C8 clear stream_event tool_use: rendered status text does not contain "Compacting conversation…" at any emitted state change',
+			!sawCompactingWhileEmitted(),
+			`saw compacting in emitted statuses: ${JSON.stringify(emittedStatuses)}`
+		);
+		check(
+			'C8 clear stream_event tool_use: final rendered status text does not contain "Compacting conversation…"',
+			!(statusEl?.text?.trim() ?? '').includes('Compacting conversation…')
+		);
+	}
+
+	// C8 clear 5: user
+	{
+		const { state, reducer, statusEl, sawCompactingWhileEmitted, emittedStatuses } = createRig();
+		const userEv = parseStreamJsonLine(
+			'{"type":"user","message":{"role":"user","content":[{"type":"text","text":"User message"}]}}'
+		);
+		reducer.apply(userEv!);
+		eq('C8 clear user: compacting flag is false', state.compacting, false);
+		check(
+			'C8 clear user: rendered status text does not contain "Compacting conversation…" at any emitted state change',
+			!sawCompactingWhileEmitted(),
+			`saw compacting in emitted statuses: ${JSON.stringify(emittedStatuses)}`
+		);
+		check(
+			'C8 clear user: final rendered status text does not contain "Compacting conversation…"',
+			!(statusEl?.text?.trim() ?? '').includes('Compacting conversation…')
+		);
+	}
+
+	// C8 clear 6: result
+	{
+		const { state, reducer, statusEl, sawCompactingWhileEmitted, emittedStatuses } = createRig();
+		const resultEv = parseStreamJsonLine(
+			'{"type":"result","subtype":"success","duration_ms":1000,"total_cost_usd":0.05}'
+		);
+		reducer.apply(resultEv!);
+		eq('C8 clear result: compacting flag is false', state.compacting, false);
+		check(
+			'C8 clear result: rendered status text does not contain "Compacting conversation…" at any emitted state change',
+			!sawCompactingWhileEmitted(),
+			`saw compacting in emitted statuses: ${JSON.stringify(emittedStatuses)}`
+		);
+		check(
+			'C8 clear result: final rendered status text does not contain "Compacting conversation…"',
+			!(statusEl?.text?.trim() ?? '').includes('Compacting conversation…')
+		);
 	}
 }
 
