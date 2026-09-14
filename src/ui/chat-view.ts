@@ -1,4 +1,4 @@
-import { ItemView, Notice, TFile, WorkspaceLeaf } from 'obsidian';
+import { ItemView, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import {
 	CHAT_VIEW_ICON,
 	CHAT_VIEW_TITLE,
@@ -31,6 +31,8 @@ export const HISTORY_PAGE_SIZE = 50;
 
 export class ChatView extends ItemView {
 	private rootEl: HTMLElement | null = null;
+	private headerEl: HTMLElement | null = null;
+	private historyTriggerEl: HTMLElement | null = null;
 	private resizeObserver: ResizeObserver | null = null;
 	private pendingMeasure: number | null = null;
 	private messageList: MessageList | null = null;
@@ -83,8 +85,24 @@ export class ChatView extends ItemView {
 		const root = this.contentEl.createDiv({ cls: 'guki-root' });
 		this.rootEl = root;
 
+		const header = root.createDiv({ cls: 'guki-header' });
+		this.headerEl = header;
+
+		this.historyTriggerEl = header.createEl('button', {
+			cls: 'clickable-icon guki-header-history-btn',
+			attr: {
+				'aria-label': 'Conversation history',
+				'type': 'button',
+			},
+		});
+		setIcon(this.historyTriggerEl, 'history');
+		this.registerDomEvent(this.historyTriggerEl, 'click', () => {
+			void this.historyDropdown?.toggle();
+		});
+
 		this.historyDropdown = new HistoryDropdown({
 			containerEl: root,
+			triggerEl: this.historyTriggerEl,
 			getSessions: async () => {
 				const paths = await this.session.vaultPaths();
 				return this.transcriptStore.listSessions(paths.root);
@@ -93,14 +111,12 @@ export class ChatView extends ItemView {
 				void this.handleSelectSession(sessionId);
 			},
 		});
+		this.historyDropdown.setTriggerEl(this.historyTriggerEl);
 
 		if (typeof this.addAction === 'function') {
 			this.historyActionEl = this.addAction('history', 'Conversation history', () => {
 				void this.historyDropdown?.toggle();
 			});
-			if (this.historyActionEl && this.historyDropdown) {
-				this.historyDropdown.setTriggerEl(this.historyActionEl);
-			}
 		}
 
 		// A positioned wrapper, not the scroller itself: the jump-to-bottom button has to stay put
@@ -242,6 +258,8 @@ export class ChatView extends ItemView {
 		this.historyDropdown?.destroy();
 		this.historyDropdown = null;
 		this.historyActionEl = null;
+		this.historyTriggerEl = null;
+		this.headerEl = null;
 		// Its own ResizeObserver is not covered by Component.register* either — see the composer's
 		// own comment on `destroy`.
 		this.composer?.destroy();
@@ -385,6 +403,10 @@ export class ChatView extends ItemView {
 
 	getHistoryDropdown(): HistoryDropdown | null {
 		return this.historyDropdown;
+	}
+
+	getHistoryTriggerEl(): HTMLElement | null {
+		return this.historyTriggerEl;
 	}
 
 	/**

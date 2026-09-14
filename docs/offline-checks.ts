@@ -12472,6 +12472,49 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	eq('AN4.20 calling handleLoadOlder at root leaves item count unchanged', state.items.length, 120);
 }
 
+// AO: In-panel conversation history control in panel container
+{
+	console.log('AO. In-panel conversation history control in panel container');
+
+	const container = new FakeElement() as any;
+	const app = new App();
+	const leaf = new WorkspaceLeaf(app, container);
+	const state = new ChatState();
+
+	const session = {
+		state,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
+		getSlashCommands: () => ['clear', 'help'],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const store = new NodeTranscriptStore(TRANSCRIPT_TEST_DIR);
+	const view = new ChatView(leaf, session, store);
+	await (view as any).onOpen();
+
+	const rootEl = container.querySelector('.guki-root');
+	const triggerEl = view.getHistoryTriggerEl();
+	const actionEl = container.querySelector('.view-action');
+
+	check('AO.1 history trigger element exists', triggerEl !== null && triggerEl !== undefined);
+	check('AO.2 trigger element is inside panel root container', rootEl !== null && triggerEl !== null && rootEl.contains(triggerEl) === true);
+	check('AO.3 trigger element is not the view-action chrome element', triggerEl !== null && triggerEl !== actionEl);
+
+	const dropdown = view.getHistoryDropdown();
+	check('AO.4 history dropdown initially closed', dropdown?.isOpen() === false);
+	triggerEl?.click();
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	check('AO.5 clicking in-panel trigger element toggles history dropdown open', dropdown?.isOpen() === true);
+
+	await (view as any).onClose();
+	check('AO.6 onClose cleans up history trigger reference', view.getHistoryTriggerEl() === null);
+}
+
 // Clean up temporary test files
 rmSync(TRANSCRIPT_TEST_DIR, { recursive: true, force: true });
 
