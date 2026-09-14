@@ -895,6 +895,24 @@
 	color: var(--text-on-accent);
 }
 
+/* --- load older --------------------------------------------------------- */
+.guki-load-older {
+	align-self: center;
+	margin: var(--size-4-2) auto;
+	padding: var(--size-4-1) var(--size-4-3);
+	border-radius: var(--radius-l);
+	font-size: var(--font-ui-smaller);
+	background-color: var(--background-secondary-alt);
+	color: var(--text-muted);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: var(--shadow-s);
+	cursor: var(--cursor);
+}
+
+.guki-load-older:hover {
+	color: var(--text-normal);
+}
+
 /* Notice: out-of-band, centred, no bubble tail. */
 .guki-message-notice {
 	align-self: center;

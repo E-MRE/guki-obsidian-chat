@@ -102,6 +102,8 @@ export class MessageList {
 	private readonly jumpEl: HTMLElement;
 	/** True when content arrived while the reader was scrolled away from the bottom. */
 	private missedContent = false;
+	/** When true, sync() does not scroll to bottom even if previously at bottom (used during prepend). */
+	private suppressScrollToBottom = false;
 
 	constructor(
 		private readonly app: App,
@@ -184,7 +186,7 @@ export class MessageList {
 			}
 		}
 
-		if (wasAtBottom) {
+		if (wasAtBottom && !this.suppressScrollToBottom) {
 			this.scrollToBottom();
 		} else if (changed) {
 			this.missedContent = true;
@@ -916,6 +918,18 @@ export class MessageList {
 		this.jumpEl.show();
 		this.jumpEl.toggleClass('guki-jump-new', this.missedContent);
 		this.jumpEl.setText(this.missedContent ? 'New reply ↓' : 'Jump to latest ↓');
+	}
+
+	getScrollEl(): HTMLElement {
+		return this.scrollEl;
+	}
+
+	getFirstMessageEl(): HTMLElement | null {
+		return this.scrollEl.querySelector('.guki-message');
+	}
+
+	setSuppressScrollToBottom(suppress: boolean): void {
+		this.suppressScrollToBottom = suppress;
 	}
 }
 

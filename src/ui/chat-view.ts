@@ -23,7 +23,7 @@ import { decideAskUserQuestion } from '../core/ask-user-question';
 import type { SessionManager } from '../core/session-manager';
 import { Composer, type ComposerStatus } from './composer';
 import { HistoryDropdown } from './history-dropdown';
-import { NodeTranscriptStore, type TranscriptStore } from '../data/transcript-store';
+import { NodeTranscriptStore, type SessionPage, type TranscriptStore } from '../data/transcript-store';
 import { MessageList } from './message-list';
 
 /** Page size for historical conversation paging (UI layer policy, Görev 8). */
@@ -40,6 +40,8 @@ export class ChatView extends ItemView {
 	private transcriptStore: TranscriptStore = new NodeTranscriptStore();
 	private unsubscribe: (() => void) | null = null;
 	private currentSessionId: string | null = null;
+	private currentPage: SessionPage | null = null;
+	private loadOlderEl: HTMLElement | null = null;
 
 	/**
 	 * Seam for selecting a past session (Phase 8 Görev 8).
@@ -252,6 +254,11 @@ export class ChatView extends ItemView {
 			window.cancelAnimationFrame(this.pendingMeasure);
 			this.pendingMeasure = null;
 		}
+		if (this.loadOlderEl) {
+			this.loadOlderEl.remove();
+			this.loadOlderEl = null;
+		}
+		this.currentPage = null;
 		this.currentSessionId = null;
 		this.rootEl = null;
 		this.contentEl.empty();
@@ -265,9 +272,16 @@ export class ChatView extends ItemView {
 
 		this.onSessionSelected?.(sessionId);
 
+		if (this.loadOlderEl) {
+			this.loadOlderEl.remove();
+			this.loadOlderEl = null;
+		}
+		this.currentPage = null;
+
 		try {
 			const paths = await this.session.vaultPaths();
 			const page = await this.transcriptStore.readSession(sessionId, paths?.root, { count: HISTORY_PAGE_SIZE });
+			this.currentPage = page;
 			if (page.length === 0) {
 				this.session.state.setItems([]);
 				this.session.state.addNotice('info', 'This conversation has no messages to display.');
@@ -275,13 +289,85 @@ export class ChatView extends ItemView {
 				this.session.state.setItems(page);
 			}
 			this.currentSessionId = sessionId;
+			this.updateLoadOlderControl();
 			this.messageList?.scrollToBottom();
 		} catch (err: unknown) {
 			this.session.state.setItems([]);
+			this.currentPage = null;
+			this.updateLoadOlderControl();
 			const msg = err instanceof Error ? err.message : String(err);
 			this.session.state.addNotice('error', 'Could not load conversation.', msg);
 			this.currentSessionId = sessionId;
 			this.messageList?.scrollToBottom();
+		}
+	}
+
+	getLoadOlderEl(): HTMLElement | null {
+		return this.loadOlderEl;
+	}
+
+	private updateLoadOlderControl(): void {
+		const scrollEl = this.messageList?.getScrollEl();
+		if (!scrollEl) {
+			return;
+		}
+
+		if (this.currentPage?.hasMoreBefore) {
+			if (!this.loadOlderEl) {
+				this.loadOlderEl = scrollEl.createEl('button', {
+					cls: 'guki-load-older',
+					text: 'Load older messages',
+				});
+				this.registerDomEvent(this.loadOlderEl, 'click', () => {
+					void this.handleLoadOlder();
+				});
+			}
+			if (scrollEl.children[0] !== this.loadOlderEl) {
+				scrollEl.insertBefore(this.loadOlderEl, scrollEl.children[0] ?? null);
+			}
+		} else {
+			if (this.loadOlderEl) {
+				this.loadOlderEl.remove();
+				this.loadOlderEl = null;
+			}
+		}
+	}
+
+	async handleLoadOlder(): Promise<void> {
+		if (!this.currentPage || !this.currentPage.hasMoreBefore) {
+			return;
+		}
+
+		const scrollEl = this.messageList?.getScrollEl();
+		const prevScrollTop = scrollEl?.scrollTop ?? 0;
+		const prevScrollHeight = scrollEl?.scrollHeight ?? 0;
+		const anchorEl = this.messageList?.getFirstMessageEl();
+
+		try {
+			const olderPage = await this.currentPage.loadBefore(HISTORY_PAGE_SIZE);
+			this.currentPage = olderPage;
+
+			this.messageList?.setSuppressScrollToBottom(true);
+			try {
+				this.session.state.prependItems(olderPage);
+			} finally {
+				this.messageList?.setSuppressScrollToBottom(false);
+			}
+
+			if (scrollEl) {
+				const deltaHeight = scrollEl.scrollHeight - prevScrollHeight;
+				if (deltaHeight > 0) {
+					scrollEl.scrollTop = prevScrollTop + deltaHeight;
+				}
+			}
+			if (anchorEl && typeof anchorEl.scrollIntoView === 'function') {
+				anchorEl.scrollIntoView();
+			}
+
+			this.updateLoadOlderControl();
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			this.session.state.addNotice('error', 'Could not load older messages.', msg);
 		}
 	}
 
