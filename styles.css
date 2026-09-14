@@ -33,12 +33,52 @@
 }
 
 .guki-root {
+	position: relative;
 	display: flex;
 	flex-direction: column;
 	height: 100%;
 	min-height: 0;
 	gap: var(--size-4-3);
 	padding: var(--size-4-4);
+}
+
+/* --- header row --------------------------------------------------------- */
+
+.guki-header {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	flex-shrink: 0;
+	min-height: var(--size-4-6);
+}
+
+/* Single icon-sized control aligned to the top corner, matching Obsidian's native clickable-icon */
+.guki-header-history-btn.guki-header-history-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: var(--size-4-6);
+	height: var(--size-4-6);
+	padding: 0;
+	margin: 0;
+	background-color: transparent;
+	box-shadow: none;
+	border: none;
+	border-radius: var(--radius-s);
+	color: var(--icon-color, var(--text-muted));
+	cursor: var(--cursor);
+	-webkit-user-select: none;
+	user-select: none;
+}
+
+.guki-header-history-btn:hover {
+	color: var(--icon-color-hover, var(--text-normal));
+	background-color: var(--background-modifier-hover);
+}
+
+.guki-header-history-btn svg {
+	width: var(--icon-s);
+	height: var(--icon-s);
 }
 
 /* --- message list ------------------------------------------------------- */
@@ -1779,7 +1819,7 @@
 
 .guki-history-dropdown {
 	position: absolute;
-	top: var(--size-4-4);
+	top: calc(var(--size-4-4) + var(--size-4-6) + var(--size-2-1));
 	right: var(--size-4-4);
 	left: var(--size-4-4);
 	max-height: 320px;
