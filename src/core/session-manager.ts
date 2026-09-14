@@ -61,6 +61,7 @@ export class SessionManager {
 	private disposed = false;
 	private interruptCount = 0;
 	private vaultPathsPromise: Promise<VaultPaths> | null = null;
+	private resumeSessionId: string | null = null;
 
 	/**
 	 * Set when the panel must stop accepting input, with the reason shown in the composer.
@@ -155,6 +156,37 @@ export class SessionManager {
 	 */
 	setClaudeBinaryOverride(path: string): void {
 		this.claudeBinaryOverride = path;
+	}
+
+	getResumeSessionId(): string | null {
+		return this.resumeSessionId;
+	}
+
+	/**
+	 * Switches the active conversation to a historical session (or resets to fresh if null).
+	 *
+	 * Shuts down any running CLI process so it does not continue the old conversation.
+	 * Cancels any in-flight turn and purges the turn queue so messages cannot leak across sessions.
+	 * Records the session ID to be passed as `--resume <sessionId>` on the next spawned process.
+	 * Spawning is deferred until the first message is sent.
+	 */
+	switchConversation(sessionId: string | null): void {
+		if (this.disposed) {
+			return;
+		}
+		this.broker.cancelPending('The conversation was switched.');
+		if (this.reducer.hasActiveTurn()) {
+			this.reducer.failActiveTurn('The conversation was switched.');
+		}
+		this.cancelQueuedTurns();
+		this.queue.length = 0;
+
+		if (this.process) {
+			this.process.stop();
+			this.process = null;
+		}
+
+		this.resumeSessionId = sessionId;
 	}
 
 	/** Called by the permission card. `requestId` comes off the `PermissionItem`. */
@@ -447,10 +479,16 @@ export class SessionManager {
 			return false;
 		}
 
+		const extraArgs = [...this.broker.cliArgs];
+		if (this.resumeSessionId !== null) {
+			extraArgs.push('--resume', this.resumeSessionId);
+			this.resumeSessionId = null;
+		}
+
 		const claude = new ClaudeProcess({
 			binaryPath,
 			cwd: vaultPath,
-			extraArgs: this.broker.cliArgs,
+			extraArgs,
 			callbacks: {
 				onEvent: (event: StreamJsonEvent) => this.reducer.apply(event),
 				onUnparsedLine: (line: string) => {
@@ -559,6 +597,7 @@ export class SessionManager {
 	 */
 	dispose(): void {
 		this.disposed = true;
+		this.resumeSessionId = null;
 		this.queue.length = 0;
 		this.process?.stop();
 		this.process = null;
