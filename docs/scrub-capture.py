@@ -240,8 +240,9 @@ def main(argv):
 	patterns = get_host_patterns()
 	dirty = False
 	for path in paths:
-		# If path is inside a git repo and ignored, skip it during check unless --include-ignored
+		# If path is inside a git repo and ignored, report as skipped during check unless --include-ignored
 		if check_only and not include_ignored and is_gitignored(path):
+			print(f'{path}: skipped')
 			continue
 
 		try:

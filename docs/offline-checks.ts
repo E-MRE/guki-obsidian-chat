@@ -56,7 +56,7 @@
  * U.  Phase 7 task 3 round A: permission model security floor (.obsidian protection and
  *     Unicode path normalisation).
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createConnection, createServer } from 'node:net';
@@ -143,7 +143,23 @@ import {
 import { absolutePathForFile } from '../src/cli/node-api';
 import { Composer, pasteBelongsToComposer, type ComposerOptions } from '../src/ui/composer';
 import { filterVaultFiles, insertItem, type DropdownItem, type TriggerMatch } from '../src/ui/composer-dropdown';
-import { projectSlug, scanSessionsDir } from '../src/data/session-index';
+import {
+	extractUserPromptText,
+	isExplicitHumanUser,
+	isSyntheticUser,
+	MAX_DERIVED_TITLE_LENGTH,
+	projectSlug,
+	sanitizeDerivedTitle,
+	scanSessionsDir,
+	sessionDisplayTitle,
+	type SessionSummary,
+} from '../src/data/session-index';
+import {
+	formatSessionDate,
+	HistoryDropdown,
+	shapeSessionRow,
+	type HistoryRowItem,
+} from '../src/ui/history-dropdown';
 import { NodeTranscriptStore } from '../src/data/transcript-store';
 import { FileSystemAdapter, TFile } from 'obsidian';
 import { parseAskUserQuestionInput, decideAskUserQuestion } from '../src/core/ask-user-question';
@@ -10739,6 +10755,549 @@ const TRANSCRIPT_TEST_DIR = mkdtempSync(join(tmpdir(), 'guki-transcript-checks-'
 		allPagedUuids.join(','),
 		'msg-0,msg-1,msg-2,msg-3,msg-4,msg-5,msg-6,msg-7,msg-8,msg-9',
 	);
+}
+
+// --- AJ. Görev 8: Title fallback, history list UI, and scrub gitignore reporting ---
+
+console.log('\nAJ. Görev 8: Title fallback, history list UI, and scrub gitignore reporting');
+
+// AJ1. Title fallback & semantic honesty in session-index
+{
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-title-fallback-')));
+
+	// File 1: ai-title present wins over user prompt
+	writeFileSync(
+		join(dir, 'session-ai-title-wins.jsonl'),
+		[
+			JSON.stringify({ type: 'user', timestamp: '2026-09-01T10:00:00.000Z', message: { role: 'user', content: 'What is the speed of light?' } }),
+			JSON.stringify({ type: 'ai-title', aiTitle: 'Light Speed Calculation', sessionId: 'session-ai-title-wins' }),
+			'',
+		].join('\n'),
+	);
+
+	// File 2: ai-title absent -> derived from first user text (string form)
+	writeFileSync(
+		join(dir, 'session-derived-string.jsonl'),
+		[
+			JSON.stringify({ type: 'user', timestamp: '2026-09-01T11:00:00.000Z', message: { role: 'user', content: 'Fix the authentication bug' } }),
+			'',
+		].join('\n'),
+	);
+
+	// File 3: content-block array form with text block and non-text image block
+	writeFileSync(
+		join(dir, 'session-array-blocks.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T12:00:00.000Z',
+				message: {
+					role: 'user',
+					content: [
+						{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'abcd' } },
+						{ type: 'text', text: 'Explain the architecture diagram' },
+					],
+				},
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File 4: non-human/synthetic first message handled: synthetic first message ignored in favor of human message
+	writeFileSync(
+		join(dir, 'session-synthetic-first.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T13:00:00.000Z',
+				origin: { kind: 'synthetic' },
+				message: { role: 'user', content: 'Injected system prompt' },
+			}),
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T13:00:05.000Z',
+				origin: { kind: 'human' },
+				promptSource: 'typed',
+				message: { role: 'user', content: 'Real human question' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File 5: session where all messages are synthetic / tool results -> no derived title
+	writeFileSync(
+		join(dir, 'session-all-synthetic.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T14:00:00.000Z',
+				toolUseResult: true,
+				message: { role: 'user', content: 'Tool execution output' },
+			}),
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T14:00:05.000Z',
+				origin: { kind: 'synthetic' },
+				message: { role: 'user', content: 'System message' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File 6: no usable text (empty or non-text only) -> no title
+	writeFileSync(
+		join(dir, 'session-no-text.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T15:00:00.000Z',
+				message: {
+					role: 'user',
+					content: [
+						{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'xyz' } },
+					],
+				},
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File 7: whitespace and newline collapsing
+	writeFileSync(
+		join(dir, 'session-whitespace.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T16:00:00.000Z',
+				message: { role: 'user', content: '   hello  \n\n\t world\r\n   from\t\tprompt   ' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File 8: over-length trimming (longer than 60 chars)
+	writeFileSync(
+		join(dir, 'session-overlength.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T17:00:00.000Z',
+				message: {
+					role: 'user',
+					content: 'This is an exceedingly long user prompt that contains far more than sixty characters and must be trimmed cleanly',
+				},
+			}),
+			'',
+		].join('\n'),
+	);
+
+	const sessions = await scanSessionsDir(dir);
+
+	const aiTitleWins = sessions.find((s) => s.sessionId === 'session-ai-title-wins');
+	eq('AJ1.1 ai-title present wins: title is set', aiTitleWins?.title, 'Light Speed Calculation');
+	eq('AJ1.2 ai-title present wins: derivedTitle is undefined', aiTitleWins?.derivedTitle, undefined);
+
+	const derivedStr = sessions.find((s) => s.sessionId === 'session-derived-string');
+	eq('AJ1.3 ai-title absent: title is undefined', derivedStr?.title, undefined);
+	eq('AJ1.4 ai-title absent: derivedTitle comes from first user text', derivedStr?.derivedTitle, 'Fix the authentication bug');
+
+	// Semantic honesty / real vs derived distinction
+	const dtReal = sessionDisplayTitle(aiTitleWins!);
+	eq('AJ1.5 real title distinction: isDerived is false', dtReal?.isDerived, false);
+	eq('AJ1.6 real title distinction: text is ai-title', dtReal?.text, 'Light Speed Calculation');
+	const dtDerived = sessionDisplayTitle(derivedStr!);
+	eq('AJ1.7 derived title distinction: isDerived is true', dtDerived?.isDerived, true);
+	eq('AJ1.8 derived title distinction: text is derivedTitle', dtDerived?.text, 'Fix the authentication bug');
+
+	const arrayBlocks = sessions.find((s) => s.sessionId === 'session-array-blocks');
+	eq('AJ1.9 content-block array form: non-text ignored, text extracted', arrayBlocks?.derivedTitle, 'Explain the architecture diagram');
+
+	const syntheticFirst = sessions.find((s) => s.sessionId === 'session-synthetic-first');
+	eq('AJ1.10 non-human synthetic first message skipped, human message preferred', syntheticFirst?.derivedTitle, 'Real human question');
+
+	const allSynthetic = sessions.find((s) => s.sessionId === 'session-all-synthetic');
+	eq('AJ1.11 all synthetic / tool records yield no derived title', allSynthetic?.derivedTitle, undefined);
+
+	const noText = sessions.find((s) => s.sessionId === 'session-no-text');
+	eq('AJ1.12 no usable text yields undefined title', noText?.title, undefined);
+	eq('AJ1.13 no usable text yields undefined derivedTitle', noText?.derivedTitle, undefined);
+	eq('AJ1.14 sessionDisplayTitle on no usable text returns null', sessionDisplayTitle(noText!), null);
+
+	const whitespace = sessions.find((s) => s.sessionId === 'session-whitespace');
+	eq('AJ1.15 whitespace and newlines collapsed to single spaces', whitespace?.derivedTitle, 'hello world from prompt');
+
+	const overlength = sessions.find((s) => s.sessionId === 'session-overlength');
+	eq('AJ1.16 over-length trimming: length is capped at MAX_DERIVED_TITLE_LENGTH', overlength?.derivedTitle?.length, MAX_DERIVED_TITLE_LENGTH);
+	eq('AJ1.17 over-length trimming: matches prefix slice of 60 characters', overlength?.derivedTitle, 'This is an exceedingly long user prompt that contains far mo');
+
+	rmSync(dir, { recursive: true, force: true });
+}
+
+// AJ2. History List UI data shaping & keyboard handling
+{
+	// 2.1 Data shaping: ordering preserved, missing cost handled
+	const summaryWithCost: SessionSummary = {
+		sessionId: 'sess-1',
+		title: 'Real Title',
+		startedAt: '2026-09-01T10:00:00.000Z',
+		costUsd: 0.1234,
+	};
+	const summaryWithoutCost: SessionSummary = {
+		sessionId: 'sess-2',
+		derivedTitle: 'Derived Title',
+		startedAt: '2026-08-30T15:30:00.000Z',
+	};
+	const summaryUntitled: SessionSummary = {
+		sessionId: 'sess-3',
+		startedAt: '2026-08-25T08:00:00.000Z',
+	};
+
+	const row1 = shapeSessionRow(summaryWithCost);
+	eq('AJ2.1 shapeSessionRow real title used', row1.title, 'Real Title');
+	eq('AJ2.2 shapeSessionRow real title isDerivedTitle is false', row1.isDerivedTitle, false);
+	eq('AJ2.3 shapeSessionRow cost formatted as $0.12', row1.costText, '$0.12');
+	eq('AJ2.4 shapeSessionRow date formatted', row1.dateText, formatSessionDate('2026-09-01T10:00:00.000Z'));
+
+	const row2 = shapeSessionRow(summaryWithoutCost);
+	eq('AJ2.5 shapeSessionRow derived title used', row2.title, 'Derived Title');
+	eq('AJ2.6 shapeSessionRow derived title isDerivedTitle is true', row2.isDerivedTitle, true);
+	eq('AJ2.7 shapeSessionRow missing cost is null', row2.costText, null);
+
+	const row3 = shapeSessionRow(summaryUntitled);
+	eq('AJ2.8 shapeSessionRow untitled fallback used when no title exists', row3.title, 'Untitled session');
+	eq('AJ2.9 shapeSessionRow untitled cost is null', row3.costText, null);
+
+	// 2.2 Ordering preserved in HistoryDropdown
+	const orderedSummaries = [summaryWithCost, summaryWithoutCost, summaryUntitled];
+	let selectedSessionId: string | null = null;
+	const container = new FakeElement() as any;
+	const dropdown = new HistoryDropdown({
+		containerEl: container,
+		getSessions: async () => orderedSummaries,
+		onSelectSession: (id) => {
+			selectedSessionId = id;
+		},
+	});
+
+	await dropdown.openDropdown();
+	eq('AJ2.10 dropdown isOpen is true after openDropdown', dropdown.isOpen(), true);
+	eq('AJ2.11 dropdown item count matches input summaries', dropdown.getItems().length, 3);
+	eq('AJ2.12 ordering preserved: first item is sess-1', dropdown.getItems()[0]?.sessionId, 'sess-1');
+	eq('AJ2.13 ordering preserved: second item is sess-2', dropdown.getItems()[1]?.sessionId, 'sess-2');
+	eq('AJ2.14 ordering preserved: third item is sess-3', dropdown.getItems()[2]?.sessionId, 'sess-3');
+
+	// Check DOM elements rendered
+	const dropdownEl = dropdown.getDropdownEl() as any;
+	const renderedRows = dropdownEl.children.filter((c: any) => c.hasClass('guki-history-item'));
+	eq('AJ2.15 rendered row count is 3', renderedRows.length, 3);
+
+	const costElPresent = renderedRows[0]?.querySelector('.guki-history-cost');
+	check('AJ2.16 first row has cost element', costElPresent !== null);
+	eq('AJ2.17 first row cost element displays $0.12', costElPresent?.text, '$0.12');
+
+	const costElAbsent = renderedRows[1]?.querySelector('.guki-history-cost');
+	check('AJ2.18 second row has NO cost element (clean visual, not broken)', costElAbsent === null);
+
+	// 2.3 Keyboard navigation: ArrowDown, ArrowUp, Escape, Enter
+	eq('AJ2.19 initial selectedIndex is 0', dropdown.getSelectedIndex(), 0);
+	dropdown.handleKeyDown({ key: 'ArrowDown', preventDefault: () => {} } as any);
+	eq('AJ2.20 ArrowDown advances selectedIndex to 1', dropdown.getSelectedIndex(), 1);
+	dropdown.handleKeyDown({ key: 'ArrowDown', preventDefault: () => {} } as any);
+	eq('AJ2.21 ArrowDown advances selectedIndex to 2', dropdown.getSelectedIndex(), 2);
+	dropdown.handleKeyDown({ key: 'ArrowUp', preventDefault: () => {} } as any);
+	eq('AJ2.22 ArrowUp moves selectedIndex back to 1', dropdown.getSelectedIndex(), 1);
+
+	dropdown.handleKeyDown({ key: 'Enter', preventDefault: () => {} } as any);
+	eq('AJ2.23 Enter emits selection of active row (sess-2)', selectedSessionId, 'sess-2');
+	eq('AJ2.24 Enter closes dropdown', dropdown.isOpen(), false);
+
+	// Escape closes
+	await dropdown.openDropdown();
+	eq('AJ2.25 reopened dropdown isOpen is true', dropdown.isOpen(), true);
+	dropdown.handleKeyDown({ key: 'Escape', preventDefault: () => {} } as any);
+	eq('AJ2.26 Escape closes dropdown', dropdown.isOpen(), false);
+
+	// 2.4 Empty list state
+	const emptyContainer = new FakeElement() as any;
+	const emptyDropdown = new HistoryDropdown({
+		containerEl: emptyContainer,
+		getSessions: async () => [],
+		onSelectSession: () => {},
+	});
+	await emptyDropdown.openDropdown();
+	eq('AJ2.27 empty list dropdown isOpen is true', emptyDropdown.isOpen(), true);
+	eq('AJ2.28 empty list has 0 items', emptyDropdown.getItems().length, 0);
+	const emptyEl = (emptyDropdown.getDropdownEl() as any).querySelector('.guki-history-empty');
+	check('AJ2.29 empty state element exists', emptyEl !== null);
+	eq('AJ2.30 empty state text explains vault has no past sessions', emptyEl?.text, 'No past conversations found in this vault.');
+	emptyDropdown.close();
+}
+
+// AJ3. scrub-capture.py gitignored file reporting and exit codes
+{
+	// 3.1 Gitignored file reported as skipped
+	const resIgnored = spawnSync('python3', ['docs/scrub-capture.py', '--check', 'docs/NEXT.md'], { encoding: 'utf8' });
+	eq('AJ3.1 gitignored file exits 0 during check', resIgnored.status, 0);
+	check('AJ3.2 gitignored file output explicitly reports skipped', resIgnored.stdout.includes('docs/NEXT.md: skipped'));
+
+	// 3.2 Clean non-ignored file exits 0 and reports clean
+	const resClean = spawnSync('python3', ['docs/scrub-capture.py', '--check', 'docs/capture-phase8-resume.jsonl'], { encoding: 'utf8' });
+	eq('AJ3.3 clean file exits 0 during check', resClean.status, 0);
+	check('AJ3.4 clean file output reports clean', resClean.stdout.includes('docs/capture-phase8-resume.jsonl: clean'));
+
+	// 3.3 Dirty file exits 1 and reports dirty
+	const tempDir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-scrub-')));
+	const dirtyCapturePath = join(tempDir, 'dirty.jsonl');
+	writeFileSync(
+		dirtyCapturePath,
+		JSON.stringify({
+			type: 'system',
+			subtype: 'init',
+			plugins: ['personal-plugin-leak'],
+		}) + '\n',
+	);
+	const resDirty = spawnSync('python3', ['docs/scrub-capture.py', '--check', dirtyCapturePath], { encoding: 'utf8' });
+	eq('AJ3.5 dirty file exits 1 during check', resDirty.status, 1);
+	check('AJ3.6 dirty file output reports DIRTY', resDirty.stdout.includes('DIRTY'));
+
+	// 3.4 Combined check with both a skipped file and a clean file exits 0
+	const resCombinedClean = spawnSync('python3', ['docs/scrub-capture.py', '--check', 'docs/NEXT.md', 'docs/capture-phase8-resume.jsonl'], { encoding: 'utf8' });
+	eq('AJ3.7 combined skipped and clean files exit 0', resCombinedClean.status, 0);
+	check('AJ3.8 combined output reports skipped for gitignored file', resCombinedClean.stdout.includes('docs/NEXT.md: skipped'));
+	check('AJ3.9 combined output reports clean for clean file', resCombinedClean.stdout.includes('docs/capture-phase8-resume.jsonl: clean'));
+
+	// 3.5 Combined check with a skipped file and a dirty file exits 1
+	const resCombinedDirty = spawnSync('python3', ['docs/scrub-capture.py', '--check', 'docs/NEXT.md', dirtyCapturePath], { encoding: 'utf8' });
+	eq('AJ3.10 combined skipped and dirty files exit 1', resCombinedDirty.status, 1);
+	check('AJ3.11 combined dirty output still reports skipped for gitignored file', resCombinedDirty.stdout.includes('docs/NEXT.md: skipped'));
+	check('AJ3.12 combined dirty output reports DIRTY for dirty file', resCombinedDirty.stdout.includes('DIRTY'));
+
+	rmSync(tempDir, { recursive: true, force: true });
+}
+
+// AJ4. Real-world record shape fixtures and defect regressions
+{
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-shapes-')));
+
+	// Defect 1 unit checks: toolUseResult presence (object, str, list variants)
+	// Real corpus measurement (21,059 user records across 1,194 sessions):
+	// toolUseResult is present on 17,151 records (15,496 dicts, 1,617 strs, 38 lists) and is NEVER boolean true.
+	const toolObjRecord: Record<string, unknown> = {
+		type: 'user',
+		toolUseResult: { stdout: 'invented tool output' },
+		message: { role: 'user', content: 'Invented tool output text' },
+	};
+	const toolStrRecord: Record<string, unknown> = {
+		type: 'user',
+		toolUseResult: 'invented tool error string',
+		message: { role: 'user', content: 'Invented tool error text' },
+	};
+	const toolListRecord: Record<string, unknown> = {
+		type: 'user',
+		toolUseResult: [{ text: 'invented list output' }],
+		message: { role: 'user', content: 'Invented list output text' },
+	};
+
+	eq('AJ4.1 defect 1: extractUserPromptText returns undefined for real object toolUseResult', extractUserPromptText(toolObjRecord), undefined);
+	eq('AJ4.2 defect 1: isSyntheticUser returns true for real object toolUseResult', isSyntheticUser(toolObjRecord), true);
+	eq('AJ4.3 defect 1: isExplicitHumanUser returns false for real object toolUseResult', isExplicitHumanUser(toolObjRecord), false);
+	eq('AJ4.4 extractUserPromptText returns undefined for string toolUseResult variant', extractUserPromptText(toolStrRecord), undefined);
+	eq('AJ4.5 extractUserPromptText returns undefined for list toolUseResult variant', extractUserPromptText(toolListRecord), undefined);
+
+	// Defect 3 unit checks: isMeta presence
+	// Real corpus measurement: isMeta is boolean true on 317 records, absent on 20,742 records.
+	const metaRecord: Record<string, unknown> = {
+		type: 'user',
+		isMeta: true,
+		message: { role: 'user', content: 'Invented skill instructions metadata prompt' },
+	};
+	eq('AJ4.6 defect 3: extractUserPromptText returns undefined for isMeta record', extractUserPromptText(metaRecord), undefined);
+	eq('AJ4.7 defect 3: isSyntheticUser returns true for isMeta record', isSyntheticUser(metaRecord), true);
+	eq('AJ4.8 defect 3: isExplicitHumanUser returns false for isMeta record', isExplicitHumanUser(metaRecord), false);
+
+	// Real-world origin variants
+	// Real corpus measurement: absent on 19,126, human on 1,737, task-notification on 191, auto-continuation on 5.
+	const originTaskRecord: Record<string, unknown> = {
+		type: 'user',
+		origin: { kind: 'task-notification' },
+		message: { role: 'user', content: 'Invented task completion notification' },
+	};
+	const originAutoRecord: Record<string, unknown> = {
+		type: 'user',
+		origin: { kind: 'auto-continuation' },
+		message: { role: 'user', content: 'Invented auto continuation prompt' },
+	};
+	eq('AJ4.9 origin variant: isSyntheticUser returns true for task-notification', isSyntheticUser(originTaskRecord), true);
+	eq('AJ4.10 origin variant: isSyntheticUser returns true for auto-continuation', isSyntheticUser(originAutoRecord), true);
+
+	// Real-world isCompactSummary variant
+	// Real corpus measurement: isCompactSummary is boolean true on 27 records.
+	const compactRecord: Record<string, unknown> = {
+		type: 'user',
+		isCompactSummary: true,
+		message: { role: 'user', content: 'Invented conversation compaction summary' },
+	};
+	eq('AJ4.11 compact variant: extractUserPromptText returns undefined', extractUserPromptText(compactRecord), undefined);
+	eq('AJ4.12 compact variant: isSyntheticUser returns true', isSyntheticUser(compactRecord), true);
+
+	// Real-world promptSource variants
+	// Real corpus measurement: typed (1,301), sdk (1,782), system (158), suggestion_accepted (18), queued (9), absent (17,791).
+	const typedRecord: Record<string, unknown> = {
+		type: 'user',
+		promptSource: 'typed',
+		message: { role: 'user', content: 'Invented typed query' },
+	};
+	const sdkRecord: Record<string, unknown> = {
+		type: 'user',
+		origin: { kind: 'human' },
+		promptSource: 'sdk',
+		message: { role: 'user', content: 'Invented sdk query' },
+	};
+	eq('AJ4.13 promptSource variant: isExplicitHumanUser returns true for typed', isExplicitHumanUser(typedRecord), true);
+	eq('AJ4.14 promptSource variant: isExplicitHumanUser returns true for sdk with human origin', isExplicitHumanUser(sdkRecord), true);
+
+	// Real-world content block variants (tool_result, text, image, document)
+	// Real corpus measurement: 17,151 tool_result, 1,344 text, 181 image, 4 document blocks.
+	const docBlockRecord: Record<string, unknown> = {
+		type: 'user',
+		message: {
+			role: 'user',
+			content: [
+				{ type: 'document', title: 'spec' },
+				{ type: 'text', text: 'Invented document analysis query' },
+			],
+		},
+	};
+	eq('AJ4.15 content block variant: document block ignored, text block extracted', extractUserPromptText(docBlockRecord), 'Invented document analysis query');
+
+	// Session-level files in dir:
+	// File A (Defect 1 session test): first turn is a toolUseResult object with text block; second turn is real human prompt
+	writeFileSync(
+		join(dir, 'session-defect1-tool-object.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T10:00:00.000Z',
+				toolUseResult: { stdout: 'invented compiler output', exitCode: 0 },
+				message: { role: 'user', content: 'invented compiler output' },
+			}),
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T10:00:05.000Z',
+				message: { role: 'user', content: 'Invented subsequent question after tool result' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File B (Defect 2 session test): Turn 1 has no origin metadata (candidate), Turn 2 has origin: { kind: "human" }
+	// Rule: once an acceptable first message is found, later messages cannot replace it.
+	writeFileSync(
+		join(dir, 'session-defect2-turn-order.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T11:00:00.000Z',
+				message: { role: 'user', content: 'Invented first question without origin metadata' },
+			}),
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T11:00:05.000Z',
+				origin: { kind: 'human' },
+				promptSource: 'typed',
+				message: { role: 'user', content: 'Invented second question with human origin' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File C (Defect 3 session test): Turn 1 isMeta: true, Turn 2 is real user question
+	writeFileSync(
+		join(dir, 'session-defect3-is-meta.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T12:00:00.000Z',
+				isMeta: true,
+				message: { role: 'user', content: 'Invented skill instructions metadata prompt' },
+			}),
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T12:00:05.000Z',
+				message: { role: 'user', content: 'Invented actual user question' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File D: Session where only user record is isMeta: true -> derived title is undefined
+	writeFileSync(
+		join(dir, 'session-only-meta.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T13:00:00.000Z',
+				isMeta: true,
+				message: { role: 'user', content: 'Invented metadata only prompt' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File E: Session where only user record has real toolUseResult object -> derived title is undefined
+	writeFileSync(
+		join(dir, 'session-only-tool-obj.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T14:00:00.000Z',
+				toolUseResult: { status: 'complete' },
+				message: { role: 'user', content: 'Invented solitary tool output' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File F: Session with task-notification origin followed by human prompt
+	writeFileSync(
+		join(dir, 'session-task-notification.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T15:00:00.000Z',
+				origin: { kind: 'task-notification' },
+				message: { role: 'user', content: 'Invented task notification body' },
+			}),
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T15:00:05.000Z',
+				message: { role: 'user', content: 'Invented user prompt after notification' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	const realShapeSessions = await scanSessionsDir(dir);
+
+	const sToolObj = realShapeSessions.find((s) => s.sessionId === 'session-defect1-tool-object');
+	eq('AJ4.16 defect 1: session skips object toolUseResult and derives title from subsequent prompt', sToolObj?.derivedTitle, 'Invented subsequent question after tool result');
+
+	const sOrder = realShapeSessions.find((s) => s.sessionId === 'session-defect2-turn-order');
+	eq('AJ4.17 defect 2: first usable prompt without origin is not replaced by later human turn', sOrder?.derivedTitle, 'Invented first question without origin metadata');
+
+	const sMeta = realShapeSessions.find((s) => s.sessionId === 'session-defect3-is-meta');
+	eq('AJ4.18 defect 3: session skips isMeta and derives title from subsequent prompt', sMeta?.derivedTitle, 'Invented actual user question');
+
+	const sOnlyMeta = realShapeSessions.find((s) => s.sessionId === 'session-only-meta');
+	eq('AJ4.19 defect 3: session with only isMeta records yields undefined derivedTitle', sOnlyMeta?.derivedTitle, undefined);
+
+	const sOnlyTool = realShapeSessions.find((s) => s.sessionId === 'session-only-tool-obj');
+	eq('AJ4.20 defect 1: session with only object toolUseResult yields undefined derivedTitle', sOnlyTool?.derivedTitle, undefined);
+
+	const sTaskNotif = realShapeSessions.find((s) => s.sessionId === 'session-task-notification');
+	eq('AJ4.21 task-notification skipped, subsequent user prompt derived', sTaskNotif?.derivedTitle, 'Invented user prompt after notification');
+
+	rmSync(dir, { recursive: true, force: true });
 }
 
 // Clean up temporary test files
