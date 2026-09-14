@@ -86,6 +86,8 @@ export class HistoryDropdown {
 	private editingSessionId: string | null = null;
 	private isCanceling = false;
 	private savePromise: Promise<void> | null = null;
+	/** Set when an edit is committed; swallows exactly the one Enter that did the committing. */
+	private suppressNextEnter = false;
 	private boundOnKeyDown: ((event: KeyboardEvent) => void) | null = null;
 	private boundOnDocClick: ((event: MouseEvent) => void) | null = null;
 
@@ -180,10 +182,10 @@ export class HistoryDropdown {
 	}
 
 	async commitEdit(): Promise<void> {
-		if (this.savePromise) {
-			return this.savePromise;
-		}
 		if (this.editingSessionId === null || this.isCanceling) {
+			// Nothing of our own to commit — but a save started by an earlier commit (a blur, say)
+			// may still be writing, and callers await this method to know it finished.
+			await this.savePromise;
 			return;
 		}
 		const sessionId = this.editingSessionId;
@@ -210,15 +212,24 @@ export class HistoryDropdown {
 		}
 		this.render();
 
-		this.savePromise = (async () => {
-			try {
-				await this.saveTitle(sessionId, trimmed);
-			} finally {
+		// Saves are serialised, never dropped: a rename committed while an earlier one is still
+		// writing used to return the in-flight promise and silently lose the second name
+		// (found by the V2 verification round; checks AT1.3/AT1.4 cover it).
+		// No save in flight: call straight through, so the common path keeps its original timing.
+		const chained = this.savePromise === null
+			? this.saveTitle(sessionId, trimmed)
+			: this.savePromise.catch(() => undefined).then(() => this.saveTitle(sessionId, trimmed));
+		this.savePromise = chained.finally(() => {
+			if (this.savePromise === chained) {
 				this.savePromise = null;
 			}
-		})();
+		});
 
-		return this.savePromise;
+		// Committing with Enter must not let the same keypress fall through to the list and open
+		// whatever row happens to be highlighted (checks AT2.2/AT2.3).
+		this.suppressNextEnter = true;
+
+		return chained;
 	}
 
 	private async saveTitle(sessionId: string, title: string): Promise<void> {
@@ -299,6 +310,7 @@ export class HistoryDropdown {
 			}
 			return false;
 		}
+		this.suppressNextEnter = event.key === 'Enter' ? this.suppressNextEnter : false;
 		if (event.key === 'ArrowDown') {
 			event.preventDefault?.();
 			this.selectNext();
@@ -311,6 +323,10 @@ export class HistoryDropdown {
 		}
 		if (event.key === 'Enter' || event.key === 'Tab') {
 			event.preventDefault?.();
+			if (this.suppressNextEnter) {
+				this.suppressNextEnter = false;
+				return true;
+			}
 			return this.selectCurrent();
 		}
 		if (event.key === 'Escape') {

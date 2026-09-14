@@ -13351,6 +13351,86 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	dropdown.close();
 }
 
+// ---------------------------------------------------------------------------
+// AT. Rename edge cases found by the V2 verification round (orchestrator fixes)
+// ---------------------------------------------------------------------------
+{
+	const mockSummaries: SessionSummary[] = [
+		{ sessionId: 'sess-at-1', title: 'CLI Title 1', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-at-2', title: 'CLI Title 2', startedAt: '2026-09-15T02:00:00.000Z' },
+	];
+
+	const settings = { conversationTitles: {} as Record<string, any> };
+	// A save that does not resolve until we let it: this is the whole point of the check —
+	// a second rename must not be swallowed while the first one is still writing.
+	let releaseFirstSave: (() => void) | null = null;
+	let saveCount = 0;
+	const titleStore = new ConversationTitleStore(
+		settings.conversationTitles,
+		async (map) => {
+			settings.conversationTitles = map;
+			saveCount += 1;
+			if (saveCount === 1) {
+				await new Promise<void>((resolve) => { releaseFirstSave = resolve; });
+			}
+		},
+	);
+
+	let selectedSessionId: string | null = null;
+	const container = new FakeElement() as any;
+	const dropdown = new HistoryDropdown({
+		containerEl: container,
+		getSessions: async () => mockSummaries,
+		onSelectSession: (id) => { selectedSessionId = id; },
+		titleStore,
+	});
+
+	await dropdown.openDropdown();
+	const dropdownEl = dropdown.getDropdownEl() as any;
+	const rows = () => dropdownEl.children.filter((c: any) => c.hasClass('guki-history-item'));
+
+	// AT1: renaming a second row while the first save is still in flight must not be dropped.
+	rows()[0]?.querySelector('.guki-history-rename-btn')?.click();
+	let input = dropdownEl.querySelector('input');
+	input.value = 'First New Name';
+	const firstCommit = dropdown.commitEdit();
+
+	rows()[1]?.querySelector('.guki-history-rename-btn')?.click();
+	input = dropdownEl.querySelector('input');
+	check('AT1.1 second row editor opened while the first save is in flight', input !== null);
+	input.value = 'Second New Name';
+	const secondCommit = dropdown.commitEdit();
+
+	// The save callback runs a microtask later, so the release handle does not exist yet.
+	while (releaseFirstSave === null) {
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+	}
+	releaseFirstSave();
+	await firstCommit;
+	await secondCommit;
+
+	eq('AT1.2 first rename survived', titleStore.get('sess-at-1'), 'First New Name');
+	eq('AT1.3 second rename was not dropped by the in-flight save', titleStore.get('sess-at-2'), 'Second New Name');
+	eq('AT1.4 both renames reached the store', saveCount, 2);
+
+	// AT2: Enter twice in a row must not fall through into opening whatever row is highlighted.
+	selectedSessionId = null;
+	rows()[1]?.querySelector('.guki-history-rename-btn')?.click();
+	input = dropdownEl.querySelector('input');
+	input.value = 'Renamed By Keyboard';
+	const enter = { key: 'Enter', preventDefault: () => {} } as unknown as KeyboardEvent;
+	dropdown.handleKeyDown(enter);
+	dropdown.handleKeyDown(enter);
+	await dropdown.commitEdit();
+	eq('AT2.1 the rename itself committed', titleStore.get('sess-at-2'), 'Renamed By Keyboard');
+	eq('AT2.2 the second Enter did not open a conversation', selectedSessionId, null);
+	check('AT2.3 the dropdown is still open after the second Enter', dropdown.isOpen() === true);
+
+	// AT3: an Enter that is not a leftover from committing still works normally.
+	dropdown.handleKeyDown(enter);
+	check('AT3.1 a later Enter still selects a conversation', selectedSessionId !== null);
+}
+
 // Clean up temporary test files
 rmSync(TRANSCRIPT_TEST_DIR, { recursive: true, force: true });
 
