@@ -279,6 +279,14 @@ export class WorkspaceLeaf extends Events {
 		this.pinned = false;
 		this.view = null;
 		this._root = this.app?.workspace?.rightSplit ?? null;
+		this.title = '';
+		this.headerUpdates = 0;
+	}
+	updateHeader() {
+		this.headerUpdates = (this.headerUpdates ?? 0) + 1;
+		if (this.view && typeof this.view.getDisplayText === 'function') {
+			this.title = this.view.getDisplayText();
+		}
 	}
 	getRoot() {
 		return this._root ?? this.app?.workspace?.rightSplit ?? null;
