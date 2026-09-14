@@ -13431,11 +13431,344 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	check('AT3.1 a later Enter still selects a conversation', selectedSessionId !== null);
 }
 
+// ---------------------------------------------------------------------------
+// AU. Phase 7 Task 9 Lane 3: History dropdown refresh and panel header title
+// ---------------------------------------------------------------------------
+console.log('AU. Phase 7 Task 9 Lane 3: History dropdown refresh and panel header title');
+
+// AU1: Dropdown closed vs open scan counts & on-disk title refresh (F1)
+{
+	let scanCount = 0;
+	let currentSummaries: SessionSummary[] = [
+		{ sessionId: 'sess-au-1', title: 'Old Disk Title', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-au-2', title: 'Session 2 Title', startedAt: '2026-09-15T02:00:00.000Z' },
+	];
+
+	const leafContainer = new FakeElement() as any;
+	const leafContent = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App() as any, leafContainer, leafContent);
+
+	const mockReducer = {
+		onTurnEnd: null as (() => void) | null,
+	};
+	const session = {
+		state: new ChatState(),
+		reducer: mockReducer,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const mockStore = {
+		listSessions: async () => {
+			scanCount++;
+			return [...currentSummaries];
+		},
+		readSession: async () => Object.assign([], { hasMoreBefore: false, loadBefore: async () => [] }) as any,
+		resumeArgs: () => [],
+	} as unknown as TranscriptStore;
+
+	const titleStore = new ConversationTitleStore({}, async () => {});
+	const view = new ChatView(leaf as any, session as any, mockStore, titleStore);
+	await (view as any).onOpen();
+
+	const dropdown = view.getHistoryDropdown()!;
+	check('AU1.0 dropdown exists', dropdown !== null);
+	eq('AU1.0b dropdown is closed initially', dropdown.isOpen(), false);
+
+	// Dropdown closed + turn ends -> scan count is exactly zero
+	scanCount = 0;
+	if (mockReducer.onTurnEnd) {
+		mockReducer.onTurnEnd();
+	} else if (typeof (view as any).handleTurnEnd === 'function') {
+		await (view as any).handleTurnEnd();
+	}
+	eq('AU1.1 dropdown closed + turn ends has scan count exactly zero', scanCount, 0);
+
+	// Open dropdown -> initial scan
+	await view.toggleHistory();
+	check('AU1.2a dropdown is open', dropdown.isOpen() === true);
+	const initialScanCount = scanCount;
+	check('AU1.2b initial open scanned once', initialScanCount >= 1);
+
+	// Row shows old title initially
+	const rows = () => dropdown.getDropdownEl().children.filter((c: any) => c.hasClass?.('guki-history-item'));
+	const firstTitleEl = rows()[0]?.querySelector('.guki-history-title');
+	eq('AU1.2c first row shows old title', firstTitleEl?.text, 'Old Disk Title');
+
+	// Simulate title changed on disk while dropdown is open
+	currentSummaries = [
+		{ sessionId: 'sess-au-1', title: 'New Disk Title Arrived', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-au-2', title: 'Session 2 Title', startedAt: '2026-09-15T02:00:00.000Z' },
+	];
+
+	// Turn ends while dropdown is open -> rescanned
+	const prevScanCount = scanCount;
+	if (mockReducer.onTurnEnd) {
+		mockReducer.onTurnEnd();
+	} else if (typeof (view as any).handleTurnEnd === 'function') {
+		await (view as any).handleTurnEnd();
+	}
+	await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+	eq('AU1.3 dropdown open + turn ends triggered rescan', scanCount, prevScanCount + 1);
+	const updatedTitleEl = rows()[0]?.querySelector('.guki-history-title');
+	eq('AU1.4 row title updated on disk shows new text', updatedTitleEl?.text, 'New Disk Title Arrived');
+
+	await (view as any).onClose();
+}
+
+// AU2: Refresh preserves keyboard-selected row by sessionId and handles missing session fallback
+{
+	let currentSummaries: SessionSummary[] = [
+		{ sessionId: 'sess-a', title: 'Session A', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-b', title: 'Session B', startedAt: '2026-09-15T02:00:00.000Z' },
+		{ sessionId: 'sess-c', title: 'Session C', startedAt: '2026-09-15T03:00:00.000Z' },
+	];
+
+	const dropdownContainer = new FakeElement() as any;
+	const dropdown = new HistoryDropdown({
+		containerEl: dropdownContainer,
+		getSessions: async () => [...currentSummaries],
+		onSelectSession: () => {},
+	});
+
+	await dropdown.openDropdown();
+	check('AU2.1 dropdown is open', dropdown.isOpen() === true);
+	eq('AU2.2 initial selected index is 0', dropdown.getSelectedIndex(), 0);
+
+	// Select Session B (ArrowDown)
+	dropdown.handleKeyDown({ key: 'ArrowDown', preventDefault: () => {} } as any);
+	eq('AU2.3 selected index is 1 (Session B)', dropdown.getSelectedIndex(), 1);
+	eq('AU2.4 selected item is sess-b', dropdown.getItems()[dropdown.getSelectedIndex()]?.sessionId, 'sess-b');
+
+	// Simulate new session arrived at the top: [sess-new, sess-a, sess-b, sess-c]
+	currentSummaries = [
+		{ sessionId: 'sess-new', title: 'Session New', startedAt: '2026-09-15T04:00:00.000Z' },
+		{ sessionId: 'sess-a', title: 'Session A', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-b', title: 'Session B', startedAt: '2026-09-15T02:00:00.000Z' },
+		{ sessionId: 'sess-c', title: 'Session C', startedAt: '2026-09-15T03:00:00.000Z' },
+	];
+
+	check('AU2.5a dropdown has refresh method', typeof (dropdown as any).refresh === 'function');
+	if (typeof (dropdown as any).refresh === 'function') {
+		await (dropdown as any).refresh();
+	}
+	eq('AU2.5 selected item after refresh is still sess-b', dropdown.getItems()[dropdown.getSelectedIndex()]?.sessionId, 'sess-b');
+	eq('AU2.6 selected index followed sess-b to 2', dropdown.getSelectedIndex(), 2);
+
+	// Simulate sess-b disappearing from the scan: [sess-new, sess-a, sess-c]
+	currentSummaries = [
+		{ sessionId: 'sess-new', title: 'Session New', startedAt: '2026-09-15T04:00:00.000Z' },
+		{ sessionId: 'sess-a', title: 'Session A', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-c', title: 'Session C', startedAt: '2026-09-15T03:00:00.000Z' },
+	];
+
+	if (typeof (dropdown as any).refresh === 'function') {
+		await (dropdown as any).refresh();
+	}
+	check('AU2.7 dropdown remains open when selected session disappears', dropdown.isOpen() === true);
+	eq('AU2.8 selection moved to nearest row index 2', dropdown.getSelectedIndex(), 2);
+	eq('AU2.9 selection is now sess-c', dropdown.getItems()[dropdown.getSelectedIndex()]?.sessionId, 'sess-c');
+
+	dropdown.close();
+}
+
+// AU3: Refresh preserves open rename editor and typed text
+{
+	let currentSummaries: SessionSummary[] = [
+		{ sessionId: 'sess-edit-1', title: 'Edit Session 1', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-edit-2', title: 'Edit Session 2', startedAt: '2026-09-15T02:00:00.000Z' },
+	];
+
+	const dropdownContainer = new FakeElement() as any;
+	const titleStore = new ConversationTitleStore({}, async () => {});
+	const dropdown = new HistoryDropdown({
+		containerEl: dropdownContainer,
+		getSessions: async () => [...currentSummaries],
+		onSelectSession: () => {},
+		titleStore,
+	});
+
+	await dropdown.openDropdown();
+	dropdown.startEditing('sess-edit-1');
+	check('AU3.1 dropdown is editing', dropdown.isEditing() === true);
+	eq('AU3.2 editing sessionId is sess-edit-1', dropdown.getEditingSessionId(), 'sess-edit-1');
+
+	const input = dropdown.getDropdownEl().querySelector('input') as any;
+	check('AU3.3 input element exists before refresh', input !== null);
+	input.value = 'User In-Progress Typing...';
+	input.setSelectionRange?.(5, 12);
+
+	check('AU3.3b dropdown has refresh method', typeof (dropdown as any).refresh === 'function');
+	if (typeof (dropdown as any).refresh === 'function') {
+		await (dropdown as any).refresh();
+	}
+
+	check('AU3.4 dropdown is still editing after refresh', dropdown.isEditing() === true);
+	eq('AU3.5 editing sessionId is still sess-edit-1', dropdown.getEditingSessionId(), 'sess-edit-1');
+	const inputAfter = dropdown.getDropdownEl().querySelector('input') as any;
+	check('AU3.6 input element exists after refresh', inputAfter !== null);
+	eq('AU3.7 typed text is intact after refresh', inputAfter?.value, 'User In-Progress Typing...');
+	eq('AU3.8 selectionStart preserved', inputAfter?.selectionStart, 5);
+	eq('AU3.9 selectionEnd preserved', inputAfter?.selectionEnd, 12);
+
+	dropdown.close();
+}
+
+// AU4: F3 Panel Header precedence and derived trim never produced on header path
+{
+	const leaf = new WorkspaceLeaf(new App() as any);
+	const session = {
+		state: new ChatState(),
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+	} as unknown as SessionManager;
+
+	const titleStore = new ConversationTitleStore(
+		{ 'sess-custom': { title: 'User Custom Name', updatedAt: 1000 } },
+		async () => {},
+	);
+	const view = new ChatView(leaf as any, session as any, undefined, titleStore);
+
+	check('AU4.0a view has setCurrentSessionSummary', typeof (view as any).setCurrentSessionSummary === 'function');
+	check('AU4.0b view has getPanelTitle', typeof (view as any).getPanelTitle === 'function');
+
+	// 1. Session with stored name + CLI title + derived trim -> stored name wins
+	(view as any).setCurrentSessionSummary?.({
+		sessionId: 'sess-custom',
+		title: 'CLI Title',
+		derivedTitle: 'Derived Prompt Trim',
+		startedAt: '2026-09-15T01:00:00.000Z',
+	});
+	eq('AU4.1 header shows stored custom name', view.getDisplayText(), 'User Custom Name');
+	eq('AU4.1b getPanelTitle produces stored name', (view as any).getPanelTitle?.(), 'User Custom Name');
+
+	// 2. Session with CLI title + derived trim (no stored name) -> CLI title wins
+	(view as any).setCurrentSessionSummary?.({
+		sessionId: 'sess-cli',
+		title: 'CLI Title Only',
+		derivedTitle: 'Derived Prompt Trim',
+		startedAt: '2026-09-15T02:00:00.000Z',
+	});
+	eq('AU4.2 header shows CLI title when no stored name', view.getDisplayText(), 'CLI Title Only');
+	eq('AU4.2b getPanelTitle produces CLI title', (view as any).getPanelTitle?.(), 'CLI Title Only');
+
+	// 3. Session with derived trim only -> GuKi Chat (CHAT_VIEW_TITLE)
+	(view as any).setCurrentSessionSummary?.({
+		sessionId: 'sess-derived',
+		derivedTitle: 'Derived Prompt Trim',
+		startedAt: '2026-09-15T03:00:00.000Z',
+	});
+	eq('AU4.3 header shows GuKi Chat when only label is derived trim', view.getDisplayText(), 'GuKi Chat');
+	eq('AU4.4 getPanelTitle returns null for derived trim (never produced on header path)', (view as any).getPanelTitle?.(), null);
+
+	// 4. Session with no label at all -> GuKi Chat
+	(view as any).setCurrentSessionSummary?.({
+		sessionId: 'sess-empty',
+		startedAt: '2026-09-15T04:00:00.000Z',
+	});
+	eq('AU4.5 header shows GuKi Chat when no label at all', view.getDisplayText(), 'GuKi Chat');
+	eq('AU4.6 getPanelTitle returns null when no label at all', (view as any).getPanelTitle?.(), null);
+}
+
+// AU5: Header updates after turn ends, rename save/remove, and switching conversations
+{
+	const leafContainer = new FakeElement() as any;
+	const leafContent = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App() as any, leafContainer, leafContent);
+	let currentSummaries: SessionSummary[] = [
+		{ sessionId: 'sess-named', title: 'Conversation Alpha', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-nameless', derivedTitle: 'Prompt trim only', startedAt: '2026-09-15T02:00:00.000Z' },
+	];
+
+	const mockReducer = {
+		onTurnEnd: null as (() => void) | null,
+	};
+	const session = {
+		state: new ChatState(),
+		reducer: mockReducer,
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		switchConversation: () => {},
+	} as unknown as SessionManager;
+
+	const mockStore = {
+		listSessions: async () => [...currentSummaries],
+		readSession: async () => Object.assign([], { hasMoreBefore: false, loadBefore: async () => [] }) as any,
+		resumeArgs: () => [],
+	} as unknown as TranscriptStore;
+
+	const settings = { conversationTitles: {} as Record<string, any> };
+	const titleStore = new ConversationTitleStore(settings.conversationTitles, async () => {});
+
+	const view = new ChatView(leaf as any, session as any, mockStore, titleStore);
+	await (view as any).onOpen();
+
+	const initialHeaderUpdates = (leaf as any).headerUpdates ?? 0;
+	eq('AU5.1 initial header is GuKi Chat', view.getDisplayText(), 'GuKi Chat');
+
+	// Switch conversation to sess-named
+	await view.handleSelectSession('sess-named');
+	eq('AU5.2 header updated to Conversation Alpha on conversation switch', view.getDisplayText(), 'Conversation Alpha');
+	eq('AU5.3 leaf title updated to Conversation Alpha', (leaf as any).title, 'Conversation Alpha');
+	check('AU5.4 header was re-asked after switching conversation', ((leaf as any).headerUpdates ?? 0) > initialHeaderUpdates);
+
+	// Rename conversation via dropdown save
+	const updatesBeforeRename = (leaf as any).headerUpdates ?? 0;
+	const dropdown = view.getHistoryDropdown()!;
+	await dropdown.openDropdown();
+	dropdown.startEditing('sess-named');
+	const renameInput = dropdown.getDropdownEl().querySelector('input') as any;
+	renameInput.value = 'Custom Alpha Renamed';
+	await dropdown.commitEdit();
+
+	eq('AU5.5 header updated to Custom Alpha Renamed after rename', view.getDisplayText(), 'Custom Alpha Renamed');
+	eq('AU5.6 leaf title updated to Custom Alpha Renamed', (leaf as any).title, 'Custom Alpha Renamed');
+	check('AU5.7 header was re-asked after rename save', ((leaf as any).headerUpdates ?? 0) > updatesBeforeRename);
+
+	// Remove rename (empty string)
+	const updatesBeforeRemove = (leaf as any).headerUpdates ?? 0;
+	dropdown.startEditing('sess-named');
+	const renameInput2 = dropdown.getDropdownEl().querySelector('input') as any;
+	renameInput2.value = '';
+	await dropdown.commitEdit();
+
+	eq('AU5.8 header reverted to Conversation Alpha after rename removal', view.getDisplayText(), 'Conversation Alpha');
+	check('AU5.9 header was re-asked after rename removal', ((leaf as any).headerUpdates ?? 0) > updatesBeforeRemove);
+
+	// Turn ends triggers header update
+	const updatesBeforeTurnEnd = (leaf as any).headerUpdates ?? 0;
+	if (mockReducer.onTurnEnd) {
+		mockReducer.onTurnEnd();
+	} else if (typeof (view as any).handleTurnEnd === 'function') {
+		await (view as any).handleTurnEnd();
+	}
+	await new Promise<void>((resolve) => setTimeout(resolve, 10));
+	check('AU5.10 header was re-asked after turn ends', ((leaf as any).headerUpdates ?? 0) > updatesBeforeTurnEnd);
+
+	// Switch to nameless conversation -> reverts to GuKi Chat, does not stick
+	const updatesBeforeNameless = (leaf as any).headerUpdates ?? 0;
+	await view.handleSelectSession('sess-nameless');
+	eq('AU5.11 switching to nameless conversation reverts header to GuKi Chat', view.getDisplayText(), 'GuKi Chat');
+	eq('AU5.12 leaf title reverted to GuKi Chat', (leaf as any).title, 'GuKi Chat');
+	check('AU5.13 previous conversation name did not stick', view.getDisplayText() !== 'Conversation Alpha');
+	check('AU5.14 header was re-asked after switching to nameless conversation', ((leaf as any).headerUpdates ?? 0) > updatesBeforeNameless);
+
+	await (view as any).onClose();
+}
+
 // Clean up temporary test files
 rmSync(TRANSCRIPT_TEST_DIR, { recursive: true, force: true });
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
+
 
 
 

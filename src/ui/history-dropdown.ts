@@ -85,6 +85,7 @@ export class HistoryDropdown {
 	private selectedIndex = 0;
 	private editingSessionId: string | null = null;
 	private isCanceling = false;
+	private isRefreshing = false;
 	private savePromise: Promise<void> | null = null;
 	/** Set when an edit is committed; swallows exactly the one Enter that did the committing. */
 	private suppressNextEnter = false;
@@ -132,6 +133,83 @@ export class HistoryDropdown {
 
 	getEditingSessionId(): string | null {
 		return this.editingSessionId;
+	}
+
+	getSummaries(): readonly SessionSummary[] {
+		return this.summaries;
+	}
+
+	getSummary(sessionId: string): SessionSummary | undefined {
+		return this.summaries.find((s) => s.sessionId === sessionId);
+	}
+
+	async refresh(): Promise<void> {
+		if (!this.open) {
+			return;
+		}
+
+		// 1. Remember currently selected session ID and index
+		const prevSelectedSessionId = this.items[this.selectedIndex]?.sessionId ?? null;
+		const prevSelectedIndex = this.selectedIndex;
+
+		// 2. Remember open rename editor state and typed text
+		const editingSessionId = this.editingSessionId;
+		let editingText: string | null = null;
+		let selectionStart: number | null = null;
+		let selectionEnd: number | null = null;
+		if (editingSessionId !== null) {
+			const inputEl = this.dropdownEl.querySelector('input');
+			if (inputEl) {
+				editingText = inputEl.value;
+				selectionStart = inputEl.selectionStart;
+				selectionEnd = inputEl.selectionEnd;
+			}
+		}
+
+		// 3. Rescan sessions
+		const rawSummaries = await this.options.getSessions();
+		this.summaries = rawSummaries;
+		this.items = rawSummaries.map(shapeSessionRow);
+
+		// 4. Update selection: follow by sessionId, or nearest row if disappeared
+		if (this.items.length === 0) {
+			this.selectedIndex = 0;
+		} else if (prevSelectedSessionId !== null) {
+			const matchIdx = this.items.findIndex((item) => item.sessionId === prevSelectedSessionId);
+			if (matchIdx !== -1) {
+				this.selectedIndex = matchIdx;
+			} else {
+				this.selectedIndex = Math.min(prevSelectedIndex, this.items.length - 1);
+			}
+		} else {
+			this.selectedIndex = Math.min(prevSelectedIndex, this.items.length - 1);
+		}
+
+		// 5. Preserve rename editor if session still exists
+		if (editingSessionId !== null) {
+			const stillExists = this.items.some((item) => item.sessionId === editingSessionId);
+			this.editingSessionId = stillExists ? editingSessionId : null;
+		}
+
+		// 6. Render with isRefreshing flag to suppress blur-commit during DOM clear
+		this.isRefreshing = true;
+		try {
+			this.render();
+		} finally {
+			this.isRefreshing = false;
+		}
+
+		// 7. Restore typed text and cursor selection in rename input
+		if (this.editingSessionId !== null && editingText !== null) {
+			const inputEl = this.dropdownEl.querySelector('input');
+			if (inputEl) {
+				inputEl.value = editingText;
+				inputEl.focus?.();
+				if (selectionStart !== null && selectionEnd !== null) {
+					inputEl.setSelectionRange?.(selectionStart, selectionEnd);
+				}
+			}
+		}
 	}
 
 	async toggle(): Promise<void> {
@@ -182,7 +260,7 @@ export class HistoryDropdown {
 	}
 
 	async commitEdit(): Promise<void> {
-		if (this.editingSessionId === null || this.isCanceling) {
+		if (this.editingSessionId === null || this.isCanceling || this.isRefreshing) {
 			// Nothing of our own to commit — but a save started by an earlier commit (a blur, say)
 			// may still be writing, and callers await this method to know it finished.
 			await this.savePromise;
