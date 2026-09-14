@@ -12098,14 +12098,15 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	check('AL.7 history dropdown is instantiated', dropdown !== null);
 
 	const actionEl = container.querySelector('.view-action');
-	check('AL.8 history action element is registered in view chrome', actionEl !== null);
+	check('AL.8 view registers no action in view chrome', actionEl === null);
 
 	// Prove event wiring (registerDomEvent) works under the harness:
-	// Clicking the action element triggers toggle() on the dropdown component
+	// Clicking the in-panel trigger element triggers toggle() on the dropdown component
 	check('AL.9 history dropdown initially closed', dropdown?.isOpen() === false);
-	actionEl?.click();
+	const triggerEl = view.getHistoryTriggerEl();
+	triggerEl?.click();
 	await new Promise((resolve) => setTimeout(resolve, 10));
-	check('AL.10 clicking action element toggles history dropdown open', dropdown?.isOpen() === true);
+	check('AL.10 clicking in-panel trigger toggles history dropdown open', dropdown?.isOpen() === true);
 
 	// Run close lifecycle
 	await (view as any).onClose();
@@ -12320,8 +12321,8 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	await (view as any).onOpen();
 
 	// AN1: The gap: Real user path from dropdown row click through onSelectSession to DOM messages
-	const actionEl = container.querySelector('.view-action');
-	actionEl?.click();
+	const triggerEl = view.getHistoryTriggerEl();
+	triggerEl?.click();
 	await new Promise((resolve) => setTimeout(resolve, 20));
 
 	const dropdown = view.getHistoryDropdown();
@@ -12503,7 +12504,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 
 	check('AO.1 history trigger element exists', triggerEl !== null && triggerEl !== undefined);
 	check('AO.2 trigger element is inside panel root container', rootEl !== null && triggerEl !== null && rootEl.contains(triggerEl) === true);
-	check('AO.3 trigger element is not the view-action chrome element', triggerEl !== null && triggerEl !== actionEl);
+	check('AO.3 view registers no view-action chrome element', actionEl === null);
 
 	const dropdown = view.getHistoryDropdown();
 	check('AO.4 history dropdown initially closed', dropdown?.isOpen() === false);
