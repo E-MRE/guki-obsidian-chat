@@ -17,6 +17,7 @@
 import {
 	contextUsageFromResult,
 	isAssistantEvent,
+	isCompactBoundaryEvent,
 	isRateLimitEvent,
 	isResultEvent,
 	isStreamPartialEvent,
@@ -37,6 +38,7 @@ import {
 	type SseContentBlockStop,
 	type StreamJsonEvent,
 	type StreamPartialEvent,
+	type SystemCompactBoundaryEvent,
 	type SystemInitEvent,
 	type SystemTaskEvent,
 	type SystemThinkingTokensEvent,
@@ -44,7 +46,7 @@ import {
 	type UserEvent,
 } from '../cli/events';
 import { toolResultText } from './tool-policy';
-import type { AssistantItem, BlockKind, ChatState, MessageBlock } from './chat-state';
+import { hasRenderableContent, type AssistantItem, type BlockKind, type ChatState, type MessageBlock } from './chat-state';
 
 /**
  * `terminal_reason` values that mean the user interrupted — "stopped", not an error.
@@ -123,6 +125,27 @@ export class StreamReducer {
 	 */
 	private interruptSent = false;
 
+	/** Boundary uuids seen so far, for compact_boundary idempotency (SPEC §2 F2, §3 R6). */
+	private seenBoundaryUuids = new Set<string>();
+
+	/** True while a turn is actively processing between beginTurn and applyResult/failActiveTurn. */
+	private inTurn = false;
+
+	/** Assistant items participating in the current turn (e.g. across a mid-turn compaction split). */
+	private turnItems: AssistantItem[] = [];
+
+	/**
+	 * Ordered boundary timestamps for the current turn — the single source of truth for per-segment
+	 * duration accounting (FIX-A, Görev 7 Fix 3).
+	 *
+	 * Invariant: `boundaryTimestamps.length === turnItems.length` at every point during an active turn.
+	 * `boundaryTimestamps[0]` is the local instant the turn began. Each compaction boundary that seals
+	 * an active item pushes `boundaryNow`. At distribution time (`applyResult`), segment `i` elapsed is
+	 * `boundaryTimestamps[i+1] - boundaryTimestamps[i]` (terminal segment ends at `resultNow`).
+	 * No multi-field protocol, no `segmentStartedAt` or `itemSegmentDurations` to reorder or desynchronize.
+	 */
+	private boundaryTimestamps: number[] = [];
+
 	/**
 	 * The last `result.total_cost_usd` this reducer has seen, and the reducer's own running sum of
 	 * per-turn deltas. `null` means "no result yet" — the state a fresh process starts in, and the
@@ -181,8 +204,11 @@ export class StreamReducer {
 
 	/** Called by the SessionManager when a message is handed to the CLI. */
 	beginTurn(item: AssistantItem): void {
+		this.inTurn = true;
 		this.active = item;
 		this.turnItem = item;
+		this.turnItems = [item];
+		this.boundaryTimestamps = [Date.now()];
 		this.blockBase = 0;
 		this.nextFreeSlot = 0;
 		this.assistantSlot = 0;
@@ -245,8 +271,16 @@ export class StreamReducer {
 	 */
 	private stampPermissionState(toolUseId: string): void {
 		// `turnItem`, not `active`: this is reached from `onTurnEnd`, by which point the turn
-		// has already been closed and `active` is null.
-		const block = this.blockInTurn(this.turnItem, toolUseId);
+		// has already been closed and `active` is null. Check turnItems if split across compactions.
+		let block = this.blockInTurn(this.turnItem, toolUseId);
+		if (!block) {
+			for (const item of this.turnItems) {
+				block = this.blockInTurn(item, toolUseId);
+				if (block) {
+					break;
+				}
+			}
+		}
 		if (!block) {
 			return;
 		}
@@ -294,6 +328,10 @@ export class StreamReducer {
 	}
 
 	apply(event: StreamJsonEvent): void {
+		if (isCompactBoundaryEvent(event)) {
+			this.applyCompactBoundary(event);
+			return;
+		}
 		if (isSystemInitEvent(event)) {
 			this.applyInit(event);
 			return;
@@ -351,6 +389,55 @@ export class StreamReducer {
 		}
 	}
 
+	/**
+	 * Handles a compact_boundary event (SPEC §2 F1-F4, §3 R1, R2, R6).
+	 *
+	 * - Deduplicates on `event.uuid` (R6).
+	 * - Turn splitting (R2): drops an empty in-flight assistant item; seals a non-empty one.
+	 * - Inserts a divider item at the arrival position.
+	 */
+	private applyCompactBoundary(event: SystemCompactBoundaryEvent): void {
+		const uuid = event.uuid;
+		if (uuid) {
+			if (this.seenBoundaryUuids.has(uuid)) {
+				return;
+			}
+			this.seenBoundaryUuids.add(uuid);
+		}
+
+		const boundaryNow = Date.now();
+		const inFlight = this.active;
+		if (inFlight) {
+			if (!hasRenderableContent(inFlight)) {
+				this.state.removeItem(inFlight.id);
+				const idx = this.turnItems.indexOf(inFlight);
+				if (idx !== -1) {
+					this.turnItems.splice(idx, 1);
+				}
+				this.boundaryTimestamps = [boundaryNow];
+			} else {
+				closeOpenBlocks(inFlight);
+				inFlight.status = 'complete';
+				this.boundaryTimestamps.push(boundaryNow);
+			}
+			this.active = null;
+		}
+
+		this.state.addDivider(uuid ?? `divider-${boundaryNow}`, 'Conversation compacted');
+	}
+
+	private ensureActiveItem(): AssistantItem {
+		if (this.active) {
+			return this.active;
+		}
+		const item = this.state.addAssistantMessage();
+		item.status = 'streaming';
+		this.active = item;
+		this.turnItem = item;
+		this.turnItems.push(item);
+		return item;
+	}
+
 	// --- live streaming ----------------------------------------------------
 
 	private applyStreamEvent(event: StreamPartialEvent): void {
@@ -360,9 +447,15 @@ export class StreamReducer {
 			this.noteSubagentActivity(event.parent_tool_use_id);
 			return;
 		}
-		const item = this.active;
 		const sse = event.event;
-		if (!item || !sse) {
+		if (!sse) {
+			return;
+		}
+		if (this.inTurn && !this.active && (sse.type === 'content_block_start' || sse.type === 'content_block_delta')) {
+			this.ensureActiveItem();
+		}
+		const item = this.active;
+		if (!item) {
 			return;
 		}
 
@@ -632,6 +725,9 @@ export class StreamReducer {
 			this.noteSubagentActivity(event.parent_tool_use_id);
 			return;
 		}
+		if (this.inTurn && !this.active && event.message.content && event.message.content.length > 0) {
+			this.ensureActiveItem();
+		}
 		const item = this.active;
 		if (!item) {
 			return;
@@ -712,48 +808,123 @@ export class StreamReducer {
 	}
 
 	private applyResult(event: ResultEvent): void {
-		const item = this.active;
+		this.inTurn = false;
+		const activeItem = this.active;
 		this.active = null;
-		if (!item) {
-			this.onTurnEnd?.();
-			return;
-		}
 
-		item.meta = {
-			costUsd: this.turnCostUsd(event.total_cost_usd),
-			durationMs: event.duration_ms,
-			sessionCostUsd: event.total_cost_usd === undefined ? undefined : this.sessionCostUsd,
-		};
+		const costUsd = this.turnCostUsd(event.total_cost_usd);
+		const durationMs = event.duration_ms;
+		const sessionCostUsd = event.total_cost_usd === undefined ? undefined : this.sessionCostUsd;
+
 		const usage = contextUsageFromResult(event);
 		if (usage) {
 			this.onContextUsage?.(usage);
 		}
-		// Whatever the outcome, no block is still streaming once the turn is over — otherwise a
-		// cancelled turn leaves a thinking header saying "Thinking…" forever.
-		closeOpenBlocks(item);
-		this.applyPermissionDenials(item, event);
 
-		// The interrupt flag is checked first and independently of the subtype: see its declaration
-		// for why `terminal_reason` alone misses a Stop pressed during a pending tool call.
-		if (this.interruptSent || ABORTED_TERMINAL_REASONS.has(event.terminal_reason ?? '')) {
-			item.status = 'stopped';
-		} else if (event.is_error === true) {
-			item.status = 'error';
-			// `result` may be absent entirely; fall back to the subtype rather than reading it.
-			item.errorText =
-				typeof event.result === 'string' && event.result.length > 0
-					? event.result
-					: `The turn ended with ${event.subtype}.`;
-		} else {
-			// A denied tool is not a failed turn: subtype 'success', is_error false, and the denial
-			// shows up only in permission_denials[] (RESEARCH B5). Nothing to render as an error.
-			if (item.blocks.size === 0 && typeof event.result === 'string' && event.result.length > 0) {
-				// Defensive: no assistant event carried text, but the result did.
-				item.blocks.set(0, { index: 0, kind: 'text', text: event.result, final: true });
+		const terminalItem = activeItem ?? (this.turnItems.length > 0 ? this.turnItems[this.turnItems.length - 1] : null);
+
+		if (terminalItem) {
+			if (this.turnItems.length > 1) {
+				// FIX-A: derive segment durations from the single source of truth (boundaryTimestamps).
+				// Each segment's local elapsed = next boundary timestamp − this segment's start timestamp.
+				// The terminal segment ends now (result-event time).
+				const resultNow = Date.now();
+				const localElapsed: number[] = [];
+				for (let i = 0; i < this.turnItems.length; i++) {
+					const start = this.boundaryTimestamps[i] ?? resultNow;
+					const end = i + 1 < this.boundaryTimestamps.length ? this.boundaryTimestamps[i + 1]! : resultNow;
+					localElapsed.push(Math.max(0, end - start));
+				}
+				const localTotal = localElapsed.reduce((s, d) => s + d, 0);
+
+				// FIX-B: when localTotal overshoots CLI's durationMs, scale proportionally
+				// so no segment that performed real work prints "Worked for 0:00",
+				// and displayed segments sum to the CLI's reported total.
+				let finalDurations: number[];
+				if (durationMs !== undefined && localTotal > durationMs && localTotal > 0) {
+					const totalSec = Math.floor(durationMs / 1000);
+					if (totalSec > 0) {
+						const rawSec = localElapsed.map(d => d / localTotal * totalSec);
+						const finalSec = rawSec.map(s => Math.round(s));
+						for (let i = 0; i < finalSec.length; i++) {
+							if (finalSec[i] === 0 && localElapsed[i]! >= 500 && totalSec >= finalSec.length) {
+								finalSec[i] = 1;
+							}
+						}
+						const sumSec = finalSec.reduce((s, d) => s + d, 0);
+						const residualSec = totalSec - sumSec;
+						if (residualSec !== 0) {
+							let maxIdx = 0;
+							for (let i = 1; i < finalSec.length; i++) {
+								if (finalSec[i]! > finalSec[maxIdx]!) maxIdx = i;
+							}
+							finalSec[maxIdx] = finalSec[maxIdx]! + residualSec;
+						}
+						finalDurations = finalSec.map(s => s * 1000);
+						const msResidual = durationMs - finalDurations.reduce((s, d) => s + d, 0);
+						finalDurations[finalDurations.length - 1] = finalDurations[finalDurations.length - 1]! + msResidual;
+					} else {
+						finalDurations = localElapsed.map(() => 0);
+					}
+				} else if (durationMs !== undefined && localTotal <= durationMs) {
+					// Normal case: local fits within CLI total. Earlier segments keep their local
+					// elapsed; the terminal segment absorbs the remainder so the sum is exact.
+					finalDurations = [...localElapsed];
+					const priorSum = finalDurations.slice(0, -1).reduce((s, d) => s + d, 0);
+					finalDurations[finalDurations.length - 1] = Math.max(0, durationMs - priorSum);
+				} else {
+					// No CLI durationMs — use local measurements as-is.
+					finalDurations = [...localElapsed];
+				}
+
+				for (let i = 0; i < this.turnItems.length; i++) {
+					const item = this.turnItems[i]!;
+					if (item === terminalItem) {
+						terminalItem.meta = {
+							costUsd,
+							durationMs: durationMs !== undefined ? finalDurations[i] : undefined,
+							sessionCostUsd,
+						};
+					} else {
+						item.meta = {
+							durationMs: finalDurations[i],
+						};
+					}
+				}
+			} else {
+				terminalItem.meta = {
+					costUsd,
+					durationMs,
+					sessionCostUsd,
+				};
 			}
-			item.status = 'complete';
+			closeOpenBlocks(terminalItem);
+			this.applyPermissionDenials(terminalItem, event);
+
+			// The interrupt flag is checked first and independently of the subtype: see its declaration
+			// for why `terminal_reason` alone misses a Stop pressed during a pending tool call.
+			if (this.interruptSent || ABORTED_TERMINAL_REASONS.has(event.terminal_reason ?? '')) {
+				terminalItem.status = 'stopped';
+			} else if (event.is_error === true) {
+				terminalItem.status = 'error';
+				// `result` may be absent entirely; fall back to the subtype rather than reading it.
+				terminalItem.errorText =
+					typeof event.result === 'string' && event.result.length > 0
+						? event.result
+						: `The turn ended with ${event.subtype}.`;
+			} else {
+				// A denied tool is not a failed turn: subtype 'success', is_error false, and the denial
+				// shows up only in permission_denials[] (RESEARCH B5). Nothing to render as an error.
+				if (terminalItem.blocks.size === 0 && typeof event.result === 'string' && event.result.length > 0) {
+					// Defensive: no assistant event carried text, but the result did.
+					terminalItem.blocks.set(0, { index: 0, kind: 'text', text: event.result, final: true });
+				}
+				terminalItem.status = 'complete';
+			}
 		}
 
+		this.turnItems = [];
+		this.boundaryTimestamps = [];
 		this.state.emitChange();
 		this.onTurnEnd?.();
 	}
@@ -774,10 +945,18 @@ export class StreamReducer {
 	 *
 	 * `item` is the local from `applyResult`, not `this.active` — that is already null here.
 	 */
-	private applyPermissionDenials(item: AssistantItem, event: ResultEvent): void {
+	private applyPermissionDenials(terminalItem: AssistantItem, event: ResultEvent): void {
 		for (const toolUseId of deniedToolUseIds(event)) {
 			this.permissionDeniedTools.add(toolUseId);
-			const block = this.blockInTurn(item, toolUseId);
+			let block = this.blockInTurn(terminalItem, toolUseId);
+			if (!block) {
+				for (const item of this.turnItems) {
+					block = this.blockInTurn(item, toolUseId);
+					if (block) {
+						break;
+					}
+				}
+			}
 			if (block) {
 				this.markDenied(block, true);
 			}
@@ -794,8 +973,11 @@ export class StreamReducer {
 	 * *not* have the queue drained (a spawn failure, an unexpected exit) clear it first.
 	 */
 	failActiveTurn(message: string): boolean {
-		const item = this.active;
+		this.inTurn = false;
+		const item = this.active ?? (this.turnItems.length > 0 ? this.turnItems[this.turnItems.length - 1] : null);
 		this.active = null;
+		this.turnItems = [];
+		this.boundaryTimestamps = [];
 		if (!item) {
 			this.onTurnEnd?.();
 			return false;
@@ -809,7 +991,7 @@ export class StreamReducer {
 	}
 
 	hasActiveTurn(): boolean {
-		return this.active !== null;
+		return this.inTurn || this.active !== null;
 	}
 }
 

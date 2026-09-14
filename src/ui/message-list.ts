@@ -213,6 +213,21 @@ export class MessageList {
 	}
 
 	private createItem(item: ChatItem, parentEl: HTMLElement = this.scrollEl): RenderedItem {
+		if (item.kind === 'divider') {
+			const el = parentEl.createDiv({ cls: 'guki-message guki-message-divider' });
+			el.createSpan({ cls: 'guki-divider-label', text: item.text });
+			const entry: RenderedItem = {
+				el,
+				bodyEl: el,
+				metaEl: el,
+				renderedText: item.text,
+				status: '',
+				blocks: new Map(),
+			};
+			this.rendered.set(item.id, entry);
+			return entry;
+		}
+
 		const el = parentEl.createDiv({ cls: `guki-message guki-message-${item.kind}` });
 		const bodyEl = el.createDiv({ cls: 'guki-message-body' });
 		// One row, not two stacked elements (task 8 follow-up, ask 2): the copy button and the meta
@@ -300,6 +315,8 @@ export class MessageList {
 				return this.updateNotice(item, entry);
 			case 'permission':
 				return this.updatePermission(item, entry);
+			case 'divider':
+				return false;
 		}
 	}
 
