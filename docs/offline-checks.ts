@@ -95,7 +95,7 @@ import { toolPermissionBodyText, toolResultTitle, toolStatusText } from '../src/
 import { canRememberPermission, createPermissionCard, permissionDiff, rememberLabelText, shortenPathForLabel, type PermissionActions } from '../src/ui/permission-card';
 import { clearRememberedDecisions, DEFAULT_SETTINGS, formatRememberedDecision, removeRememberedDecision } from '../src/ui/settings-tab';
 import GukiChatPlugin from '../src/main';
-import { currentStatus } from '../src/ui/chat-view';
+import { ChatView, currentStatus } from '../src/ui/chat-view';
 import { renderQuotaBar } from '../src/ui/composer';
 import { formatTurnMeta, MessageList, withTurnMeta } from '../src/ui/message-list';
 import {
@@ -161,7 +161,7 @@ import {
 	type HistoryRowItem,
 } from '../src/ui/history-dropdown';
 import { NodeTranscriptStore } from '../src/data/transcript-store';
-import { FileSystemAdapter, TFile } from 'obsidian';
+import { App, FileSystemAdapter, TFile, WorkspaceLeaf } from 'obsidian';
 import { parseAskUserQuestionInput, decideAskUserQuestion, formatAskUserQuestionSummary, parseAskUserQuestionAnswers } from '../src/core/ask-user-question';
 import { AskUserQuestionInline } from '../src/ui/ask-user-question';
 import { DiskTranscriptLoader, resolveTranscriptBranch } from '../src/data/disk-transcript-loader';
@@ -5320,6 +5320,11 @@ class FakeElement {
 				fn(e);
 			}
 		};
+	}
+	removeEventListener(evt: string, cb: any) {
+		if (this._eventListenersList[evt]) {
+			this._eventListenersList[evt] = this._eventListenersList[evt].filter((fn: any) => fn !== cb);
+		}
 	}
 	hide() { this.addClass('guki-hidden'); }
 	show() { this.removeClass('guki-hidden'); }
@@ -12048,6 +12053,63 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	eq('AK11.1 assistant string content yields one block', asst?.blocks.size, 1);
 	eq('AK11.2 assistant string block kind is text', asst?.blocks.get(0)?.kind, 'text');
 	eq('AK11.3 assistant string block text matches', asst?.blocks.get(0)?.text, 'Invented assistant reply as plain string');
+}
+
+// AL: ChatView offline constructibility and open lifecycle harness
+{
+	console.log('AL. ChatView offline constructibility and open lifecycle harness');
+
+	const container = new FakeElement() as any;
+	const app = new App();
+	const leaf = new WorkspaceLeaf(app, container);
+	const state = new ChatState();
+
+	const session = {
+		state,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => ['clear', 'help'],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const view = new ChatView(leaf, session);
+
+	eq('AL.1 view returns expected view type', view.getViewType(), 'guki-chat-view');
+	eq('AL.2 view returns expected display text', view.getDisplayText(), 'GuKi Chat');
+	eq('AL.3 view returns expected icon', view.getIcon(), 'message-square');
+
+	// Run open lifecycle
+	await (view as any).onOpen();
+
+	const rootEl = container.querySelector('.guki-root');
+	check('AL.4 root container is mounted into DOM', rootEl !== null);
+
+	const messagesEl = container.querySelector('.guki-messages-wrap');
+	check('AL.5 messages area is mounted into DOM', messagesEl !== null);
+
+	const textareaEl = container.querySelector('textarea');
+	check('AL.6 composer input textarea is mounted into DOM', textareaEl !== null);
+
+	const dropdown = view.getHistoryDropdown();
+	check('AL.7 history dropdown is instantiated', dropdown !== null);
+
+	const actionEl = container.querySelector('.view-action');
+	check('AL.8 history action element is registered in view chrome', actionEl !== null);
+
+	// Prove event wiring (registerDomEvent) works under the harness:
+	// Clicking the action element triggers toggle() on the dropdown component
+	check('AL.9 history dropdown initially closed', dropdown?.isOpen() === false);
+	actionEl?.click();
+	await new Promise((resolve) => setTimeout(resolve, 10));
+	check('AL.10 clicking action element toggles history dropdown open', dropdown?.isOpen() === true);
+
+	// Run close lifecycle
+	await (view as any).onClose();
+	check('AL.11 onClose empties contentEl and cleans up references', container.querySelector('.guki-root') === null && view.getHistoryDropdown() === null);
 }
 
 // Clean up temporary test files
