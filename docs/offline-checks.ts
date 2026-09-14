@@ -12342,6 +12342,134 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	eq('AN1.4 state items populated via dropdown click', state.items.length > 0, true);
 	check('AN1.5 DOM contains conversation messages from clicked session', container.querySelectorAll('.guki-message').length > 0);
 	eq('AN1.6 dropdown closed upon selection', dropdown?.isOpen(), false);
+
+	// AN2: "Load older" control presence and absence (Required red/green pair b)
+	// On a short conversation (sess-am-basic with 4 turns), nothing older remains -> control must be GONE
+	await view.handleSelectSession('sess-am-basic');
+	eq('AN2.1 short session state items is 4', state.items.length, 4);
+	check('AN2.2 load older control is absent for short session with no older items', view.getLoadOlderEl() === null);
+	check('AN2.3 DOM does not contain load older button', container.querySelector('.guki-load-older') === null);
+
+	// On a long conversation (>50 turns, e.g. sess-am-long-real with 70 turns), control must be PRESENT above messages
+	await view.handleSelectSession('sess-am-long-real');
+	eq('AN2.4 initial draw has 50 items', state.items.length, 50);
+	check('AN2.5 load older control is present when older items exist', view.getLoadOlderEl() !== null);
+	check('AN2.6 DOM contains load older button', container.querySelector('.guki-load-older') !== null);
+	check('AN2.7 load older button sits above conversation in DOM', container.querySelector('.guki-messages')?.children[0] === view.getLoadOlderEl());
+
+	// AN3: Viewport preservation and prepend order on "load older" (Required red/green pair c)
+	// Before prepend: oldest drawn item is turn 21, message list scroll position captured
+	const scrollEl = container.querySelector('.guki-messages');
+	scrollEl.scrollHeight = 5000;
+	scrollEl.scrollTop = 100;
+	scrollEl.clientHeight = 800;
+
+	const firstMsgBefore = scrollEl.querySelector('.guki-message');
+	check('AN3.1 first message before prepend is turn 21', firstMsgBefore?.text?.includes('Prompt for turn 21'));
+
+	// Track whether scrollIntoView was called on anchor
+	let anchorScrolledIntoView = false;
+	if (firstMsgBefore) {
+		firstMsgBefore.scrollIntoView = () => { anchorScrolledIntoView = true; };
+	}
+
+	// User clicks "load older"
+	const loadOlderBtn = view.getLoadOlderEl();
+	loadOlderBtn?.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	eq('AN3.2 all 70 items now loaded in state', state.items.length, 70);
+	eq('AN3.3 all 70 items rendered in DOM', container.querySelectorAll('.guki-message').length, 70);
+
+	// Required red/green pair c: older items must be PREPENDED, not appended at bottom
+	const messagesAfter = container.querySelectorAll('.guki-message');
+	check('AN3.4 first rendered message is now turn 1 (prepended at top)', messagesAfter[0]?.text?.includes('Prompt for turn 1'));
+	check('AN3.5 last rendered message is turn 70 (newest stays at bottom)', messagesAfter[69]?.text?.includes('Reply for turn 70'));
+
+	// Viewport jump prevention assertions:
+	// 1. Did NOT scroll to bottom (scrollTop was not set to scrollHeight)
+	check('AN3.6 prepend did not scroll to bottom', scrollEl.scrollTop < scrollEl.scrollHeight);
+	// 2. Anchor element scrollIntoView called to preserve eye position
+	check('AN3.7 anchor element scrollIntoView called to preserve eye position', anchorScrolledIntoView === true);
+
+	// With all 70 turns loaded, nothing older remains -> control must be GONE
+	check('AN3.8 load older control is gone after all older items loaded', view.getLoadOlderEl() === null);
+	check('AN3.9 DOM no longer contains load older button', container.querySelector('.guki-load-older') === null);
+
+	// AN4: Multi-press paging integrity across at least 2 presses
+	// Fixture: 120 turns (requires 3 pages: 50 + 50 + 20)
+	const multiFile = join(TRANSCRIPT_TEST_DIR, 'sess-an-multipress.jsonl');
+	const multiLines: string[] = [];
+	for (let i = 1; i <= 120; i++) {
+		const isUser = i % 2 === 1;
+		multiLines.push(
+			JSON.stringify({
+				type: isUser ? 'user' : 'assistant',
+				uuid: `msg-multi-${String(i)}`,
+				parentUuid: i === 1 ? undefined : `msg-multi-${String(i - 1)}`,
+				message: isUser
+					? { role: 'user', content: `Multi prompt ${String(i)}` }
+					: { role: 'assistant', content: [{ type: 'text', text: `Multi reply ${String(i)}` }] },
+			}),
+		);
+	}
+	multiLines.push(JSON.stringify({ type: 'last-prompt', leafUuid: 'msg-multi-120', sessionId: 'sess-an-multipress' }));
+	multiLines.push('');
+	writeFileSync(multiFile, multiLines.join('\n'));
+
+	await view.handleSelectSession('sess-an-multipress');
+	eq('AN4.1 initial page loads 50 newest turns', state.items.length, 50);
+	check('AN4.2 oldest initial item is turn 71', state.items[0]?.id === 'msg-multi-71' || container.text.includes('Multi prompt 71'));
+	check('AN4.3 newest initial item is turn 120', container.text.includes('Multi reply 120'));
+	check('AN4.4 load older control present before press 1', view.getLoadOlderEl() !== null);
+
+	// Press 1: loads turns 21-70 (50 items)
+	view.getLoadOlderEl()?.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	eq('AN4.5 after press 1, state items count is 100', state.items.length, 100);
+	check('AN4.6 after press 1, oldest item is turn 21', container.text.includes('Multi prompt 21'));
+	check('AN4.7 after press 1, turn 70 is present', container.text.includes('Multi reply 70'));
+	check('AN4.8 load older control STILL present before press 2', view.getLoadOlderEl() !== null);
+
+	// Press 2: loads turns 1-20 (20 items)
+	view.getLoadOlderEl()?.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	eq('AN4.9 after press 2, all 120 items loaded', state.items.length, 120);
+	check('AN4.10 after press 2, oldest item is turn 1', container.text.includes('Multi prompt 1'));
+	check('AN4.11 after press 2, newest item is turn 120', container.text.includes('Multi reply 120'));
+
+	// Integrity checks across 120 items:
+	// No duplicate item IDs
+	const itemIds = state.items.map((it) => it.id);
+	const uniqueIds = new Set(itemIds);
+	eq('AN4.12 no duplicate item ids across paged presses', uniqueIds.size, 120);
+
+	// No gap
+	let hasGap = false;
+	for (let i = 1; i <= 120; i++) {
+		if (!uniqueIds.has(`msg-multi-${String(i)}`)) {
+			hasGap = true;
+			break;
+		}
+	}
+	eq('AN4.13 no gap across the full conversation history', hasGap, false);
+
+	// Chain order preserved
+	const multiMessages = container.querySelectorAll('.guki-message');
+	eq('AN4.14 DOM renders all 120 messages in order', multiMessages.length, 120);
+	check('AN4.15 first DOM message is turn 1', multiMessages[0]?.text?.includes('Multi prompt 1'));
+	check('AN4.16 71st DOM message is turn 71', multiMessages[70]?.text?.includes('Multi prompt 71'));
+	check('AN4.17 120th DOM message is turn 120', multiMessages[119]?.text?.includes('Multi reply 120'));
+
+	// Truthful end-of-conversation: control is gone
+	check('AN4.18 load older control gone at conversation root', view.getLoadOlderEl() === null);
+	check('AN4.19 DOM has no load older button at root', container.querySelector('.guki-load-older') === null);
+
+	// Subsequent press attempt does nothing (no-op)
+	await view.handleLoadOlder();
+	eq('AN4.20 calling handleLoadOlder at root leaves item count unchanged', state.items.length, 120);
 }
 
 // Clean up temporary test files
