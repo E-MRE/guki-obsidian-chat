@@ -38,6 +38,7 @@ import type { PermissionItem } from '../core/chat-state';
  * compute them — that arithmetic lives in `cli/events.ts` where it can be tested without a DOM.
  */
 export interface ComposerStatus {
+	compacting?: boolean;
 	model: string | null;
 	contextPercent: number | null;
 	fiveHourPercent: number | null;
@@ -681,6 +682,9 @@ export class Composer {
 	 */
 	setStatusLine(status: ComposerStatus): void {
 		const parts: string[] = [];
+		if (status.compacting) {
+			parts.push('Compacting conversation…');
+		}
 		if (status.model !== null) {
 			parts.push(status.model);
 		}

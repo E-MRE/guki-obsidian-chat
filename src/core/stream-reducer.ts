@@ -22,6 +22,7 @@ import {
 	isResultEvent,
 	isStreamPartialEvent,
 	isSystemInitEvent,
+	isSystemStatusEvent,
 	isTaskEvent,
 	isThinkingTokensEvent,
 	isUserEvent,
@@ -40,6 +41,7 @@ import {
 	type StreamPartialEvent,
 	type SystemCompactBoundaryEvent,
 	type SystemInitEvent,
+	type SystemStatusEvent,
 	type SystemTaskEvent,
 	type SystemThinkingTokensEvent,
 	type ToolResultBlock,
@@ -205,6 +207,7 @@ export class StreamReducer {
 	/** Called by the SessionManager when a message is handed to the CLI. */
 	beginTurn(item: AssistantItem): void {
 		this.inTurn = true;
+		this.state.setCompacting(false);
 		this.active = item;
 		this.turnItem = item;
 		this.turnItems = [item];
@@ -328,6 +331,19 @@ export class StreamReducer {
 	}
 
 	apply(event: StreamJsonEvent): void {
+		if (this.state.compacting) {
+			const isNonClearing =
+				(event.type === 'system' &&
+					((event as { subtype?: unknown }).subtype === 'status' ||
+						(typeof (event as { subtype?: unknown }).subtype === 'string' &&
+							((event as { subtype: string }).subtype.startsWith('hook_'))))) ||
+				event.type === 'rate_limit_event' ||
+				event.type === 'control_response';
+			if (!isNonClearing) {
+				this.state.setCompacting(false);
+			}
+		}
+
 		if (isCompactBoundaryEvent(event)) {
 			this.applyCompactBoundary(event);
 			return;
@@ -364,7 +380,19 @@ export class StreamReducer {
 			this.applyRateLimit(event);
 			return;
 		}
-		// system/status, hook_*, control_response: nothing to render yet.
+		if (isSystemStatusEvent(event)) {
+			this.applyStatus(event);
+			return;
+		}
+		// hook_*, control_response: nothing to render yet.
+	}
+
+	private applyStatus(event: SystemStatusEvent): void {
+		if ('compact_result' in event && event.compact_result !== undefined) {
+			this.state.setCompacting(false);
+		} else if (event.status === 'compacting') {
+			this.state.setCompacting(true);
+		}
 	}
 
 	private applyInit(event: SystemInitEvent): void {
@@ -397,6 +425,7 @@ export class StreamReducer {
 	 * - Inserts a divider item at the arrival position.
 	 */
 	private applyCompactBoundary(event: SystemCompactBoundaryEvent): void {
+		this.state.setCompacting(false);
 		const uuid = event.uuid;
 		if (uuid) {
 			if (this.seenBoundaryUuids.has(uuid)) {
@@ -809,6 +838,7 @@ export class StreamReducer {
 
 	private applyResult(event: ResultEvent): void {
 		this.inTurn = false;
+		this.state.setCompacting(false);
 		const activeItem = this.active;
 		this.active = null;
 
@@ -974,6 +1004,7 @@ export class StreamReducer {
 	 */
 	failActiveTurn(message: string): boolean {
 		this.inTurn = false;
+		this.state.setCompacting(false);
 		const item = this.active ?? (this.turnItems.length > 0 ? this.turnItems[this.turnItems.length - 1] : null);
 		this.active = null;
 		this.turnItems = [];

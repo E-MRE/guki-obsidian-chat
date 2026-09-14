@@ -101,7 +101,17 @@ export interface SystemCompactBoundaryEvent {
 	logical_parent_uuid?: string;
 }
 
-/** `system` with any other subtype: hook_started / hook_response / hook_progress / status / thinking_tokens / permission_denied. */
+/** `system` with subtype `status` (SPEC §1, §3 R2). */
+export interface SystemStatusEvent {
+	type: 'system';
+	subtype: 'status';
+	status?: string | null;
+	compact_result?: string | null;
+	session_id?: string;
+	uuid?: string;
+}
+
+/** `system` with any other subtype: hook_started / hook_response / hook_progress / thinking_tokens / permission_denied. */
 export interface SystemOtherEvent {
 	type: 'system';
 	subtype: string;
@@ -113,6 +123,7 @@ export type SystemEvent =
 	| SystemThinkingTokensEvent
 	| SystemTaskEvent
 	| SystemCompactBoundaryEvent
+	| SystemStatusEvent
 	| SystemOtherEvent;
 
 export interface AssistantEvent {
@@ -560,6 +571,10 @@ export function isRateLimitEvent(ev: StreamJsonEvent): ev is RateLimitEvent {
 
 export function isCompactBoundaryEvent(ev: StreamJsonEvent): ev is SystemCompactBoundaryEvent {
 	return ev.type === 'system' && (ev as SystemOtherEvent).subtype === 'compact_boundary';
+}
+
+export function isSystemStatusEvent(ev: StreamJsonEvent): ev is SystemStatusEvent {
+	return ev.type === 'system' && (ev as SystemOtherEvent).subtype === 'status';
 }
 
 /**
