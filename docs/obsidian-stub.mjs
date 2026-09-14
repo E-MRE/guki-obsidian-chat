@@ -1,7 +1,6 @@
 // Minimal stand-in so `docs/phase3-offline-checks.ts` can bundle for node. The production code
 // under test only uses these two from `obsidian` as values (the `instanceof` check on the vault
 // adapter); everything else it imports is type-only and erased at build time.
-export class App {}
 export class FileSystemAdapter {
 	getBasePath() { return ''; }
 	getFullPath(path) {
@@ -66,9 +65,253 @@ export function setIcon() {}
 // names `WorkspaceLeaf`, and `message-list.ts` pulls in `markdown.ts`, which imports
 // `MarkdownRenderer`. None of the checks instantiate any of the four or call a method on them —
 // only the module graph has to link — so empty classes are enough.
-export class ItemView {}
-export class Notice {}
-export class WorkspaceLeaf {}
+// Global environment shims for Node runtime
+if (typeof globalThis.window === 'undefined') {
+	globalThis.window = globalThis;
+}
+if (typeof globalThis.window.requestAnimationFrame === 'undefined') {
+	globalThis.window.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+}
+if (typeof globalThis.window.cancelAnimationFrame === 'undefined') {
+	globalThis.window.cancelAnimationFrame = (id) => clearTimeout(id);
+}
+if (typeof globalThis.cancelAnimationFrame === 'undefined') {
+	globalThis.cancelAnimationFrame = (id) => clearTimeout(id);
+}
+if (typeof globalThis.ResizeObserver === 'undefined') {
+	globalThis.ResizeObserver = class {
+		observe() {}
+		unobserve() {}
+		disconnect() {}
+	};
+}
+
+export class Events {
+	constructor() {
+		this._events = new Map();
+	}
+	on(name, callback, ctx) {
+		if (!this._events.has(name)) this._events.set(name, new Set());
+		const entry = { callback, ctx };
+		this._events.get(name).add(entry);
+		const ref = {
+			name,
+			entry,
+			events: this,
+			unload: () => this.offref(ref),
+		};
+		return ref;
+	}
+	off(name, callback) {
+		const set = this._events.get(name);
+		if (set) {
+			for (const entry of set) {
+				if (entry.callback === callback) {
+					set.delete(entry);
+				}
+			}
+		}
+	}
+	offref(ref) {
+		if (ref && ref.name && ref.entry && this._events.has(ref.name)) {
+			this._events.get(ref.name).delete(ref.entry);
+		}
+	}
+	trigger(name, ...data) {
+		const set = this._events.get(name);
+		if (set) {
+			for (const entry of [...set]) {
+				entry.callback.apply(entry.ctx, data);
+			}
+		}
+	}
+	tryTrigger(ref, args) {
+		if (ref && ref.entry) {
+			ref.entry.callback.apply(ref.entry.ctx, args);
+		}
+	}
+}
+
+export class Component {
+	constructor() {
+		this._cleanups = [];
+		this._children = [];
+		this._loaded = false;
+	}
+	load() {
+		if (this._loaded) return;
+		this._loaded = true;
+		this.onload();
+		for (const child of this._children) {
+			child.load();
+		}
+	}
+	onload() {}
+	unload() {
+		if (!this._loaded) return;
+		this._loaded = false;
+		for (const child of this._children) {
+			child.unload();
+		}
+		this.onunload();
+		for (const cleanup of this._cleanups) {
+			try { cleanup(); } catch {}
+		}
+		this._cleanups = [];
+	}
+	onunload() {}
+	addChild(component) {
+		this._children.push(component);
+		if (this._loaded) component.load();
+		return component;
+	}
+	removeChild(component) {
+		const idx = this._children.indexOf(component);
+		if (idx !== -1) {
+			this._children.splice(idx, 1);
+			component.unload();
+		}
+		return component;
+	}
+	register(cb) {
+		if (typeof cb === 'function') {
+			this._cleanups.push(cb);
+		}
+	}
+	registerEvent(eventRef) {
+		if (typeof eventRef === 'function') {
+			this._cleanups.push(eventRef);
+		} else if (eventRef && typeof eventRef.unload === 'function') {
+			this._cleanups.push(() => eventRef.unload());
+		}
+	}
+	registerDomEvent(el, type, callback, options) {
+		if (el?.addEventListener) {
+			el.addEventListener(type, callback, options);
+		}
+		this.register(() => {
+			if (el?.removeEventListener) {
+				el.removeEventListener(type, callback, options);
+			}
+		});
+	}
+	registerInterval(id) {
+		this.register(() => clearInterval(id));
+		return id;
+	}
+}
+
+export class Workspace extends Events {
+	constructor(app) {
+		super();
+		this.app = app;
+		this.rootSplit = { type: 'root' };
+		this.leftSplit = { type: 'sidedock' };
+		this.rightSplit = { type: 'sidedock' };
+	}
+}
+
+export class Vault extends Events {
+	constructor(app) {
+		super();
+		this.app = app;
+		this.adapter = new FileSystemAdapter();
+	}
+	getFiles() { return []; }
+	getAbstractFileByPath(_path) { return null; }
+}
+
+export class App {
+	constructor() {
+		this.workspace = new Workspace(this);
+		this.vault = new Vault(this);
+	}
+}
+
+export class View extends Component {
+	constructor(leaf) {
+		super();
+		this.leaf = leaf;
+		this.app = leaf?.app;
+		this.containerEl = leaf?.containerEl ?? null;
+		this._isOpened = false;
+	}
+	async onOpen() {}
+	async onClose() {}
+	getViewType() { return ''; }
+	getState() { return {}; }
+	async setState(_state, _result) {}
+	getEphemeralState() { return {}; }
+	getIcon() { return ''; }
+	getDisplayText() { return ''; }
+}
+
+export class ItemView extends View {
+	constructor(leaf) {
+		super(leaf);
+		this.contentEl = leaf?.contentEl ?? (this.containerEl?.createDiv ? this.containerEl.createDiv({ cls: 'view-content' }) : this.containerEl);
+	}
+	addAction(icon, title, callback) {
+		const actionEl = this.containerEl?.createDiv
+			? this.containerEl.createDiv({ cls: 'clickable-icon view-action' })
+			: null;
+		if (actionEl) {
+			if (actionEl.setAttribute) {
+				actionEl.setAttribute('aria-label', title);
+			}
+			if (callback) {
+				this.registerDomEvent(actionEl, 'click', callback);
+			}
+		}
+		return actionEl;
+	}
+}
+
+export class WorkspaceLeaf extends Events {
+	constructor(app, containerEl, contentEl) {
+		super();
+		this.app = app;
+		if (this.app && !this.app.workspace) {
+			this.app.workspace = new Workspace(this.app);
+		}
+		this.containerEl = containerEl ?? null;
+		this.contentEl = contentEl ?? null;
+		this.pinned = false;
+		this.view = null;
+		this._root = this.app?.workspace?.rightSplit ?? null;
+	}
+	getRoot() {
+		return this._root ?? this.app?.workspace?.rightSplit ?? null;
+	}
+	setRoot(root) {
+		this._root = root;
+	}
+	setPinned(pinned) {
+		this.pinned = pinned;
+		this.trigger('pinned-change', pinned);
+	}
+	async open(view) {
+		this.view = view;
+		if (view) {
+			view.leaf = this;
+			if (!view.app) view.app = this.app;
+			if (!view._isOpened && typeof view.onOpen === 'function') {
+				view._isOpened = true;
+				await view.onOpen();
+			}
+		}
+		return view;
+	}
+}
+
+export class Notice {
+	constructor(message, duration) {
+		this.message = message;
+		this.duration = duration;
+	}
+	hide() {}
+}
+
 export class MarkdownRenderer {
 	static async render(_app, markdown, el) {
 		if (el?.setText) el.setText(markdown);
@@ -90,8 +333,9 @@ export class Setting {
 
 // Phase 7 task 3 round D: `main.ts` defines `GukiChatPlugin extends Plugin`.
 // Section Y instantiates the plugin to test the full save-settings chain.
-export class Plugin {
+export class Plugin extends Component {
 	constructor(app, manifest) {
+		super();
 		this.app = app;
 		this.manifest = manifest ?? { dir: '' };
 	}
@@ -100,7 +344,7 @@ export class Plugin {
 	addSettingTab() {}
 	registerView() {}
 	addRibbonIcon() {}
-	registerEvent() {}
+	registerEvent(eventRef) { super.registerEvent(eventRef); }
 	addCommand() {}
 }
 

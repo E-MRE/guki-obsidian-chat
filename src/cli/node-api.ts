@@ -30,6 +30,7 @@ type NetModule = typeof import('net');
 type OsModule = typeof import('os');
 type PathModule = typeof import('path');
 type ProcessModule = typeof import('process');
+type ReadlineModule = typeof import('readline');
 
 const DESKTOP_ONLY = 'GuKi Chat runs the Claude Code CLI as a subprocess, which is desktop only.';
 
@@ -84,6 +85,13 @@ export function nodePath(): Promise<PathModule> {
 		throw new Error(DESKTOP_ONLY);
 	}
 	return Promise.resolve(loadNodeModule('path') as PathModule);
+}
+
+export function nodeReadline(): Promise<ReadlineModule> {
+	if (!Platform.isDesktop) {
+		throw new Error(DESKTOP_ONLY);
+	}
+	return Promise.resolve(loadNodeModule('readline') as ReadlineModule);
 }
 
 /**

@@ -1,4 +1,4 @@
-import { ItemView, Notice, TFile, WorkspaceLeaf } from 'obsidian';
+import { ItemView, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import {
 	CHAT_VIEW_ICON,
 	CHAT_VIEW_TITLE,
@@ -22,22 +22,48 @@ import { formatModelName } from '../cli/events';
 import { decideAskUserQuestion } from '../core/ask-user-question';
 import type { SessionManager } from '../core/session-manager';
 import { Composer, type ComposerStatus } from './composer';
+import { HistoryDropdown } from './history-dropdown';
+import { NodeTranscriptStore, type SessionPage, type TranscriptStore } from '../data/transcript-store';
 import { MessageList } from './message-list';
+
+/** Page size for historical conversation paging (UI layer policy, Görev 8). */
+export const HISTORY_PAGE_SIZE = 50;
 
 export class ChatView extends ItemView {
 	private rootEl: HTMLElement | null = null;
+	private headerEl: HTMLElement | null = null;
+	private historyTriggerEl: HTMLElement | null = null;
+	private viewActionEl: HTMLElement | null = null;
 	private resizeObserver: ResizeObserver | null = null;
 	private pendingMeasure: number | null = null;
 	private messageList: MessageList | null = null;
 	private composer: Composer | null = null;
+	private historyDropdown: HistoryDropdown | null = null;
+	private transcriptStore: TranscriptStore = new NodeTranscriptStore();
 	private unsubscribe: (() => void) | null = null;
+	private currentSessionId: string | null = null;
+	private currentPage: SessionPage | null = null;
+	private loadOlderEl: HTMLElement | null = null;
+
+	/**
+	 * Seam for selecting a past session (Phase 8 Görev 8).
+	 * Emits the chosen session ID; drawing the historical conversation is wired in the next lane.
+	 */
+	onSessionSelected?: (sessionId: string) => void;
 
 	/**
 	 * The session lives on the plugin, not here: the subprocess and the transcript must survive
 	 * the panel being closed and reopened.
 	 */
-	constructor(leaf: WorkspaceLeaf, private readonly session: SessionManager) {
+	constructor(
+		leaf: WorkspaceLeaf,
+		private readonly session: SessionManager,
+		transcriptStore?: TranscriptStore,
+	) {
 		super(leaf);
+		if (transcriptStore) {
+			this.transcriptStore = transcriptStore;
+		}
 	}
 
 	getViewType(): string {
@@ -58,6 +84,17 @@ export class ChatView extends ItemView {
 
 		const root = this.contentEl.createDiv({ cls: 'guki-root' });
 		this.rootEl = root;
+
+		this.historyDropdown = new HistoryDropdown({
+			containerEl: root,
+			getSessions: async () => {
+				const paths = await this.session.vaultPaths();
+				return this.transcriptStore.listSessions(paths.root);
+			},
+			onSelectSession: (sessionId: string) => {
+				void this.handleSelectSession(sessionId);
+			},
+		});
 
 		// A positioned wrapper, not the scroller itself: the jump-to-bottom button has to stay put
 		// while the content behind it scrolls, so it cannot live inside the scrolling element.
@@ -177,6 +214,7 @@ export class ChatView extends ItemView {
 		this.messageList.scrollToBottom();
 
 		this.observeWidth(root);
+		this.syncHistoryControl();
 
 		// `pinned-change` is a WorkspaceLeaf event, not a Workspace one (obsidian.d.ts:7369).
 		// Registering it on the view means it is released when the leaf goes away.
@@ -195,6 +233,17 @@ export class ChatView extends ItemView {
 		this.unsubscribe?.();
 		this.unsubscribe = null;
 		this.messageList = null;
+		this.historyDropdown?.destroy();
+		this.historyDropdown = null;
+		if (this.viewActionEl) {
+			this.viewActionEl.remove();
+			this.viewActionEl = null;
+		}
+		if (this.headerEl) {
+			this.headerEl.remove();
+			this.headerEl = null;
+		}
+		this.historyTriggerEl = null;
 		// Its own ResizeObserver is not covered by Component.register* either — see the composer's
 		// own comment on `destroy`.
 		this.composer?.destroy();
@@ -204,11 +253,156 @@ export class ChatView extends ItemView {
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
 		if (this.pendingMeasure !== null) {
-			window.cancelAnimationFrame(this.pendingMeasure);
+			if (typeof window.cancelAnimationFrame === 'function') {
+				window.cancelAnimationFrame(this.pendingMeasure);
+			}
 			this.pendingMeasure = null;
 		}
+		if (this.loadOlderEl) {
+			this.loadOlderEl.remove();
+			this.loadOlderEl = null;
+		}
+		this.currentPage = null;
+		this.currentSessionId = null;
 		this.rootEl = null;
 		this.contentEl.empty();
+	}
+
+	async handleSelectSession(sessionId: string): Promise<void> {
+		if (this.currentSessionId === sessionId) {
+			this.onSessionSelected?.(sessionId);
+			return;
+		}
+
+		this.onSessionSelected?.(sessionId);
+
+		if (this.loadOlderEl) {
+			this.loadOlderEl.remove();
+			this.loadOlderEl = null;
+		}
+		this.currentPage = null;
+
+		try {
+			const paths = await this.session.vaultPaths();
+			const page = await this.transcriptStore.readSession(sessionId, paths?.root, { count: HISTORY_PAGE_SIZE });
+			this.currentPage = page;
+			if (page.length === 0) {
+				this.session.state.setItems([]);
+				this.session.state.addNotice('info', 'This conversation has no messages to display.');
+			} else {
+				this.session.state.setItems(page);
+			}
+			this.currentSessionId = sessionId;
+			this.session.switchConversation?.(sessionId);
+			this.updateLoadOlderControl();
+			this.messageList?.scrollToBottom();
+		} catch (err: unknown) {
+			this.session.state.setItems([]);
+			this.currentPage = null;
+			this.updateLoadOlderControl();
+			const msg = err instanceof Error ? err.message : String(err);
+			this.session.state.addNotice('error', 'Could not load conversation.', msg);
+			this.currentSessionId = sessionId;
+			this.session.switchConversation?.(null);
+			this.messageList?.scrollToBottom();
+		}
+	}
+
+	getLoadOlderEl(): HTMLElement | null {
+		return this.loadOlderEl;
+	}
+
+	private updateLoadOlderControl(): void {
+		const scrollEl = this.messageList?.getScrollEl();
+		if (!scrollEl) {
+			return;
+		}
+
+		if (this.currentPage?.hasMoreBefore) {
+			if (!this.loadOlderEl) {
+				this.loadOlderEl = scrollEl.createEl('button', {
+					cls: 'guki-load-older',
+					text: 'Load older messages',
+				});
+				this.registerDomEvent(this.loadOlderEl, 'click', () => {
+					void this.handleLoadOlder();
+				});
+			}
+			if (scrollEl.children[0] !== this.loadOlderEl) {
+				scrollEl.insertBefore(this.loadOlderEl, scrollEl.children[0] ?? null);
+			}
+		} else {
+			if (this.loadOlderEl) {
+				this.loadOlderEl.remove();
+				this.loadOlderEl = null;
+			}
+		}
+	}
+
+	async handleLoadOlder(): Promise<void> {
+		if (!this.currentPage || !this.currentPage.hasMoreBefore) {
+			return;
+		}
+
+		const scrollEl = this.messageList?.getScrollEl();
+		const prevScrollTop = scrollEl?.scrollTop ?? 0;
+		const prevScrollHeight = scrollEl?.scrollHeight ?? 0;
+		const anchorEl = this.messageList?.getFirstMessageEl();
+
+		try {
+			const olderPage = await this.currentPage.loadBefore(HISTORY_PAGE_SIZE);
+			this.currentPage = olderPage;
+
+			this.messageList?.setSuppressScrollToBottom(true);
+			try {
+				this.session.state.prependItems(olderPage);
+			} finally {
+				this.messageList?.setSuppressScrollToBottom(false);
+			}
+
+			if (scrollEl) {
+				const deltaHeight = scrollEl.scrollHeight - prevScrollHeight;
+				if (deltaHeight > 0) {
+					scrollEl.scrollTop = prevScrollTop + deltaHeight;
+				}
+			}
+			if (anchorEl && typeof anchorEl.scrollIntoView === 'function') {
+				anchorEl.scrollIntoView();
+			}
+
+			this.updateLoadOlderControl();
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			this.session.state.addNotice('error', 'Could not load older messages.', msg);
+		}
+	}
+
+	getCurrentSessionId(): string | null {
+		return this.currentSessionId;
+	}
+
+	getTranscriptStore(): TranscriptStore {
+		return this.transcriptStore;
+	}
+
+	toggleHistory(): Promise<void> {
+		return this.historyDropdown ? this.historyDropdown.toggle() : Promise.resolve();
+	}
+
+	getHistoryDropdown(): HistoryDropdown | null {
+		return this.historyDropdown;
+	}
+
+	getHistoryTriggerEl(): HTMLElement | null {
+		return this.historyTriggerEl ?? this.viewActionEl;
+	}
+
+	getViewActionEl(): HTMLElement | null {
+		return this.viewActionEl;
+	}
+
+	getHeaderEl(): HTMLElement | null {
+		return this.headerEl;
 	}
 
 	/**
@@ -386,7 +580,84 @@ export class ChatView extends ItemView {
 	 * between the main area and a sidebar (obsidian.d.ts:6715).
 	 */
 	onResize(): void {
+		this.syncHistoryControl();
 		this.refreshWidthClass();
+	}
+
+	/**
+	 * Determines whether the history control should be placed in Obsidian's view-action area.
+	 *
+	 * Placement rule & Trap 1 safeguard:
+	 * Placed in Obsidian's view action when docked in the main editor area with width
+	 * >= NARROW_BREAKPOINT_PX (480px); falls back to the in-panel header button when docked
+	 * in a side panel or when the main-area leaf is narrower than 480px (trap 1 safeguard).
+	 */
+	shouldUseViewAction(): boolean {
+		const isMain = Boolean(
+			this.leaf &&
+			typeof this.leaf.getRoot === 'function' &&
+			this.leaf.getRoot() === this.app?.workspace?.rootSplit,
+		);
+		if (!isMain) {
+			return false;
+		}
+		const width = this.rootEl?.clientWidth || this.containerEl?.clientWidth || 0;
+		if (width > 0 && width < NARROW_BREAKPOINT_PX) {
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Synchronizes the placement of the conversation history control between Obsidian's
+	 * view-action chrome and an in-panel header strip.
+	 * Exactly one control is present at a time: never two, never zero.
+	 */
+	syncHistoryControl(): void {
+		if (!this.rootEl || !this.historyDropdown) {
+			return;
+		}
+
+		if (this.shouldUseViewAction()) {
+			// Docked in main editor area and wide -> Obsidian view action, NO in-panel header strip
+			if (this.headerEl) {
+				this.headerEl.remove();
+				this.headerEl = null;
+				this.historyTriggerEl = null;
+			}
+			if (!this.viewActionEl) {
+				this.viewActionEl = this.addAction('history', 'Conversation history', () => {
+					void this.historyDropdown?.toggle();
+				});
+			}
+			this.historyDropdown.setTriggerEl(this.viewActionEl);
+		} else {
+			// Docked in side panel or cramped main editor (trap 1) -> in-panel header button, NO view action
+			if (this.viewActionEl) {
+				this.viewActionEl.remove();
+				this.viewActionEl = null;
+			}
+			if (!this.headerEl) {
+				const header = this.rootEl.createDiv({ cls: 'guki-header' });
+				if (this.rootEl.children[0] !== header) {
+					this.rootEl.insertBefore(header, this.rootEl.children[0] ?? null);
+				}
+				this.headerEl = header;
+
+				this.historyTriggerEl = header.createEl('button', {
+					cls: 'clickable-icon guki-header-history-btn',
+					attr: {
+						'aria-label': 'Conversation history',
+						'type': 'button',
+					},
+				});
+				setIcon(this.historyTriggerEl, 'history');
+				this.registerDomEvent(this.historyTriggerEl, 'click', () => {
+					void this.historyDropdown?.toggle();
+				});
+			}
+			this.historyDropdown.setTriggerEl(this.historyTriggerEl);
+		}
 	}
 
 	/**
@@ -401,16 +672,21 @@ export class ChatView extends ItemView {
 	 */
 	private observeWidth(target: HTMLElement): void {
 		this.applyWidthClass(target.clientWidth);
+		this.syncHistoryControl();
 		this.resizeObserver = new ResizeObserver((entries) => {
 			const entry = entries[0];
 			if (entry) {
 				this.applyWidthClass(entry.contentRect.width);
+				this.syncHistoryControl();
 			}
 		});
 		this.resizeObserver.observe(target);
 
 		this.registerEvent(
-			this.app.workspace.on('layout-change', () => this.refreshWidthClass()),
+			this.app.workspace.on('layout-change', () => {
+				this.syncHistoryControl();
+				this.refreshWidthClass();
+			}),
 		);
 	}
 
@@ -427,6 +703,7 @@ export class ChatView extends ItemView {
 			this.pendingMeasure = null;
 			if (this.rootEl) {
 				this.applyWidthClass(this.rootEl.clientWidth);
+				this.syncHistoryControl();
 			}
 		});
 	}

@@ -33,12 +33,52 @@
 }
 
 .guki-root {
+	position: relative;
 	display: flex;
 	flex-direction: column;
 	height: 100%;
 	min-height: 0;
 	gap: var(--size-4-3);
 	padding: var(--size-4-4);
+}
+
+/* --- header row --------------------------------------------------------- */
+
+.guki-header {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	flex-shrink: 0;
+	min-height: var(--size-4-6);
+}
+
+/* Single icon-sized control aligned to the top corner, matching Obsidian's native clickable-icon */
+.guki-header-history-btn.guki-header-history-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: var(--size-4-6);
+	height: var(--size-4-6);
+	padding: 0;
+	margin: 0;
+	background-color: transparent;
+	box-shadow: none;
+	border: none;
+	border-radius: var(--radius-s);
+	color: var(--icon-color, var(--text-muted));
+	cursor: var(--cursor);
+	-webkit-user-select: none;
+	user-select: none;
+}
+
+.guki-header-history-btn:hover {
+	color: var(--icon-color-hover, var(--text-normal));
+	background-color: var(--background-modifier-hover);
+}
+
+.guki-header-history-btn svg {
+	width: var(--icon-s);
+	height: var(--icon-s);
 }
 
 /* --- message list ------------------------------------------------------- */
@@ -893,6 +933,24 @@
 .guki-jump.guki-jump-new:hover {
 	background-color: var(--interactive-accent-hover);
 	color: var(--text-on-accent);
+}
+
+/* --- load older --------------------------------------------------------- */
+.guki-load-older {
+	align-self: center;
+	margin: var(--size-4-2) auto;
+	padding: var(--size-4-1) var(--size-4-3);
+	border-radius: var(--radius-l);
+	font-size: var(--font-ui-smaller);
+	background-color: var(--background-secondary-alt);
+	color: var(--text-muted);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: var(--shadow-s);
+	cursor: var(--cursor);
+}
+
+.guki-load-older:hover {
+	color: var(--text-normal);
 }
 
 /* Notice: out-of-band, centred, no bubble tail. */
@@ -1756,4 +1814,79 @@
 	font-family: var(--font-monospace);
 	overflow-wrap: anywhere;
 }
+
+/* --- history dropdown --------------------------------------------------- */
+
+.guki-history-dropdown {
+	position: absolute;
+	top: calc(var(--size-4-4) + var(--size-4-6) + var(--size-2-1));
+	right: var(--size-4-4);
+	left: var(--size-4-4);
+	max-height: 320px;
+	overflow-y: auto;
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	box-shadow: var(--shadow-s);
+	z-index: var(--layer-popover, 50);
+	display: flex;
+	flex-direction: column;
+}
+
+.guki-root:not(:has(.guki-header)) .guki-history-dropdown {
+	top: var(--size-4-2);
+}
+
+.guki-history-item {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	flex-shrink: 0;
+	padding: var(--size-4-2) var(--size-4-3);
+	cursor: var(--cursor);
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	line-height: var(--line-height-normal);
+	user-select: none;
+	content-visibility: auto;
+	contain-intrinsic-size: 0 32px;
+}
+
+.guki-history-item:hover,
+.guki-history-item.is-selected {
+	background-color: var(--background-modifier-hover);
+}
+
+.guki-history-item.is-selected .guki-history-title {
+	color: var(--text-accent);
+}
+
+.guki-history-title {
+	flex: 1 1 auto;
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.guki-history-date {
+	flex-shrink: 0;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.guki-history-cost {
+	flex-shrink: 0;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	opacity: 0.8;
+}
+
+.guki-history-empty {
+	padding: var(--size-4-4);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	text-align: center;
+}
+
 

@@ -56,7 +56,7 @@
  * U.  Phase 7 task 3 round A: permission model security floor (.obsidian protection and
  *     Unicode path normalisation).
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createConnection, createServer } from 'node:net';
@@ -95,7 +95,7 @@ import { toolPermissionBodyText, toolResultTitle, toolStatusText } from '../src/
 import { canRememberPermission, createPermissionCard, permissionDiff, rememberLabelText, shortenPathForLabel, type PermissionActions } from '../src/ui/permission-card';
 import { clearRememberedDecisions, DEFAULT_SETTINGS, formatRememberedDecision, removeRememberedDecision } from '../src/ui/settings-tab';
 import GukiChatPlugin from '../src/main';
-import { currentStatus } from '../src/ui/chat-view';
+import { ChatView, currentStatus, HISTORY_PAGE_SIZE } from '../src/ui/chat-view';
 import { renderQuotaBar } from '../src/ui/composer';
 import { formatTurnMeta, MessageList, withTurnMeta } from '../src/ui/message-list';
 import {
@@ -143,11 +143,30 @@ import {
 import { absolutePathForFile } from '../src/cli/node-api';
 import { Composer, pasteBelongsToComposer, type ComposerOptions } from '../src/ui/composer';
 import { filterVaultFiles, insertItem, type DropdownItem, type TriggerMatch } from '../src/ui/composer-dropdown';
-import { projectSlug, scanSessionsDir } from '../src/data/session-index';
+import {
+	extractUserPromptText,
+	isExplicitHumanUser,
+	isSyntheticUser,
+	MAX_DERIVED_TITLE_LENGTH,
+	projectSlug,
+	sanitizeDerivedTitle,
+	scanSessionsDir,
+	sessionDisplayTitle,
+	type SessionSummary,
+} from '../src/data/session-index';
+import {
+	formatSessionDate,
+	HistoryDropdown,
+	shapeSessionRow,
+	type HistoryRowItem,
+} from '../src/ui/history-dropdown';
 import { NodeTranscriptStore } from '../src/data/transcript-store';
-import { FileSystemAdapter, TFile } from 'obsidian';
-import { parseAskUserQuestionInput, decideAskUserQuestion } from '../src/core/ask-user-question';
+import { App, FileSystemAdapter, TFile, WorkspaceLeaf } from 'obsidian';
+import { parseAskUserQuestionInput, decideAskUserQuestion, formatAskUserQuestionSummary, parseAskUserQuestionAnswers } from '../src/core/ask-user-question';
 import { AskUserQuestionInline } from '../src/ui/ask-user-question';
+import { DiskTranscriptLoader, resolveTranscriptBranch } from '../src/data/disk-transcript-loader';
+import { translateTranscriptRecords, parsePersistedOutput, resolveSidecarContent } from '../src/data/transcript-translator';
+import type { ChatItem, UserItem, AssistantItem, DividerItem, PermissionItem } from '../src/core/chat-state';
 
 
 let failures = 0;
@@ -5246,8 +5265,14 @@ class FakeElement {
 	setAttribute(name: string, value: string) {
 		this.attributes[name] = String(value);
 	}
+	setAttr(name: string, value: string) {
+		this.setAttribute(name, value);
+	}
 	getAttribute(name: string): string | null {
 		return this.attributes[name] ?? null;
+	}
+	getAttr(name: string): string | null {
+		return this.getAttribute(name);
 	}
 	get nextSibling(): any {
 		const p = this.parentElement ?? this.parent;
@@ -5301,6 +5326,11 @@ class FakeElement {
 				fn(e);
 			}
 		};
+	}
+	removeEventListener(evt: string, cb: any) {
+		if (this._eventListenersList[evt]) {
+			this._eventListenersList[evt] = this._eventListenersList[evt].filter((fn: any) => fn !== cb);
+		}
 	}
 	hide() { this.addClass('guki-hidden'); }
 	show() { this.removeClass('guki-hidden'); }
@@ -10438,6 +10468,2383 @@ console.log('\nC8: Compacting indicator choke-point clearing and non-clearing su
 		);
 	}
 }
+
+// --- AI. Görev 8: DiskTranscriptLoader — DAG branch resolution and paged streaming reads ---
+
+console.log('\nAI. Görev 8: DiskTranscriptLoader (DAG active branch resolution & paged reads)');
+
+const TRANSCRIPT_TEST_DIR = mkdtempSync(join(tmpdir(), 'guki-transcript-checks-'));
+
+// AI1. Synthetic fixture with a fork: abandoned branch must be absent, count lower than total records
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-fork.jsonl');
+	writeFileSync(
+		filePath,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u1', timestamp: '2026-09-01T10:00:00.000Z', message: { role: 'user', content: 'Turn 1 prompt' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a1', parentUuid: 'u1', timestamp: '2026-09-01T10:00:05.000Z', message: { role: 'assistant', content: 'Turn 1 answer' } }),
+			// Abandoned branch (Fork 1)
+			JSON.stringify({ type: 'user', uuid: 'u2-abandoned', parentUuid: 'a1', timestamp: '2026-09-01T10:01:00.000Z', message: { role: 'user', content: 'Fork 1 prompt' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a2-abandoned', parentUuid: 'u2-abandoned', timestamp: '2026-09-01T10:01:05.000Z', message: { role: 'assistant', content: 'Fork 1 answer' } }),
+			// Active branch (Fork 2)
+			JSON.stringify({ type: 'user', uuid: 'u2-active', parentUuid: 'a1', timestamp: '2026-09-01T10:02:00.000Z', message: { role: 'user', content: 'Fork 2 prompt' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a2-active', parentUuid: 'u2-active', timestamp: '2026-09-01T10:02:05.000Z', message: { role: 'assistant', content: 'Fork 2 answer' } }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a2-active', sessionId: 'session-fork' }),
+			'',
+		].join('\n'),
+	);
+
+	const loader = new DiskTranscriptLoader(filePath);
+	const branch = await loader.resolveBranch();
+
+	eq('AI1.1 active branch length is 4', branch.activeBranch.length, 4);
+	eq('AI1.2 active branch tipUuid is a2-active', branch.tipUuid, 'a2-active');
+	eq('AI1.3 fallback was not used', branch.usedFallback, false);
+	eq('AI1.4 abandonedRecordCount is 2', branch.abandonedRecordCount, 2);
+	check(
+		'AI1.5 active count (4) is lower than total conversation records (6)',
+		branch.activeBranch.length < 6,
+	);
+	const activeUuids = branch.activeBranch.map((r) => r.uuid);
+	eq('AI1.6 active branch uuids follow root -> tip chain', activeUuids.join(','), 'u1,a1,u2-active,a2-active');
+	check('AI1.7 u2-abandoned is absent from active branch', !activeUuids.includes('u2-abandoned'));
+	check('AI1.8 a2-abandoned is absent from active branch', !activeUuids.includes('a2-abandoned'));
+
+	const fullRecords = await loader.loadRange(0, 4);
+	eq('AI1.9 full record count matches active branch', fullRecords.length, 4);
+	eq(
+		'AI1.10 full record contents match active branch',
+		fullRecords.map((r) => (r.message as { content?: string })?.content).join('|'),
+		'Turn 1 prompt|Turn 1 answer|Fork 2 prompt|Fork 2 answer',
+	);
+}
+
+// AI2. Fixture whose file order contradicts chain order: result must follow chain
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-reordered.jsonl');
+	writeFileSync(
+		filePath,
+		[
+			// Reverse order on disk: A2 -> U1 -> A1 -> U2
+			JSON.stringify({ type: 'assistant', uuid: 'a2', parentUuid: 'u2', timestamp: '2026-09-01T10:00:20.000Z', message: { role: 'assistant', content: 'Fourth' } }),
+			JSON.stringify({ type: 'user', uuid: 'u1', timestamp: '2026-09-01T10:00:00.000Z', message: { role: 'user', content: 'First' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a1', parentUuid: 'u1', timestamp: '2026-09-01T10:00:05.000Z', message: { role: 'assistant', content: 'Second' } }),
+			JSON.stringify({ type: 'user', uuid: 'u2', parentUuid: 'a1', timestamp: '2026-09-01T10:00:10.000Z', message: { role: 'user', content: 'Third' } }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a2', sessionId: 'session-reordered' }),
+			'',
+		].join('\n'),
+	);
+
+	const loader = new DiskTranscriptLoader(filePath);
+	const branch = await loader.resolveBranch();
+
+	eq('AI2.1 resolved branch order follows chain causality', branch.activeBranch.map((r) => r.uuid).join(','), 'u1,a1,u2,a2');
+
+	const records = await loader.loadRange(0, 4);
+	eq(
+		'AI2.2 full records loaded in chain order, NOT file order',
+		records.map((r) => (r.message as { content?: string })?.content).join('|'),
+		'First|Second|Third|Fourth',
+	);
+}
+
+// AI3. Edge case: No last-prompt record exists -> fallback to newest leaf with diagnostic
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-no-last-prompt.jsonl');
+	writeFileSync(
+		filePath,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u1', timestamp: '2026-09-01T10:00:00.000Z' }),
+			JSON.stringify({ type: 'assistant', uuid: 'a1', parentUuid: 'u1', timestamp: '2026-09-01T10:00:05.000Z' }),
+			// Older leaf fork
+			JSON.stringify({ type: 'user', uuid: 'u2-old', parentUuid: 'a1', timestamp: '2026-09-01T10:01:00.000Z' }),
+			JSON.stringify({ type: 'assistant', uuid: 'a2-old', parentUuid: 'u2-old', timestamp: '2026-09-01T10:01:05.000Z' }),
+			// Newer leaf fork
+			JSON.stringify({ type: 'user', uuid: 'u2-new', parentUuid: 'a1', timestamp: '2026-09-01T10:02:00.000Z' }),
+			JSON.stringify({ type: 'assistant', uuid: 'a2-new', parentUuid: 'u2-new', timestamp: '2026-09-01T10:02:05.000Z' }),
+			// No last-prompt!
+			'',
+		].join('\n'),
+	);
+
+	const branch = await resolveTranscriptBranch(filePath);
+
+	eq('AI3.1 usedFallback is true when last-prompt is missing', branch.usedFallback, true);
+	eq('AI3.2 fallbackReason is no-last-prompt', branch.fallbackReason, 'no-last-prompt');
+	eq('AI3.3 tipUuid is the leaf with the newest timestamp (a2-new)', branch.tipUuid, 'a2-new');
+	eq('AI3.4 active branch follows the newest leaf path', branch.activeBranch.map((r) => r.uuid).join(','), 'u1,a1,u2-new,a2-new');
+	eq('AI3.5 older fork records marked abandoned', branch.abandonedRecordCount, 2);
+}
+
+// AI4. Edge case: last-prompt points to unknown leafUuid (torn or truncated line)
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-unknown-leaf.jsonl');
+	writeFileSync(
+		filePath,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u1', timestamp: '2026-09-01T10:00:00.000Z' }),
+			JSON.stringify({ type: 'assistant', uuid: 'a1', parentUuid: 'u1', timestamp: '2026-09-01T10:00:05.000Z' }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'nonexistent-leaf-uuid', sessionId: 'session-unknown-leaf' }),
+			'',
+		].join('\n'),
+	);
+
+	const branch = await resolveTranscriptBranch(filePath);
+
+	eq('AI4.1 usedFallback is true for unknown leafUuid', branch.usedFallback, true);
+	eq('AI4.2 fallbackReason is unknown-leaf-uuid', branch.fallbackReason, 'unknown-leaf-uuid');
+	eq('AI4.3 tipUuid falls back to newest available leaf (a1)', branch.tipUuid, 'a1');
+	eq('AI4.4 active branch resolves cleanly to a1', branch.activeBranch.map((r) => r.uuid).join(','), 'u1,a1');
+}
+
+// AI5. Edge case: Broken parentUuid chain (missing parent) -> returns break to tip, reports break
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-broken-chain.jsonl');
+	writeFileSync(
+		filePath,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u-orphaned-root', timestamp: '2026-09-01T10:00:00.000Z' }),
+			// Note: 'missing-asst' record is absent from the file
+			JSON.stringify({ type: 'user', uuid: 'u2', parentUuid: 'missing-asst', timestamp: '2026-09-01T10:01:00.000Z' }),
+			JSON.stringify({ type: 'assistant', uuid: 'a2', parentUuid: 'u2', timestamp: '2026-09-01T10:01:05.000Z' }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a2', sessionId: 'session-broken-chain' }),
+			'',
+		].join('\n'),
+	);
+
+	const branch = await resolveTranscriptBranch(filePath);
+
+	check('AI5.1 chainBreak is reported', branch.chainBreak !== undefined);
+	eq('AI5.2 chainBreak atUuid is u2', branch.chainBreak?.atUuid, 'u2');
+	eq('AI5.3 chainBreak missingParentUuid is missing-asst', branch.chainBreak?.missingParentUuid, 'missing-asst');
+	eq('AI5.4 active branch returns portion from break to tip only', branch.activeBranch.map((r) => r.uuid).join(','), 'u2,a2');
+	check('AI5.5 orphaned root above break is not returned', !branch.activeBranch.map((r) => r.uuid).includes('u-orphaned-root'));
+}
+
+// AI6. Edge case: Cycle in parentUuid -> stops on revisit, does not loop forever
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-cycle.jsonl');
+	writeFileSync(
+		filePath,
+		[
+			JSON.stringify({ type: 'user', uuid: 'node-a', parentUuid: 'node-c', timestamp: '2026-09-01T10:00:00.000Z' }),
+			JSON.stringify({ type: 'assistant', uuid: 'node-b', parentUuid: 'node-a', timestamp: '2026-09-01T10:00:05.000Z' }),
+			JSON.stringify({ type: 'user', uuid: 'node-c', parentUuid: 'node-b', timestamp: '2026-09-01T10:00:10.000Z' }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'node-c', sessionId: 'session-cycle' }),
+			'',
+		].join('\n'),
+	);
+
+	const branch = await resolveTranscriptBranch(filePath);
+
+	eq('AI6.1 cycleDetected flag is true', branch.cycleDetected, true);
+	eq('AI6.2 stops on revisit with exactly 3 nodes', branch.activeBranch.length, 3);
+	eq('AI6.3 returned chain contains cycle nodes in walked order', branch.activeBranch.map((r) => r.uuid).join(','), 'node-a,node-b,node-c');
+}
+
+// AI7. Edge case: Single unparsable line -> skips line, keeps file
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-unparsable.jsonl');
+	writeFileSync(
+		filePath,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u1', timestamp: '2026-09-01T10:00:00.000Z' }),
+			'{"type":"assistant", broken unparsable json string line',
+			JSON.stringify({ type: 'assistant', uuid: 'a1', parentUuid: 'u1', timestamp: '2026-09-01T10:00:05.000Z' }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a1', sessionId: 'session-unparsable' }),
+			'',
+		].join('\n'),
+	);
+
+	const branch = await resolveTranscriptBranch(filePath);
+
+	eq('AI7.1 skippedLines is 1', branch.skippedLines, 1);
+	eq('AI7.2 active branch resolves valid records', branch.activeBranch.map((r) => r.uuid).join(','), 'u1,a1');
+	eq('AI7.3 totalLines counts all lines', branch.totalLines, 4);
+}
+
+// AI8. Edge case: Empty file / missing file / missing directory -> empty result, never throws
+{
+	// 8a. Empty file
+	const emptyPath = join(TRANSCRIPT_TEST_DIR, 'session-empty.jsonl');
+	writeFileSync(emptyPath, '');
+
+	const emptyLoader = new DiskTranscriptLoader(emptyPath);
+	const emptyBranch = await emptyLoader.resolveBranch();
+
+	eq('AI8.1 empty file active branch length is 0', emptyBranch.activeBranch.length, 0);
+	eq('AI8.2 empty file tipUuid is null', emptyBranch.tipUuid, null);
+	eq('AI8.3 empty file totalLines is 0', emptyBranch.totalLines, 0);
+
+	const emptyPage = await emptyLoader.loadNewest(10);
+	eq('AI8.4 empty file loadNewest records is empty', emptyPage.records.length, 0);
+	eq('AI8.5 empty file hasMoreBefore is false', emptyPage.hasMoreBefore, false);
+
+	// 8b. Missing file
+	const missingPath = join(TRANSCRIPT_TEST_DIR, 'session-does-not-exist.jsonl');
+	const missingLoader = new DiskTranscriptLoader(missingPath);
+	const missingBranch = await missingLoader.resolveBranch();
+
+	eq('AI8.6 missing file returns empty active branch', missingBranch.activeBranch.length, 0);
+	eq('AI8.7 missing file tipUuid is null', missingBranch.tipUuid, null);
+
+	const missingPage = await missingLoader.loadNewest(5);
+	eq('AI8.8 missing file loadNewest does not throw and returns empty', missingPage.records.length, 0);
+
+	// 8c. Missing directory
+	const missingDirFile = join(TRANSCRIPT_TEST_DIR, 'nonexistent-subdir', 'session.jsonl');
+	const missingDirLoader = new DiskTranscriptLoader(missingDirFile);
+	const missingDirBranch = await missingDirLoader.resolveBranch();
+
+	eq('AI8.9 missing directory returns empty active branch', missingDirBranch.activeBranch.length, 0);
+	eq('AI8.10 missing directory tipUuid is null', missingDirBranch.tipUuid, null);
+}
+
+// AI9. Paging seam: newest N, then N before, with no overlap and no gap
+{
+	const filePath = join(TRANSCRIPT_TEST_DIR, 'session-paging.jsonl');
+	const lines: string[] = [];
+	for (let i = 0; i < 10; i++) {
+		lines.push(
+			JSON.stringify({
+				type: i % 2 === 0 ? 'user' : 'assistant',
+				uuid: `msg-${String(i)}`,
+				parentUuid: i === 0 ? undefined : `msg-${String(i - 1)}`,
+				timestamp: `2026-09-01T10:0${String(i)}:00.000Z`,
+				message: { content: `Content of message ${String(i)}` },
+			}),
+		);
+	}
+	lines.push(JSON.stringify({ type: 'last-prompt', leafUuid: 'msg-9', sessionId: 'session-paging' }));
+	lines.push('');
+	writeFileSync(filePath, lines.join('\n'));
+
+	const loader = new DiskTranscriptLoader(filePath);
+
+	// Page 1: newest 3 items (indices 7, 8, 9)
+	const p1 = await loader.loadNewest(3);
+	eq('AI9.1 page 1 record count is 3', p1.records.length, 3);
+	eq('AI9.2 page 1 startIndex is 7', p1.startIndex, 7);
+	eq('AI9.3 page 1 endIndex is 10', p1.endIndex, 10);
+	eq('AI9.4 page 1 hasMoreBefore is true', p1.hasMoreBefore, true);
+	eq('AI9.5 page 1 uuids are msg-7,msg-8,msg-9', p1.records.map((r) => r.uuid).join(','), 'msg-7,msg-8,msg-9');
+
+	// Page 2: 3 items before page 1's startIndex (indices 4, 5, 6)
+	const p2 = await loader.loadBefore(p1.startIndex, 3);
+	eq('AI9.6 page 2 record count is 3', p2.records.length, 3);
+	eq('AI9.7 page 2 startIndex is 4', p2.startIndex, 4);
+	eq('AI9.8 page 2 endIndex is 7', p2.endIndex, 7);
+	eq('AI9.9 page 2 endIndex matches page 1 startIndex (NO GAP, NO OVERLAP)', p2.endIndex, p1.startIndex);
+	eq('AI9.10 page 2 hasMoreBefore is true', p2.hasMoreBefore, true);
+	eq('AI9.11 page 2 uuids are msg-4,msg-5,msg-6', p2.records.map((r) => r.uuid).join(','), 'msg-4,msg-5,msg-6');
+
+	// Page 3: 3 items before page 2's startIndex (indices 1, 2, 3)
+	const p3 = await loader.loadBefore(p2.startIndex, 3);
+	eq('AI9.12 page 3 record count is 3', p3.records.length, 3);
+	eq('AI9.13 page 3 startIndex is 1', p3.startIndex, 1);
+	eq('AI9.14 page 3 endIndex is 4', p3.endIndex, 4);
+	eq('AI9.15 page 3 endIndex matches page 2 startIndex (NO GAP, NO OVERLAP)', p3.endIndex, p2.startIndex);
+	eq('AI9.16 page 3 hasMoreBefore is true', p3.hasMoreBefore, true);
+	eq('AI9.17 page 3 uuids are msg-1,msg-2,msg-3', p3.records.map((r) => r.uuid).join(','), 'msg-1,msg-2,msg-3');
+
+	// Page 4: 3 items requested before page 3's startIndex (1) -> clamped to 1 item (index 0)
+	const p4 = await loader.loadBefore(p3.startIndex, 3);
+	eq('AI9.18 page 4 record count is clamped to remaining 1', p4.records.length, 1);
+	eq('AI9.19 page 4 startIndex is 0', p4.startIndex, 0);
+	eq('AI9.20 page 4 endIndex is 1', p4.endIndex, 1);
+	eq('AI9.21 page 4 endIndex matches page 3 startIndex', p4.endIndex, p3.startIndex);
+	eq('AI9.22 page 4 hasMoreBefore is false at root', p4.hasMoreBefore, false);
+	eq('AI9.23 page 4 uuid is msg-0', p4.records.map((r) => r.uuid).join(','), 'msg-0');
+
+	// Page 5: request before index 0 -> returns empty page
+	const p5 = await loader.loadBefore(p4.startIndex, 3);
+	eq('AI9.24 page 5 record count before 0 is 0', p5.records.length, 0);
+	eq('AI9.25 page 5 hasMoreBefore is false', p5.hasMoreBefore, false);
+
+	// Reconstitution: all pages concatenated equal the complete active branch
+	const allPagedUuids = [...p4.records, ...p3.records, ...p2.records, ...p1.records].map((r) => r.uuid);
+	eq(
+		'AI9.26 concatenated pages match full active branch with zero duplicates and zero omissions',
+		allPagedUuids.join(','),
+		'msg-0,msg-1,msg-2,msg-3,msg-4,msg-5,msg-6,msg-7,msg-8,msg-9',
+	);
+}
+
+// --- AJ. Görev 8: Title fallback, history list UI, and scrub gitignore reporting ---
+
+console.log('\nAJ. Görev 8: Title fallback, history list UI, and scrub gitignore reporting');
+
+// AJ1. Title fallback & semantic honesty in session-index
+{
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-title-fallback-')));
+
+	// File 1: ai-title present wins over user prompt
+	writeFileSync(
+		join(dir, 'session-ai-title-wins.jsonl'),
+		[
+			JSON.stringify({ type: 'user', timestamp: '2026-09-01T10:00:00.000Z', message: { role: 'user', content: 'What is the speed of light?' } }),
+			JSON.stringify({ type: 'ai-title', aiTitle: 'Light Speed Calculation', sessionId: 'session-ai-title-wins' }),
+			'',
+		].join('\n'),
+	);
+
+	// File 2: ai-title absent -> derived from first user text (string form)
+	writeFileSync(
+		join(dir, 'session-derived-string.jsonl'),
+		[
+			JSON.stringify({ type: 'user', timestamp: '2026-09-01T11:00:00.000Z', message: { role: 'user', content: 'Fix the authentication bug' } }),
+			'',
+		].join('\n'),
+	);
+
+	// File 3: content-block array form with text block and non-text image block
+	writeFileSync(
+		join(dir, 'session-array-blocks.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T12:00:00.000Z',
+				message: {
+					role: 'user',
+					content: [
+						{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'abcd' } },
+						{ type: 'text', text: 'Explain the architecture diagram' },
+					],
+				},
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File 4: non-human/synthetic first message handled: synthetic first message ignored in favor of human message
+	writeFileSync(
+		join(dir, 'session-synthetic-first.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T13:00:00.000Z',
+				origin: { kind: 'synthetic' },
+				message: { role: 'user', content: 'Injected system prompt' },
+			}),
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T13:00:05.000Z',
+				origin: { kind: 'human' },
+				promptSource: 'typed',
+				message: { role: 'user', content: 'Real human question' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File 5: session where all messages are synthetic / tool results -> no derived title
+	writeFileSync(
+		join(dir, 'session-all-synthetic.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T14:00:00.000Z',
+				toolUseResult: true,
+				message: { role: 'user', content: 'Tool execution output' },
+			}),
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T14:00:05.000Z',
+				origin: { kind: 'synthetic' },
+				message: { role: 'user', content: 'System message' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File 6: no usable text (empty or non-text only) -> no title
+	writeFileSync(
+		join(dir, 'session-no-text.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T15:00:00.000Z',
+				message: {
+					role: 'user',
+					content: [
+						{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'xyz' } },
+					],
+				},
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File 7: whitespace and newline collapsing
+	writeFileSync(
+		join(dir, 'session-whitespace.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T16:00:00.000Z',
+				message: { role: 'user', content: '   hello  \n\n\t world\r\n   from\t\tprompt   ' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File 8: over-length trimming (longer than 60 chars)
+	writeFileSync(
+		join(dir, 'session-overlength.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-01T17:00:00.000Z',
+				message: {
+					role: 'user',
+					content: 'This is an exceedingly long user prompt that contains far more than sixty characters and must be trimmed cleanly',
+				},
+			}),
+			'',
+		].join('\n'),
+	);
+
+	const sessions = await scanSessionsDir(dir);
+
+	const aiTitleWins = sessions.find((s) => s.sessionId === 'session-ai-title-wins');
+	eq('AJ1.1 ai-title present wins: title is set', aiTitleWins?.title, 'Light Speed Calculation');
+	eq('AJ1.2 ai-title present wins: derivedTitle is undefined', aiTitleWins?.derivedTitle, undefined);
+
+	const derivedStr = sessions.find((s) => s.sessionId === 'session-derived-string');
+	eq('AJ1.3 ai-title absent: title is undefined', derivedStr?.title, undefined);
+	eq('AJ1.4 ai-title absent: derivedTitle comes from first user text', derivedStr?.derivedTitle, 'Fix the authentication bug');
+
+	// Semantic honesty / real vs derived distinction
+	const dtReal = sessionDisplayTitle(aiTitleWins!);
+	eq('AJ1.5 real title distinction: isDerived is false', dtReal?.isDerived, false);
+	eq('AJ1.6 real title distinction: text is ai-title', dtReal?.text, 'Light Speed Calculation');
+	const dtDerived = sessionDisplayTitle(derivedStr!);
+	eq('AJ1.7 derived title distinction: isDerived is true', dtDerived?.isDerived, true);
+	eq('AJ1.8 derived title distinction: text is derivedTitle', dtDerived?.text, 'Fix the authentication bug');
+
+	const arrayBlocks = sessions.find((s) => s.sessionId === 'session-array-blocks');
+	eq('AJ1.9 content-block array form: non-text ignored, text extracted', arrayBlocks?.derivedTitle, 'Explain the architecture diagram');
+
+	const syntheticFirst = sessions.find((s) => s.sessionId === 'session-synthetic-first');
+	eq('AJ1.10 non-human synthetic first message skipped, human message preferred', syntheticFirst?.derivedTitle, 'Real human question');
+
+	const allSynthetic = sessions.find((s) => s.sessionId === 'session-all-synthetic');
+	eq('AJ1.11 all synthetic / tool records yield no derived title', allSynthetic?.derivedTitle, undefined);
+
+	const noText = sessions.find((s) => s.sessionId === 'session-no-text');
+	eq('AJ1.12 no usable text yields undefined title', noText?.title, undefined);
+	eq('AJ1.13 no usable text yields undefined derivedTitle', noText?.derivedTitle, undefined);
+	eq('AJ1.14 sessionDisplayTitle on no usable text returns null', sessionDisplayTitle(noText!), null);
+
+	const whitespace = sessions.find((s) => s.sessionId === 'session-whitespace');
+	eq('AJ1.15 whitespace and newlines collapsed to single spaces', whitespace?.derivedTitle, 'hello world from prompt');
+
+	const overlength = sessions.find((s) => s.sessionId === 'session-overlength');
+	eq('AJ1.16 over-length trimming: length is capped at MAX_DERIVED_TITLE_LENGTH', overlength?.derivedTitle?.length, MAX_DERIVED_TITLE_LENGTH);
+	eq('AJ1.17 over-length trimming: matches prefix slice of 60 characters', overlength?.derivedTitle, 'This is an exceedingly long user prompt that contains far mo');
+
+	rmSync(dir, { recursive: true, force: true });
+}
+
+// AJ2. History List UI data shaping & keyboard handling
+{
+	// 2.1 Data shaping: ordering preserved, missing cost handled
+	const summaryWithCost: SessionSummary = {
+		sessionId: 'sess-1',
+		title: 'Real Title',
+		startedAt: '2026-09-01T10:00:00.000Z',
+		costUsd: 0.1234,
+	};
+	const summaryWithoutCost: SessionSummary = {
+		sessionId: 'sess-2',
+		derivedTitle: 'Derived Title',
+		startedAt: '2026-08-30T15:30:00.000Z',
+	};
+	const summaryUntitled: SessionSummary = {
+		sessionId: 'sess-3',
+		startedAt: '2026-08-25T08:00:00.000Z',
+	};
+
+	const row1 = shapeSessionRow(summaryWithCost);
+	eq('AJ2.1 shapeSessionRow real title used', row1.title, 'Real Title');
+	eq('AJ2.2 shapeSessionRow real title isDerivedTitle is false', row1.isDerivedTitle, false);
+	eq('AJ2.3 shapeSessionRow cost formatted as $0.12', row1.costText, '$0.12');
+	eq('AJ2.4 shapeSessionRow date formatted', row1.dateText, formatSessionDate('2026-09-01T10:00:00.000Z'));
+
+	const row2 = shapeSessionRow(summaryWithoutCost);
+	eq('AJ2.5 shapeSessionRow derived title used', row2.title, 'Derived Title');
+	eq('AJ2.6 shapeSessionRow derived title isDerivedTitle is true', row2.isDerivedTitle, true);
+	eq('AJ2.7 shapeSessionRow missing cost is null', row2.costText, null);
+
+	const row3 = shapeSessionRow(summaryUntitled);
+	eq('AJ2.8 shapeSessionRow untitled fallback used when no title exists', row3.title, 'Untitled session');
+	eq('AJ2.9 shapeSessionRow untitled cost is null', row3.costText, null);
+
+	// 2.2 Ordering preserved in HistoryDropdown
+	const orderedSummaries = [summaryWithCost, summaryWithoutCost, summaryUntitled];
+	let selectedSessionId: string | null = null;
+	const container = new FakeElement() as any;
+	const dropdown = new HistoryDropdown({
+		containerEl: container,
+		getSessions: async () => orderedSummaries,
+		onSelectSession: (id) => {
+			selectedSessionId = id;
+		},
+	});
+
+	await dropdown.openDropdown();
+	eq('AJ2.10 dropdown isOpen is true after openDropdown', dropdown.isOpen(), true);
+	eq('AJ2.11 dropdown item count matches input summaries', dropdown.getItems().length, 3);
+	eq('AJ2.12 ordering preserved: first item is sess-1', dropdown.getItems()[0]?.sessionId, 'sess-1');
+	eq('AJ2.13 ordering preserved: second item is sess-2', dropdown.getItems()[1]?.sessionId, 'sess-2');
+	eq('AJ2.14 ordering preserved: third item is sess-3', dropdown.getItems()[2]?.sessionId, 'sess-3');
+
+	// Check DOM elements rendered
+	const dropdownEl = dropdown.getDropdownEl() as any;
+	const renderedRows = dropdownEl.children.filter((c: any) => c.hasClass('guki-history-item'));
+	eq('AJ2.15 rendered row count is 3', renderedRows.length, 3);
+
+	const costElPresent = renderedRows[0]?.querySelector('.guki-history-cost');
+	check('AJ2.16 first row has cost element', costElPresent !== null);
+	eq('AJ2.17 first row cost element displays $0.12', costElPresent?.text, '$0.12');
+
+	const costElAbsent = renderedRows[1]?.querySelector('.guki-history-cost');
+	check('AJ2.18 second row has NO cost element (clean visual, not broken)', costElAbsent === null);
+
+	// 2.3 Keyboard navigation: ArrowDown, ArrowUp, Escape, Enter
+	eq('AJ2.19 initial selectedIndex is 0', dropdown.getSelectedIndex(), 0);
+	dropdown.handleKeyDown({ key: 'ArrowDown', preventDefault: () => {} } as any);
+	eq('AJ2.20 ArrowDown advances selectedIndex to 1', dropdown.getSelectedIndex(), 1);
+	dropdown.handleKeyDown({ key: 'ArrowDown', preventDefault: () => {} } as any);
+	eq('AJ2.21 ArrowDown advances selectedIndex to 2', dropdown.getSelectedIndex(), 2);
+	dropdown.handleKeyDown({ key: 'ArrowUp', preventDefault: () => {} } as any);
+	eq('AJ2.22 ArrowUp moves selectedIndex back to 1', dropdown.getSelectedIndex(), 1);
+
+	dropdown.handleKeyDown({ key: 'Enter', preventDefault: () => {} } as any);
+	eq('AJ2.23 Enter emits selection of active row (sess-2)', selectedSessionId, 'sess-2');
+	eq('AJ2.24 Enter closes dropdown', dropdown.isOpen(), false);
+
+	// Escape closes
+	await dropdown.openDropdown();
+	eq('AJ2.25 reopened dropdown isOpen is true', dropdown.isOpen(), true);
+	dropdown.handleKeyDown({ key: 'Escape', preventDefault: () => {} } as any);
+	eq('AJ2.26 Escape closes dropdown', dropdown.isOpen(), false);
+
+	// 2.4 Empty list state
+	const emptyContainer = new FakeElement() as any;
+	const emptyDropdown = new HistoryDropdown({
+		containerEl: emptyContainer,
+		getSessions: async () => [],
+		onSelectSession: () => {},
+	});
+	await emptyDropdown.openDropdown();
+	eq('AJ2.27 empty list dropdown isOpen is true', emptyDropdown.isOpen(), true);
+	eq('AJ2.28 empty list has 0 items', emptyDropdown.getItems().length, 0);
+	const emptyEl = (emptyDropdown.getDropdownEl() as any).querySelector('.guki-history-empty');
+	check('AJ2.29 empty state element exists', emptyEl !== null);
+	eq('AJ2.30 empty state text explains vault has no past sessions', emptyEl?.text, 'No past conversations found in this vault.');
+	emptyDropdown.close();
+}
+
+// AJ3. scrub-capture.py gitignored file reporting and exit codes
+{
+	// 3.1 Gitignored file reported as skipped
+	const resIgnored = spawnSync('python3', ['docs/scrub-capture.py', '--check', 'docs/NEXT.md'], { encoding: 'utf8' });
+	eq('AJ3.1 gitignored file exits 0 during check', resIgnored.status, 0);
+	check('AJ3.2 gitignored file output explicitly reports skipped', resIgnored.stdout.includes('docs/NEXT.md: skipped'));
+
+	// 3.2 Clean non-ignored file exits 0 and reports clean
+	const resClean = spawnSync('python3', ['docs/scrub-capture.py', '--check', 'docs/capture-phase8-resume.jsonl'], { encoding: 'utf8' });
+	eq('AJ3.3 clean file exits 0 during check', resClean.status, 0);
+	check('AJ3.4 clean file output reports clean', resClean.stdout.includes('docs/capture-phase8-resume.jsonl: clean'));
+
+	// 3.3 Dirty file exits 1 and reports dirty
+	const tempDir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-scrub-')));
+	const dirtyCapturePath = join(tempDir, 'dirty.jsonl');
+	writeFileSync(
+		dirtyCapturePath,
+		JSON.stringify({
+			type: 'system',
+			subtype: 'init',
+			plugins: ['personal-plugin-leak'],
+		}) + '\n',
+	);
+	const resDirty = spawnSync('python3', ['docs/scrub-capture.py', '--check', dirtyCapturePath], { encoding: 'utf8' });
+	eq('AJ3.5 dirty file exits 1 during check', resDirty.status, 1);
+	check('AJ3.6 dirty file output reports DIRTY', resDirty.stdout.includes('DIRTY'));
+
+	// 3.4 Combined check with both a skipped file and a clean file exits 0
+	const resCombinedClean = spawnSync('python3', ['docs/scrub-capture.py', '--check', 'docs/NEXT.md', 'docs/capture-phase8-resume.jsonl'], { encoding: 'utf8' });
+	eq('AJ3.7 combined skipped and clean files exit 0', resCombinedClean.status, 0);
+	check('AJ3.8 combined output reports skipped for gitignored file', resCombinedClean.stdout.includes('docs/NEXT.md: skipped'));
+	check('AJ3.9 combined output reports clean for clean file', resCombinedClean.stdout.includes('docs/capture-phase8-resume.jsonl: clean'));
+
+	// 3.5 Combined check with a skipped file and a dirty file exits 1
+	const resCombinedDirty = spawnSync('python3', ['docs/scrub-capture.py', '--check', 'docs/NEXT.md', dirtyCapturePath], { encoding: 'utf8' });
+	eq('AJ3.10 combined skipped and dirty files exit 1', resCombinedDirty.status, 1);
+	check('AJ3.11 combined dirty output still reports skipped for gitignored file', resCombinedDirty.stdout.includes('docs/NEXT.md: skipped'));
+	check('AJ3.12 combined dirty output reports DIRTY for dirty file', resCombinedDirty.stdout.includes('DIRTY'));
+
+	rmSync(tempDir, { recursive: true, force: true });
+}
+
+// AJ4. Real-world record shape fixtures and defect regressions
+{
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-shapes-')));
+
+	// Defect 1 unit checks: toolUseResult presence (object, str, list variants)
+	// Real corpus measurement (21,059 user records across 1,194 sessions):
+	// toolUseResult is present on 17,151 records (15,496 dicts, 1,617 strs, 38 lists) and is NEVER boolean true.
+	const toolObjRecord: Record<string, unknown> = {
+		type: 'user',
+		toolUseResult: { stdout: 'invented tool output' },
+		message: { role: 'user', content: 'Invented tool output text' },
+	};
+	const toolStrRecord: Record<string, unknown> = {
+		type: 'user',
+		toolUseResult: 'invented tool error string',
+		message: { role: 'user', content: 'Invented tool error text' },
+	};
+	const toolListRecord: Record<string, unknown> = {
+		type: 'user',
+		toolUseResult: [{ text: 'invented list output' }],
+		message: { role: 'user', content: 'Invented list output text' },
+	};
+
+	eq('AJ4.1 defect 1: extractUserPromptText returns undefined for real object toolUseResult', extractUserPromptText(toolObjRecord), undefined);
+	eq('AJ4.2 defect 1: isSyntheticUser returns true for real object toolUseResult', isSyntheticUser(toolObjRecord), true);
+	eq('AJ4.3 defect 1: isExplicitHumanUser returns false for real object toolUseResult', isExplicitHumanUser(toolObjRecord), false);
+	eq('AJ4.4 extractUserPromptText returns undefined for string toolUseResult variant', extractUserPromptText(toolStrRecord), undefined);
+	eq('AJ4.5 extractUserPromptText returns undefined for list toolUseResult variant', extractUserPromptText(toolListRecord), undefined);
+
+	// Defect 3 unit checks: isMeta presence
+	// Real corpus measurement: isMeta is boolean true on 317 records, absent on 20,742 records.
+	const metaRecord: Record<string, unknown> = {
+		type: 'user',
+		isMeta: true,
+		message: { role: 'user', content: 'Invented skill instructions metadata prompt' },
+	};
+	eq('AJ4.6 defect 3: extractUserPromptText returns undefined for isMeta record', extractUserPromptText(metaRecord), undefined);
+	eq('AJ4.7 defect 3: isSyntheticUser returns true for isMeta record', isSyntheticUser(metaRecord), true);
+	eq('AJ4.8 defect 3: isExplicitHumanUser returns false for isMeta record', isExplicitHumanUser(metaRecord), false);
+
+	// Real-world origin variants
+	// Real corpus measurement: absent on 19,126, human on 1,737, task-notification on 191, auto-continuation on 5.
+	const originTaskRecord: Record<string, unknown> = {
+		type: 'user',
+		origin: { kind: 'task-notification' },
+		message: { role: 'user', content: 'Invented task completion notification' },
+	};
+	const originAutoRecord: Record<string, unknown> = {
+		type: 'user',
+		origin: { kind: 'auto-continuation' },
+		message: { role: 'user', content: 'Invented auto continuation prompt' },
+	};
+	eq('AJ4.9 origin variant: isSyntheticUser returns true for task-notification', isSyntheticUser(originTaskRecord), true);
+	eq('AJ4.10 origin variant: isSyntheticUser returns true for auto-continuation', isSyntheticUser(originAutoRecord), true);
+
+	// Real-world isCompactSummary variant
+	// Real corpus measurement: isCompactSummary is boolean true on 27 records.
+	const compactRecord: Record<string, unknown> = {
+		type: 'user',
+		isCompactSummary: true,
+		message: { role: 'user', content: 'Invented conversation compaction summary' },
+	};
+	eq('AJ4.11 compact variant: extractUserPromptText returns undefined', extractUserPromptText(compactRecord), undefined);
+	eq('AJ4.12 compact variant: isSyntheticUser returns true', isSyntheticUser(compactRecord), true);
+
+	// Real-world promptSource variants
+	// Real corpus measurement: typed (1,301), sdk (1,782), system (158), suggestion_accepted (18), queued (9), absent (17,791).
+	const typedRecord: Record<string, unknown> = {
+		type: 'user',
+		promptSource: 'typed',
+		message: { role: 'user', content: 'Invented typed query' },
+	};
+	const sdkRecord: Record<string, unknown> = {
+		type: 'user',
+		origin: { kind: 'human' },
+		promptSource: 'sdk',
+		message: { role: 'user', content: 'Invented sdk query' },
+	};
+	eq('AJ4.13 promptSource variant: isExplicitHumanUser returns true for typed', isExplicitHumanUser(typedRecord), true);
+	eq('AJ4.14 promptSource variant: isExplicitHumanUser returns true for sdk with human origin', isExplicitHumanUser(sdkRecord), true);
+
+	// Real-world content block variants (tool_result, text, image, document)
+	// Real corpus measurement: 17,151 tool_result, 1,344 text, 181 image, 4 document blocks.
+	const docBlockRecord: Record<string, unknown> = {
+		type: 'user',
+		message: {
+			role: 'user',
+			content: [
+				{ type: 'document', title: 'spec' },
+				{ type: 'text', text: 'Invented document analysis query' },
+			],
+		},
+	};
+	eq('AJ4.15 content block variant: document block ignored, text block extracted', extractUserPromptText(docBlockRecord), 'Invented document analysis query');
+
+	// Session-level files in dir:
+	// File A (Defect 1 session test): first turn is a toolUseResult object with text block; second turn is real human prompt
+	writeFileSync(
+		join(dir, 'session-defect1-tool-object.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T10:00:00.000Z',
+				toolUseResult: { stdout: 'invented compiler output', exitCode: 0 },
+				message: { role: 'user', content: 'invented compiler output' },
+			}),
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T10:00:05.000Z',
+				message: { role: 'user', content: 'Invented subsequent question after tool result' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File B (Defect 2 session test): Turn 1 has no origin metadata (candidate), Turn 2 has origin: { kind: "human" }
+	// Rule: once an acceptable first message is found, later messages cannot replace it.
+	writeFileSync(
+		join(dir, 'session-defect2-turn-order.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T11:00:00.000Z',
+				message: { role: 'user', content: 'Invented first question without origin metadata' },
+			}),
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T11:00:05.000Z',
+				origin: { kind: 'human' },
+				promptSource: 'typed',
+				message: { role: 'user', content: 'Invented second question with human origin' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File C (Defect 3 session test): Turn 1 isMeta: true, Turn 2 is real user question
+	writeFileSync(
+		join(dir, 'session-defect3-is-meta.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T12:00:00.000Z',
+				isMeta: true,
+				message: { role: 'user', content: 'Invented skill instructions metadata prompt' },
+			}),
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T12:00:05.000Z',
+				message: { role: 'user', content: 'Invented actual user question' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File D: Session where only user record is isMeta: true -> derived title is undefined
+	writeFileSync(
+		join(dir, 'session-only-meta.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T13:00:00.000Z',
+				isMeta: true,
+				message: { role: 'user', content: 'Invented metadata only prompt' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File E: Session where only user record has real toolUseResult object -> derived title is undefined
+	writeFileSync(
+		join(dir, 'session-only-tool-obj.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T14:00:00.000Z',
+				toolUseResult: { status: 'complete' },
+				message: { role: 'user', content: 'Invented solitary tool output' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	// File F: Session with task-notification origin followed by human prompt
+	writeFileSync(
+		join(dir, 'session-task-notification.jsonl'),
+		[
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T15:00:00.000Z',
+				origin: { kind: 'task-notification' },
+				message: { role: 'user', content: 'Invented task notification body' },
+			}),
+			JSON.stringify({
+				type: 'user',
+				timestamp: '2026-09-02T15:00:05.000Z',
+				message: { role: 'user', content: 'Invented user prompt after notification' },
+			}),
+			'',
+		].join('\n'),
+	);
+
+	const realShapeSessions = await scanSessionsDir(dir);
+
+	const sToolObj = realShapeSessions.find((s) => s.sessionId === 'session-defect1-tool-object');
+	eq('AJ4.16 defect 1: session skips object toolUseResult and derives title from subsequent prompt', sToolObj?.derivedTitle, 'Invented subsequent question after tool result');
+
+	const sOrder = realShapeSessions.find((s) => s.sessionId === 'session-defect2-turn-order');
+	eq('AJ4.17 defect 2: first usable prompt without origin is not replaced by later human turn', sOrder?.derivedTitle, 'Invented first question without origin metadata');
+
+	const sMeta = realShapeSessions.find((s) => s.sessionId === 'session-defect3-is-meta');
+	eq('AJ4.18 defect 3: session skips isMeta and derives title from subsequent prompt', sMeta?.derivedTitle, 'Invented actual user question');
+
+	const sOnlyMeta = realShapeSessions.find((s) => s.sessionId === 'session-only-meta');
+	eq('AJ4.19 defect 3: session with only isMeta records yields undefined derivedTitle', sOnlyMeta?.derivedTitle, undefined);
+
+	const sOnlyTool = realShapeSessions.find((s) => s.sessionId === 'session-only-tool-obj');
+	eq('AJ4.20 defect 1: session with only object toolUseResult yields undefined derivedTitle', sOnlyTool?.derivedTitle, undefined);
+
+	const sTaskNotif = realShapeSessions.find((s) => s.sessionId === 'session-task-notification');
+	eq('AJ4.21 task-notification skipped, subsequent user prompt derived', sTaskNotif?.derivedTitle, 'Invented user prompt after notification');
+
+	rmSync(dir, { recursive: true, force: true });
+}
+
+console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecars, and readSession');
+
+// AK1: One per ChatItem variant in the mappability table, built from measured real shapes
+{
+	console.log('AK1. Mappability table ChatItem variants from measured real shapes');
+
+	const userTextRec = {
+		type: 'user',
+		uuid: 'u-text-1',
+		parentUuid: undefined,
+		timestamp: '2026-09-14T10:00:00.000Z',
+		message: {
+			role: 'user',
+			content: 'Invented user question text for testing',
+		},
+	};
+
+	const userImgRec = {
+		type: 'user',
+		uuid: 'u-img-1',
+		parentUuid: 'u-text-1',
+		timestamp: '2026-09-14T10:00:05.000Z',
+		message: {
+			role: 'user',
+			content: [
+				{ type: 'text', text: 'Invented text preceding image' },
+				{
+					type: 'image',
+					source: {
+						type: 'base64',
+						media_type: 'image/png',
+						data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+					},
+				},
+			],
+		},
+	};
+
+	const asstRec = {
+		type: 'assistant',
+		uuid: 'a-1',
+		parentUuid: 'u-img-1',
+		timestamp: '2026-09-14T10:00:10.000Z',
+		message: {
+			role: 'assistant',
+			content: [
+				{ type: 'thinking', thinking: '', signature: 'invented-sig-1' },
+				{
+					type: 'tool_use',
+					id: 'toolu_1',
+					name: 'Glob',
+					input: { pattern: '*.md' },
+				},
+				{ type: 'text', text: 'Invented assistant concluding answer' },
+			],
+		},
+	};
+
+	const toolResultRec = {
+		type: 'user',
+		uuid: 'u-res-1',
+		parentUuid: 'a-1',
+		timestamp: '2026-09-14T10:00:12.000Z',
+		toolUseResult: { status: 'success' },
+		message: {
+			role: 'user',
+			content: [
+				{
+					type: 'tool_result',
+					tool_use_id: 'toolu_1',
+					content: 'file1.md\nfile2.md',
+				},
+			],
+		},
+	};
+
+	const dividerRec = {
+		type: 'system',
+		subtype: 'compact_boundary',
+		uuid: 'div-1',
+		parentUuid: 'u-res-1',
+		timestamp: '2026-09-14T10:00:15.000Z',
+		compactMetadata: {
+			preTokens: 10000,
+			postTokens: 2000,
+			durationMs: 15000,
+		},
+	};
+
+	const asstAskRec = {
+		type: 'assistant',
+		uuid: 'a-ask-1',
+		parentUuid: 'div-1',
+		timestamp: '2026-09-14T10:00:20.000Z',
+		message: {
+			role: 'assistant',
+			content: [
+				{
+					type: 'tool_use',
+					id: 'toolu_ask_1',
+					name: 'AskUserQuestion',
+					input: {
+						questions: [
+							{
+								question: 'Invented question: proceed with changes?',
+								header: 'Confirmation',
+								options: [{ label: 'Yes', value: 'yes' }, { label: 'No', value: 'no' }],
+							},
+						],
+					},
+				},
+			],
+		},
+	};
+
+	const toolResultAskRec = {
+		type: 'user',
+		uuid: 'u-ask-res-1',
+		parentUuid: 'a-ask-1',
+		timestamp: '2026-09-14T10:00:25.000Z',
+		toolUseResult: { status: 'success' },
+		message: {
+			role: 'user',
+			content: [
+				{
+					type: 'tool_result',
+					tool_use_id: 'toolu_ask_1',
+					content: 'The user answered: "Invented question: proceed with changes?"="Yes". You can now continue.',
+				},
+			],
+		},
+	};
+
+	const items = await translateTranscriptRecords([
+		userTextRec,
+		userImgRec,
+		asstRec,
+		toolResultRec,
+		dividerRec,
+		asstAskRec,
+		toolResultAskRec,
+	]);
+
+	const uText = items.find((it): it is UserItem => it.kind === 'user' && it.id === 'u-text-1');
+	check('AK1.1 UserItem text mapped from string content', uText !== undefined && uText.text === 'Invented user question text for testing');
+
+	const uImg = items.find((it): it is UserItem => it.kind === 'user' && it.id === 'u-img-1');
+	check('AK1.2 UserItem with image has images array', uImg !== undefined && Array.isArray(uImg.images) && uImg.images.length === 1);
+	eq('AK1.3 UserItem synthetic displayName image-1.png', uImg?.images?.[0]?.displayName, 'image-1.png');
+	eq('AK1.4 UserItem image mediaType image/png', uImg?.images?.[0]?.mediaType, 'image/png');
+
+	const asst = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-1');
+	check('AK1.5 AssistantItem mapped directly from uuid', asst !== undefined && asst.id === 'a-1');
+	eq('AK1.6 AssistantItem historical status is complete', asst?.status, 'complete');
+	eq('AK1.7 AssistantItem blocks count is 3', asst?.blocks.size, 3);
+	eq('AK1.8 AssistantItem block 0 is thinking', asst?.blocks.get(0)?.kind, 'thinking');
+	eq('AK1.9 AssistantItem block 1 is tool_use', asst?.blocks.get(1)?.kind, 'tool_use');
+	eq('AK1.10 AssistantItem block 1 toolResultText matches inline result', asst?.blocks.get(1)?.toolResultText, 'file1.md\nfile2.md');
+	eq('AK1.11 AssistantItem block 2 is text', asst?.blocks.get(2)?.kind, 'text');
+
+	const div = items.find((it): it is DividerItem => it.kind === 'divider');
+	check('AK1.12 DividerItem mapped from compact_boundary', div !== undefined && div.id === 'div-1');
+	eq('AK1.13 DividerItem text is Conversation compacted', div?.text, 'Conversation compacted');
+
+	const perm = items.find((it): it is PermissionItem => it.kind === 'permission');
+	check('AK1.14 PermissionItem produced for AskUserQuestion', perm !== undefined && perm.toolName === 'AskUserQuestion');
+	eq('AK1.15 PermissionItem status is allowed', perm?.status, 'allowed');
+	eq('AK1.16 PermissionItem question extracted', perm?.askQuestions?.[0]?.question, 'Invented question: proceed with changes?');
+	eq('AK1.17 PermissionItem answer extracted', perm?.answers?.['Invented question: proceed with changes?'], 'Yes');
+}
+
+// AK2: The absences asserted as absences
+{
+	console.log('AK2. Absences asserted as absences');
+
+	const userRec = {
+		type: 'user',
+		uuid: 'u-abs-1',
+		message: { role: 'user', content: 'Invented question' },
+	};
+	const asstRec = {
+		type: 'assistant',
+		uuid: 'a-abs-1',
+		parentUuid: 'u-abs-1',
+		message: { role: 'assistant', content: [{ type: 'text', text: 'Invented reply' }] },
+	};
+	const divRec = {
+		type: 'system',
+		subtype: 'compact_boundary',
+		uuid: 'div-abs-1',
+		parentUuid: 'a-abs-1',
+		compactMetadata: { durationMs: 99999 },
+	};
+	const asstWithDurRec = {
+		type: 'assistant',
+		uuid: 'a-dur-1',
+		parentUuid: 'div-abs-1',
+		message: { role: 'assistant', content: [{ type: 'text', text: 'Invented reply with duration' }] },
+	};
+	const durRec = {
+		type: 'system',
+		subtype: 'turn_duration',
+		uuid: 's-dur-1',
+		parentUuid: 'a-dur-1',
+		durationMs: 4500,
+	};
+	const permToolRec = {
+		type: 'assistant',
+		uuid: 'a-perm-1',
+		parentUuid: 's-dur-1',
+		message: {
+			role: 'assistant',
+			content: [
+				{
+					type: 'tool_use',
+					id: 'toolu_abs_perm',
+					name: 'AskUserQuestion',
+					input: { questions: [{ question: 'Invented?' }] },
+				},
+			],
+		},
+	};
+
+	const items = await translateTranscriptRecords([
+		userRec,
+		asstRec,
+		divRec,
+		asstWithDurRec,
+		durRec,
+		permToolRec,
+	]);
+
+	const u = items.find((it): it is UserItem => it.kind === 'user');
+	const asstNoDur = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-abs-1');
+	const div = items.find((it): it is DividerItem => it.kind === 'divider');
+	const asstDur = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-dur-1');
+	const perm = items.find((it): it is PermissionItem => it.kind === 'permission');
+
+	check('AK2.1 user item has no costUsd', (u as Record<string, unknown>)?.costUsd === undefined);
+	check('AK2.2 assistant without duration has no meta costUsd', asstNoDur?.meta?.costUsd === undefined);
+	check('AK2.3 divider item has no costUsd', (div as Record<string, unknown>)?.costUsd === undefined);
+	check('AK2.4 permission item has no costUsd', (perm as Record<string, unknown>)?.costUsd === undefined);
+
+	check('AK2.5 assistant without turn_duration leaves durationMs undefined', asstNoDur?.meta?.durationMs === undefined);
+	check('AK2.6 assistant without turn_duration leaves meta undefined entirely', asstNoDur?.meta === undefined);
+
+	eq('AK2.7 duration present where turn_duration links via parentUuid', asstDur?.meta?.durationMs, 4500);
+	check('AK2.8 assistant with duration still has no costUsd', asstDur?.meta?.costUsd === undefined);
+
+	check('AK2.9 divider has no durationMs', (div as Record<string, unknown>)?.durationMs === undefined);
+}
+
+// AK3: Thinking block handling (empty vs non-empty)
+{
+	console.log('AK3. Thinking block empty vs non-empty');
+
+	const user1 = { type: 'user', uuid: 'u-think-1', message: { role: 'user', content: 'Invented question 1' } };
+	const asstEmptyThinking = {
+		type: 'assistant',
+		uuid: 'a-think-empty',
+		parentUuid: 'u-think-1',
+		message: {
+			role: 'assistant',
+			content: [
+				{ type: 'thinking', thinking: '', signature: 'sig-empty' },
+				{ type: 'text', text: 'Invented answer after empty thinking' },
+			],
+		},
+	};
+	const user2 = { type: 'user', uuid: 'u-think-2', parentUuid: 'a-think-empty', message: { role: 'user', content: 'Invented question 2' } };
+	const asstNonEmptyThinking = {
+		type: 'assistant',
+		uuid: 'a-think-nonempty',
+		parentUuid: 'u-think-2',
+		message: {
+			role: 'assistant',
+			content: [
+				{ type: 'thinking', thinking: 'Invented thought process monologue', signature: 'sig-nonempty' },
+				{ type: 'text', text: 'Invented answer after non-empty thinking' },
+			],
+		},
+	};
+
+	const items = await translateTranscriptRecords([user1, asstEmptyThinking, user2, asstNonEmptyThinking]);
+
+	const emptyAsst = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-think-empty');
+	const emptyBlock = emptyAsst?.blocks.get(0);
+	eq('AK3.1 empty thinking block renders text as empty string', emptyBlock?.text, '');
+	eq('AK3.2 empty thinking block kind is thinking', emptyBlock?.kind, 'thinking');
+	check('AK3.3 empty thinking block timing startedAt is undefined', emptyBlock?.startedAt === undefined);
+
+	const nonEmptyAsst = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-think-nonempty');
+	const nonEmptyBlock = nonEmptyAsst?.blocks.get(0);
+	eq('AK3.4 non-empty thinking block renders text as-is', nonEmptyBlock?.text, 'Invented thought process monologue');
+	eq('AK3.5 non-empty thinking block kind is thinking', nonEmptyBlock?.kind, 'thinking');
+}
+
+// AK4: Sidecar tool result reading
+{
+	console.log('AK4. Sidecar tool results reading');
+
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-sidecar-')));
+	const toolResultsDir = join(dir, 'tool-results');
+	mkdirSync(toolResultsDir, { recursive: true });
+
+	const sidecarFilePath = join(toolResultsDir, 'toolu_sc_1.txt');
+	writeFileSync(sidecarFilePath, 'Invented large tool output read from disk sidecar file');
+
+	const asstRec = {
+		type: 'assistant',
+		uuid: 'a-sidecar-1',
+		message: {
+			role: 'assistant',
+			content: [
+				{ type: 'tool_use', id: 'toolu_sc_1', name: 'Bash', input: { command: 'test' } },
+				{ type: 'tool_use', id: 'toolu_sc_missing', name: 'Bash', input: { command: 'test2' } },
+			],
+		},
+	};
+
+	const userResultPresent = {
+		type: 'user',
+		uuid: 'u-sc-1',
+		toolUseResult: { status: 'success' },
+		message: {
+			role: 'user',
+			content: [
+				{
+					type: 'tool_result',
+					tool_use_id: 'toolu_sc_1',
+					content: `<persisted-output>\nOutput too large (55KB). Full output saved to: ${sidecarFilePath}\n\nPreview (first 2KB):\nInvented preview output text\n</persisted-output>`,
+				},
+				{
+					type: 'tool_result',
+					tool_use_id: 'toolu_sc_missing',
+					content: `<persisted-output>\nOutput too large (55KB). Full output saved to: ${join(toolResultsDir, 'toolu_sc_nonexistent.txt')}\n\nPreview (first 2KB):\nInvented fallback preview text\n</persisted-output>`,
+				},
+			],
+		},
+	};
+
+	let sidecarReadCount = 0;
+	const items = await translateTranscriptRecords([asstRec, userResultPresent], {
+		sessionDir: dir,
+		onSidecarRead: () => {
+			sidecarReadCount++;
+		},
+	});
+
+	const asst = items.find((it): it is AssistantItem => it.kind === 'assistant');
+	const bPresent = asst?.blocks.get(0);
+	const bMissing = asst?.blocks.get(1);
+
+	eq('AK4.1 present sidecar file is read in full', bPresent?.toolResultText, 'Invented large tool output read from disk sidecar file');
+	eq('AK4.2 missing sidecar file falls back to embedded preview', bMissing?.toolResultText, 'Invented fallback preview text');
+	eq('AK4.3 exactly one sidecar file was read from disk', sidecarReadCount, 1);
+
+	// Untouched records test: record whose sidecar is never requested causes 0 reads
+	let untouchedReadCount = 0;
+	const plainAsst = {
+		type: 'assistant',
+		uuid: 'a-plain-1',
+		message: {
+			role: 'assistant',
+			content: [{ type: 'tool_use', id: 'toolu_plain', name: 'Glob', input: {} }],
+		},
+	};
+	const plainResult = {
+		type: 'user',
+		uuid: 'u-plain-1',
+		toolUseResult: { status: 'success' },
+		message: {
+			role: 'user',
+			content: [{ type: 'tool_result', tool_use_id: 'toolu_plain', content: 'inline-content' }],
+		},
+	};
+	await translateTranscriptRecords([plainAsst, plainResult], {
+		sessionDir: dir,
+		onSidecarRead: () => {
+			untouchedReadCount++;
+		},
+	});
+	eq('AK4.4 record without sidecar causes zero sidecar reads', untouchedReadCount, 0);
+
+	rmSync(dir, { recursive: true, force: true });
+}
+
+// AK5: Denied tool, cancelled turn, AskUserQuestion summary
+{
+	console.log('AK5. Denied tool, cancelled turn, AskUserQuestion summary');
+
+	const userPrompt1 = { type: 'user', uuid: 'u-prompt-1', message: { role: 'user', content: 'Invented prompt 1' } };
+	const asstDeniedRec = {
+		type: 'assistant',
+		uuid: 'a-denied-1',
+		parentUuid: 'u-prompt-1',
+		message: {
+			role: 'assistant',
+			content: [{ type: 'tool_use', id: 'toolu_denied_1', name: 'Write', input: { path: 'foo.txt' } }],
+		},
+	};
+	const userDeniedRec = {
+		type: 'user',
+		uuid: 'u-denied-1',
+		parentUuid: 'a-denied-1',
+		toolUseResult: { status: 'error' },
+		toolDenialKind: 'user-rejected',
+		message: {
+			role: 'user',
+			content: [
+				{
+					type: 'tool_result',
+					tool_use_id: 'toolu_denied_1',
+					is_error: true,
+					content: 'User rejected the write operation.',
+				},
+			],
+		},
+	};
+
+	const userPrompt2 = { type: 'user', uuid: 'u-prompt-2', parentUuid: 'u-denied-1', message: { role: 'user', content: 'Invented prompt 2' } };
+	const asstCancelledRec = {
+		type: 'assistant',
+		uuid: 'a-cancelled-1',
+		parentUuid: 'u-prompt-2',
+		message: {
+			role: 'assistant',
+			content: [{ type: 'tool_use', id: 'toolu_cancelled_1', name: 'Bash', input: { command: 'sleep 10' } }],
+		},
+	};
+	const userInterruptRec = {
+		type: 'user',
+		uuid: 'u-interrupt-1',
+		parentUuid: 'a-cancelled-1',
+		message: {
+			role: 'user',
+			content: '[Request interrupted by user]',
+		},
+	};
+
+	const items = await translateTranscriptRecords([
+		userPrompt1,
+		asstDeniedRec,
+		userDeniedRec,
+		userPrompt2,
+		asstCancelledRec,
+		userInterruptRec,
+	]);
+
+	const deniedAsst = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-denied-1');
+	const deniedBlock = deniedAsst?.blocks.get(0);
+	check('AK5.1 denied tool has toolDenied true', deniedBlock?.toolDenied === true);
+	check('AK5.2 denied tool has toolIsError false (cleared for denial)', deniedBlock?.toolIsError === false);
+	check('AK5.3 denied tool has toolPending false', deniedBlock?.toolPending === false);
+	eq('AK5.4 denied assistant turn status is complete', deniedAsst?.status, 'complete');
+
+	const cancelledAsst = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-cancelled-1');
+	const cancelledBlock = cancelledAsst?.blocks.get(0);
+	eq('AK5.5 cancelled assistant turn status is stopped', cancelledAsst?.status, 'stopped');
+	check('AK5.6 cancelled tool has toolPending false', cancelledBlock?.toolPending === false);
+
+	// Test AskUserQuestion summary helper
+	const sampleQ = [{ question: 'Invented question: accept refactor?' }];
+	const sampleA = { 'Invented question: accept refactor?': 'Accepted' };
+
+	eq('AK5.7 formatAskUserQuestionSummary allowed', formatAskUserQuestionSummary(sampleQ, sampleA, 'allowed'), 'Question: Invented question: accept refactor? → Accepted');
+	eq('AK5.8 formatAskUserQuestionSummary denied', formatAskUserQuestionSummary(sampleQ, sampleA, 'denied'), 'Question: Invented question: accept refactor? → Denied');
+	eq('AK5.9 formatAskUserQuestionSummary cancelled', formatAskUserQuestionSummary(sampleQ, sampleA, 'cancelled'), 'Question: Invented question: accept refactor? → Not answered (turn ended)');
+	eq('AK5.10 formatAskUserQuestionSummary empty questions allowed', formatAskUserQuestionSummary([], {}, 'allowed'), 'Question: Answered');
+	eq('AK5.11 formatAskUserQuestionSummary empty questions denied', formatAskUserQuestionSummary([], {}, 'denied'), 'Question: (unreadable question) → Denied');
+}
+
+// AK6: readSession on real-shaped, empty, and missing transcript
+{
+	console.log('AK6. readSession on real-shaped, empty, and missing transcript');
+
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-readsession-')));
+
+	// 1. Real-shaped transcript
+	const realFile = join(dir, 'sess-real.jsonl');
+	writeFileSync(
+		realFile,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u-1', message: { role: 'user', content: 'Invented prompt text' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a-1', parentUuid: 'u-1', message: { role: 'assistant', content: [{ type: 'text', text: 'Invented answer' }] } }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a-1', sessionId: 'sess-real' }),
+			'',
+		].join('\n'),
+	);
+
+	// 2. Empty transcript (0 bytes)
+	const emptyFile = join(dir, 'sess-empty.jsonl');
+	writeFileSync(emptyFile, '');
+
+	const store = new NodeTranscriptStore(dir);
+
+	// Real session read
+	const realItems = await store.readSession('sess-real');
+	check('AK6.1 readSession on real transcript returns items array', Array.isArray(realItems) && realItems.length === 2);
+	eq('AK6.2 real transcript first item is UserItem', realItems[0]?.kind, 'user');
+	eq('AK6.3 real transcript second item is AssistantItem', realItems[1]?.kind, 'assistant');
+	eq('AK6.4 UserItem text matches', (realItems[0] as UserItem)?.text, 'Invented prompt text');
+	eq('AK6.5 AssistantItem block text matches', (realItems[1] as AssistantItem)?.blocks.get(0)?.text, 'Invented answer');
+
+	// Empty session read
+	const emptyItems = await store.readSession('sess-empty');
+	check('AK6.6 readSession on empty transcript returns empty array', Array.isArray(emptyItems) && emptyItems.length === 0);
+
+	// Missing session read
+	let threwMissing = false;
+	let missingError = '';
+	try {
+		await store.readSession('sess-missing-xyz');
+	} catch (err) {
+		threwMissing = true;
+		missingError = String(err);
+	}
+	check('AK6.7 readSession on missing transcript throws', threwMissing);
+	check('AK6.8 readSession missing error mentions session id', missingError.includes('sess-missing-xyz'));
+	check('AK6.9 readSession missing error includes v2', missingError.includes('v2'));
+
+	rmSync(dir, { recursive: true, force: true });
+}
+
+// AK7: Defect 1 - readSession paging seam prevents eager loading of full active branch
+{
+	console.log('AK7. Defect 1: readSession paging seam');
+
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-paging-')));
+	const pagedFile = join(dir, 'sess-paged.jsonl');
+
+	// 10 active records (5 user-assistant pairs)
+	const lines: string[] = [];
+	for (let i = 1; i <= 5; i++) {
+		const uId = `u-paged-${String(i)}`;
+		const aId = `a-paged-${String(i)}`;
+		const prevId = i === 1 ? undefined : `a-paged-${String(i - 1)}`;
+		lines.push(JSON.stringify({
+			type: 'user',
+			uuid: uId,
+			parentUuid: prevId,
+			message: { role: 'user', content: `Invented prompt ${String(i)}` },
+		}));
+		lines.push(JSON.stringify({
+			type: 'assistant',
+			uuid: aId,
+			parentUuid: uId,
+			message: { role: 'assistant', content: [{ type: 'text', text: `Invented answer ${String(i)}` }] },
+		}));
+	}
+	lines.push(JSON.stringify({ type: 'last-prompt', leafUuid: 'a-paged-5', sessionId: 'sess-paged' }));
+	lines.push('');
+	writeFileSync(pagedFile, lines.join('\n'));
+
+	const store = new NodeTranscriptStore(dir);
+	const page: any = await (store as any).readSession('sess-paged', undefined, { count: 4 });
+
+	// Assert mechanism: requested 4 newest records (2 turns = 4 chat items)
+	check('AK7.1 readSession returns requested slice not whole branch', page && page.length === 4, `got length ${page?.length}`);
+	check('AK7.2 page exposes startIndex', page && page.startIndex === 6, `got ${page?.startIndex}`);
+	check('AK7.3 page exposes endIndex', page && page.endIndex === 10, `got ${page?.endIndex}`);
+	check('AK7.4 page exposes hasMoreBefore', page && page.hasMoreBefore === true, `got ${page?.hasMoreBefore}`);
+	check('AK7.5 page exposes totalActiveRecords', page && page.totalActiveRecords === 10, `got ${page?.totalActiveRecords}`);
+
+	if (page && typeof page.loadBefore === 'function') {
+		const olderPage: any = await page.loadBefore(4);
+		check('AK7.6 loadBefore loads previous slice', olderPage && olderPage.startIndex === 2 && olderPage.endIndex === 6);
+		check('AK7.7 loadBefore preserves hasMoreBefore', olderPage && olderPage.hasMoreBefore === true);
+	} else {
+		check('AK7.6 loadBefore loads previous slice', false, 'loadBefore method missing on page');
+		check('AK7.7 loadBefore preserves hasMoreBefore', false, 'loadBefore method missing on page');
+	}
+
+	rmSync(dir, { recursive: true, force: true });
+}
+
+// AK8: Defect 2 - Sidecar read only for records returned in requested page
+{
+	console.log('AK8. Defect 2: Sidecar read only for records in requested page');
+
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guki-checks-sidecar-paged-')));
+	const toolResultsDir = join(dir, 'tool-results');
+	mkdirSync(toolResultsDir, { recursive: true });
+
+	const oldSidecarPath = join(toolResultsDir, 'toolu_sc_old.txt');
+	writeFileSync(oldSidecarPath, 'Invented old tool result payload on disk');
+
+	const lines = [
+		// Turn 1: user, assistant with tool_use, user tool_result with sidecar
+		JSON.stringify({ type: 'user', uuid: 'u-sc-turn1', message: { role: 'user', content: 'Invented prompt 1' } }),
+		JSON.stringify({
+			type: 'assistant',
+			uuid: 'a-sc-turn1',
+			parentUuid: 'u-sc-turn1',
+			message: {
+				role: 'assistant',
+				content: [{ type: 'tool_use', id: 'toolu_sc_old', name: 'Bash', input: { command: 'invented' } }],
+			},
+		}),
+		JSON.stringify({
+			type: 'user',
+			uuid: 'u-sc-res1',
+			parentUuid: 'a-sc-turn1',
+			toolUseResult: { status: 'success' },
+			message: {
+				role: 'user',
+				content: [{
+					type: 'tool_result',
+					tool_use_id: 'toolu_sc_old',
+					content: `<persisted-output>\nFull output saved to: ${oldSidecarPath}\nPreview:\nInvented preview\n</persisted-output>`,
+				}],
+			},
+		}),
+		// Turn 2: user, assistant simple text
+		JSON.stringify({ type: 'user', uuid: 'u-sc-turn2', parentUuid: 'u-sc-res1', message: { role: 'user', content: 'Invented prompt 2' } }),
+		JSON.stringify({
+			type: 'assistant',
+			uuid: 'a-sc-turn2',
+			parentUuid: 'u-sc-turn2',
+			message: { role: 'assistant', content: [{ type: 'text', text: 'Invented final answer' }] },
+		}),
+		JSON.stringify({ type: 'last-prompt', leafUuid: 'a-sc-turn2', sessionId: 'sess-sc-paged' }),
+		'',
+	];
+	writeFileSync(join(dir, 'sess-sc-paged.jsonl'), lines.join('\n'));
+
+	let sidecarReads = 0;
+	const store = new NodeTranscriptStore(dir);
+
+	// Request ONLY Turn 2 (newest 2 records)
+	const page2: any = await (store as any).readSession('sess-sc-paged', undefined, {
+		count: 2,
+		sessionDir: dir,
+		onSidecarRead: () => {
+			sidecarReads++;
+		},
+	});
+
+	// Assert mechanism: Turn 1 was not requested -> zero sidecar reads must have occurred
+	check('AK8.1 unrequested older record sidecar is NOT read from disk', sidecarReads === 0, `expected 0 sidecar reads, got ${String(sidecarReads)}`);
+
+	// Now ask for older page including Turn 1
+	if (page2 && typeof page2.loadBefore === 'function') {
+		await page2.loadBefore(3);
+		check('AK8.2 requested older record sidecar IS read when requested', sidecarReads === 1, `expected 1 sidecar read, got ${String(sidecarReads)}`);
+	} else {
+		check('AK8.2 requested older record sidecar IS read when requested', false, 'loadBefore missing');
+	}
+
+	rmSync(dir, { recursive: true, force: true });
+}
+
+// AK9: Defect 3 - Mappability table missing checks (isApiErrorMessage, un-denied tool error, toolPermissionRequested)
+{
+	console.log('AK9. Defect 3: Mappability rows without checks');
+
+	// Row 1: isApiErrorMessage: true with error undefined and content block array
+	const apiErrRec = {
+		type: 'assistant',
+		uuid: 'a-api-err-1',
+		isApiErrorMessage: true,
+		apiErrorStatus: 400,
+		message: {
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Invented API error description' }],
+		},
+	};
+	const items1 = await translateTranscriptRecords([apiErrRec]);
+	const asstErr = items1.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-api-err-1');
+	eq('AK9.1 isApiErrorMessage sets status to error', asstErr?.status, 'error');
+	eq('AK9.2 isApiErrorMessage extracts errorText from content block', asstErr?.errorText, 'Invented API error description');
+
+	// Row 2: un-denied tool error (is_error: true on tool_result without toolDenialKind)
+	const asstToolUse = {
+		type: 'assistant',
+		uuid: 'a-tool-use-err',
+		message: {
+			role: 'assistant',
+			content: [{ type: 'tool_use', id: 'toolu_fail_1', name: 'Bash', input: { command: 'invented' } }],
+		},
+	};
+	const userToolErr = {
+		type: 'user',
+		uuid: 'u-tool-res-err',
+		parentUuid: 'a-tool-use-err',
+		toolUseResult: { status: 'error' },
+		message: {
+			role: 'user',
+			content: [{
+				type: 'tool_result',
+				tool_use_id: 'toolu_fail_1',
+				is_error: true,
+				content: 'Invented execution failure message',
+			}],
+		},
+	};
+	const items2 = await translateTranscriptRecords([asstToolUse, userToolErr]);
+	const asstTool = items2.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-tool-use-err');
+	const blockErr = asstTool?.blocks.get(0);
+	check('AK9.3 un-denied tool result preserves toolIsError true', blockErr?.toolIsError === true);
+	check('AK9.4 un-denied tool result leaves toolDenied undefined', blockErr?.toolDenied === undefined);
+
+	// Row 3: toolPermissionRequested is false
+	check('AK9.5 toolPermissionRequested is false', blockErr?.toolPermissionRequested === false);
+}
+
+// AK10: Defect 4 - Synthetic task-notification records omitted
+{
+	console.log('AK10. Defect 4: Synthetic task-notification records omitted');
+
+	const notifRec = {
+		type: 'user',
+		uuid: 'u-task-notif-1',
+		timestamp: '2026-09-14T10:00:00.000Z',
+		origin: { kind: 'task-notification' },
+		message: { role: 'user', content: 'Invented machine notification: subagent complete' },
+	};
+	const humanPrompt = {
+		type: 'user',
+		uuid: 'u-human-1',
+		parentUuid: 'u-task-notif-1',
+		timestamp: '2026-09-14T10:00:05.000Z',
+		message: { role: 'user', content: 'Invented genuine human prompt' },
+	};
+	const items = await translateTranscriptRecords([notifRec, humanPrompt]);
+	eq('AK10.1 task-notification record omitted yielding single human item', items.length, 1);
+	eq('AK10.2 retained item is genuine human user prompt', (items[0] as UserItem)?.text, 'Invented genuine human prompt');
+}
+
+// AK11: Defect 5 - AssistantItem string content handling
+{
+	console.log('AK11. Defect 5: AssistantItem string content handling');
+
+	const asstStrRec = {
+		type: 'assistant',
+		uuid: 'a-str-content-1',
+		message: {
+			role: 'assistant',
+			content: 'Invented assistant reply as plain string',
+		},
+	};
+	const items = await translateTranscriptRecords([asstStrRec]);
+	const asst = items.find((it): it is AssistantItem => it.kind === 'assistant' && it.id === 'a-str-content-1');
+	eq('AK11.1 assistant string content yields one block', asst?.blocks.size, 1);
+	eq('AK11.2 assistant string block kind is text', asst?.blocks.get(0)?.kind, 'text');
+	eq('AK11.3 assistant string block text matches', asst?.blocks.get(0)?.text, 'Invented assistant reply as plain string');
+}
+
+// AL: ChatView offline constructibility and open lifecycle harness
+{
+	console.log('AL. ChatView offline constructibility and open lifecycle harness');
+
+	const container = new FakeElement() as any;
+	const app = new App();
+	const leaf = new WorkspaceLeaf(app, container);
+	const state = new ChatState();
+
+	const session = {
+		state,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => ['clear', 'help'],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const view = new ChatView(leaf, session);
+
+	eq('AL.1 view returns expected view type', view.getViewType(), 'guki-chat-view');
+	eq('AL.2 view returns expected display text', view.getDisplayText(), 'GuKi Chat');
+	eq('AL.3 view returns expected icon', view.getIcon(), 'message-square');
+
+	// Run open lifecycle
+	await (view as any).onOpen();
+
+	const rootEl = container.querySelector('.guki-root');
+	check('AL.4 root container is mounted into DOM', rootEl !== null);
+
+	const messagesEl = container.querySelector('.guki-messages-wrap');
+	check('AL.5 messages area is mounted into DOM', messagesEl !== null);
+
+	const textareaEl = container.querySelector('textarea');
+	check('AL.6 composer input textarea is mounted into DOM', textareaEl !== null);
+
+	const dropdown = view.getHistoryDropdown();
+	check('AL.7 history dropdown is instantiated', dropdown !== null);
+
+	const actionEl = container.querySelector('.view-action');
+	check('AL.8 view registers no action in view chrome', actionEl === null);
+
+	// Prove event wiring (registerDomEvent) works under the harness:
+	// Clicking the in-panel trigger element triggers toggle() on the dropdown component
+	check('AL.9 history dropdown initially closed', dropdown?.isOpen() === false);
+	const triggerEl = view.getHistoryTriggerEl();
+	triggerEl?.click();
+	await new Promise((resolve) => setTimeout(resolve, 10));
+	check('AL.10 clicking in-panel trigger toggles history dropdown open', dropdown?.isOpen() === true);
+
+	// Run close lifecycle
+	await (view as any).onClose();
+	check('AL.11 onClose empties contentEl and cleans up references', container.querySelector('.guki-root') === null && view.getHistoryDropdown() === null);
+}
+
+// AM: Görev 8: Drawing historical conversations on screen (round T4a)
+{
+	console.log('AM. Görev 8: Drawing historical conversations on screen');
+
+	// Fixture 1: Standard conversation with 2 user and 2 assistant turns
+	const basicFile = join(TRANSCRIPT_TEST_DIR, 'sess-am-basic.jsonl');
+	writeFileSync(
+		basicFile,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u-b1', message: { role: 'user', content: 'Question 1: What is Obsidian?' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a-b1', parentUuid: 'u-b1', message: { role: 'assistant', content: [{ type: 'text', text: 'Answer 1: Obsidian is a markdown note-taking app.' }] } }),
+			JSON.stringify({ type: 'user', uuid: 'u-b2', parentUuid: 'a-b1', message: { role: 'user', content: 'Question 2: Does it work offline?' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a-b2', parentUuid: 'u-b2', message: { role: 'assistant', content: [{ type: 'text', text: 'Answer 2: Yes, all notes are local markdown files.' }] } }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a-b2', sessionId: 'sess-am-basic' }),
+			'',
+		].join('\n'),
+	);
+
+	// Fixture 2: Shuffled file order where disk lines contradict DAG causality (for red/green pair b)
+	const dagFile = join(TRANSCRIPT_TEST_DIR, 'sess-am-dag-order.jsonl');
+	writeFileSync(
+		dagFile,
+		[
+			JSON.stringify({ type: 'assistant', uuid: 'a-ord-2', parentUuid: 'u-ord-2', message: { role: 'assistant', content: [{ type: 'text', text: 'Fourth turn: Finished' }] } }),
+			JSON.stringify({ type: 'user', uuid: 'u-ord-1', message: { role: 'user', content: 'First turn: Begun' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a-ord-1', parentUuid: 'u-ord-1', message: { role: 'assistant', content: [{ type: 'text', text: 'Second turn: Working' }] } }),
+			JSON.stringify({ type: 'user', uuid: 'u-ord-2', parentUuid: 'a-ord-1', message: { role: 'user', content: 'Third turn: Continuing' } }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a-ord-2', sessionId: 'sess-am-dag-order' }),
+			'',
+		].join('\n'),
+	);
+
+	// Fixture 3: Empty file (0 bytes)
+	const emptyFile = join(TRANSCRIPT_TEST_DIR, 'sess-am-empty.jsonl');
+	writeFileSync(emptyFile, '');
+
+	// Fixture 4: Long transcript with 70 active branch turns (> HISTORY_PAGE_SIZE = 50)
+	const longFile = join(TRANSCRIPT_TEST_DIR, 'sess-am-long-real.jsonl');
+	const longLines: string[] = [];
+	for (let i = 1; i <= 70; i++) {
+		const isUser = i % 2 === 1;
+		longLines.push(
+			JSON.stringify({
+				type: isUser ? 'user' : 'assistant',
+				uuid: `msg-turn-${String(i)}`,
+				parentUuid: i === 1 ? undefined : `msg-turn-${String(i - 1)}`,
+				message: isUser
+					? { role: 'user', content: `Prompt for turn ${String(i)}` }
+					: { role: 'assistant', content: [{ type: 'text', text: `Reply for turn ${String(i)}` }] },
+			}),
+		);
+	}
+	longLines.push(JSON.stringify({ type: 'last-prompt', leafUuid: 'msg-turn-70', sessionId: 'sess-am-long-real' }));
+	longLines.push('');
+	writeFileSync(longFile, longLines.join('\n'));
+
+	// Set up harness
+	const container = new FakeElement() as any;
+	const app = new App();
+	const leaf = new WorkspaceLeaf(app, container);
+	const state = new ChatState();
+
+	const session = {
+		state,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
+		getSlashCommands: () => ['clear', 'help'],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const store = new NodeTranscriptStore(TRANSCRIPT_TEST_DIR);
+	const view = new ChatView(leaf, session, store);
+	await (view as any).onOpen();
+
+	// AM1. Basic historical conversation draw
+	await view.handleSelectSession('sess-am-basic');
+	eq('AM1.1 state item count matches active branch', state.items.length, 4);
+	eq('AM1.2 currentSessionId tracks selected session', view.getCurrentSessionId(), 'sess-am-basic');
+	check('AM1.3 DOM contains first user message text', container.text.includes('Question 1: What is Obsidian?'));
+	check('AM1.4 DOM contains first assistant reply text', container.text.includes('Answer 1: Obsidian is a markdown note-taking app.'));
+	check('AM1.5 DOM contains second user message text', container.text.includes('Question 2: Does it work offline?'));
+	check('AM1.6 DOM contains second assistant reply text', container.text.includes('Answer 2: Yes, all notes are local markdown files.'));
+	eq('AM1.7 DOM renders four message elements', container.querySelectorAll('.guki-message').length, 4);
+
+	// AM2. Selection clears previous conversation before drawing (Required red/green pair a)
+	state.addUserMessage('Active conversation message to clear');
+	check('AM2.0 active message is on screen before selection', container.text.includes('Active conversation message to clear'));
+
+	const secondFile = join(TRANSCRIPT_TEST_DIR, 'sess-am-second.jsonl');
+	writeFileSync(
+		secondFile,
+		[
+			JSON.stringify({ type: 'user', uuid: 'u-sec-1', message: { role: 'user', content: 'Fresh prompt second session' } }),
+			JSON.stringify({ type: 'assistant', uuid: 'a-sec-1', parentUuid: 'u-sec-1', message: { role: 'assistant', content: [{ type: 'text', text: 'Fresh reply second session' }] } }),
+			JSON.stringify({ type: 'last-prompt', leafUuid: 'a-sec-1', sessionId: 'sess-am-second' }),
+			'',
+		].join('\n'),
+	);
+
+	await view.handleSelectSession('sess-am-second');
+	eq('AM2.1 state contains only new session items', state.items.length, 2);
+	check('AM2.2 previous active message removed from state', !state.items.some((it) => (it as any).text === 'Active conversation message to clear'));
+	check('AM2.3 previous active message removed from DOM', !container.text.includes('Active conversation message to clear'));
+	check('AM2.4 previous session messages removed from DOM', !container.text.includes('Question 1: What is Obsidian?'));
+	check('AM2.5 new session message rendered in DOM', container.text.includes('Fresh prompt second session'));
+	check('AM2.6 new session reply rendered in DOM', container.text.includes('Fresh reply second session'));
+	eq('AM2.7 DOM renders exactly two messages', container.querySelectorAll('.guki-message').length, 2);
+
+	// AM3. Drawn items arrive in conversation DAG order, NOT file order (Required red/green pair b)
+	await view.handleSelectSession('sess-am-dag-order');
+	const messageEls = container.querySelectorAll('.guki-message');
+	const renderedTexts = messageEls.map((el: any) => el.text.trim());
+	eq('AM3.1 dag-order session renders four messages', renderedTexts.length, 4);
+	check('AM3.2 first rendered message is turn 1 in DAG order (not turn 4 from disk line 1)', renderedTexts[0].includes('First turn: Begun'));
+	check('AM3.3 second rendered message is turn 2 in DAG order', renderedTexts[1].includes('Second turn: Working'));
+	check('AM3.4 third rendered message is turn 3 in DAG order', renderedTexts[2].includes('Third turn: Continuing'));
+	check('AM3.5 fourth rendered message is turn 4 in DAG order', renderedTexts[3].includes('Fourth turn: Finished'));
+
+	// AM4. Re-selecting conversation already on screen does not redraw or duplicate
+	const countBefore = container.querySelectorAll('.guki-message').length;
+	const firstElBefore = container.querySelector('.guki-message');
+	await view.handleSelectSession('sess-am-dag-order');
+	eq('AM4.1 re-selection leaves message count unchanged', container.querySelectorAll('.guki-message').length, countBefore);
+	eq('AM4.2 re-selection leaves state item count unchanged', state.items.length, 4);
+	check('AM4.3 re-selection does not recreate DOM nodes', container.querySelector('.guki-message') === firstElBefore);
+
+	// AM5. Plain-language notice when readSession comes back empty
+	await view.handleSelectSession('sess-am-empty');
+	eq('AM5.1 empty session produces one notice item', state.items.length, 1);
+	eq('AM5.2 notice kind is notice', state.items[0]?.kind, 'notice');
+	eq('AM5.3 notice level is info', (state.items[0] as any)?.level, 'info');
+	check('AM5.4 DOM displays plain-language empty notice text', container.text.includes('This conversation has no messages to display.'));
+	check('AM5.5 previous conversation cleared from DOM', !container.text.includes('Fourth turn: Finished'));
+
+	// AM6. Plain-language notice when readSession throws (missing / unreadable file)
+	await view.handleSelectSession('sess-does-not-exist-xyz');
+	eq('AM6.1 missing session produces one notice item', state.items.length, 1);
+	eq('AM6.2 notice kind is notice', state.items[0]?.kind, 'notice');
+	eq('AM6.3 notice level is error', (state.items[0] as any)?.level, 'error');
+	check('AM6.4 DOM displays plain-language error notice text', container.text.includes('Could not load conversation'));
+	check('AM6.5 DOM contains error styling', container.querySelector('.guki-message-error') !== null);
+
+	// AM7. Real conversation on disk drawn on screen, newest page is a strict subset
+	await view.handleSelectSession('sess-am-long-real');
+	eq('AM7.1 UI layer page size constant is 50', HISTORY_PAGE_SIZE, 50);
+	eq('AM7.2 newest page draws exactly 50 items (strict subset of 70)', state.items.length, 50);
+	check('AM7.3 newest item is 70th turn tip', container.text.includes('Reply for turn 70'));
+	check('AM7.4 oldest drawn item is turn 21', container.text.includes('Prompt for turn 21'));
+	check('AM7.5 unpaged items turn 1-20 are omitted from drawn page', !container.text.includes('Prompt for turn 20'));
+	eq('AM7.6 cost and duration left blank without invention', (state.items[0] as any)?.costUsd, undefined);
+	eq('AM7.7 assistant duration left blank without invention', (state.items[1] as any)?.meta?.durationMs, undefined);
+	eq('AM7.8 DOM renders all 50 paged messages', container.querySelectorAll('.guki-message').length, 50);
+
+	// Also verify against an actual ~/.claude/projects/ transcript on disk if present
+	const realClaudeFile = join(homedir(), '.claude', 'projects', '-Users-emregultekir-Documents-otherprojects-guki-obsidian-chat', '011fb901-bdfe-4df1-ba50-04a1808fbc07.jsonl');
+	if (existsSync(realClaudeFile)) {
+		const realSession = {
+			state: new ChatState(),
+			busy: false,
+			blocked: false,
+			vaultPaths: async () => ({ root: '/Users/emregultekir/Documents/otherprojects/guki-obsidian-chat', outside: '/fake/outside' }),
+			getSlashCommands: () => ['clear', 'help'],
+			send: () => {},
+			interrupt: () => {},
+			decidePermission: () => {},
+			rememberPermission: async () => {},
+		} as unknown as SessionManager;
+		const realContainer = new FakeElement() as any;
+		const realLeaf = new WorkspaceLeaf(app, realContainer);
+		const realView = new ChatView(realLeaf, realSession);
+		await (realView as any).onOpen();
+		await realView.handleSelectSession('011fb901-bdfe-4df1-ba50-04a1808fbc07');
+		check('AM7.9 real transcript on disk draws message items', realSession.state.items.length >= 1);
+		check('AM7.10 real transcript DOM renders messages', realContainer.querySelectorAll('.guki-message').length >= 1);
+	}
+}
+
+// AN: Görev 8: Real dropdown selection path and 'load older' paging
+{
+	console.log("AN. Görev 8: Real dropdown selection path and 'load older' paging");
+
+	// Harness setup for AN
+	const container = new FakeElement() as any;
+	const app = new App();
+	const leaf = new WorkspaceLeaf(app, container);
+	const state = new ChatState();
+
+	const session = {
+		state,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
+		getSlashCommands: () => ['clear', 'help'],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const store = new NodeTranscriptStore(TRANSCRIPT_TEST_DIR);
+	const view = new ChatView(leaf, session, store);
+	await (view as any).onOpen();
+
+	// AN1: The gap: Real user path from dropdown row click through onSelectSession to DOM messages
+	const triggerEl = view.getHistoryTriggerEl();
+	triggerEl?.click();
+	await new Promise((resolve) => setTimeout(resolve, 20));
+
+	const dropdown = view.getHistoryDropdown();
+	check('AN1.1 history dropdown is open after action click', dropdown?.isOpen() === true);
+
+	const rowEls = container.querySelectorAll('.guki-history-item');
+	check('AN1.2 history items are rendered in dropdown', rowEls.length > 0);
+
+	// Find the item for sess-am-basic
+	const basicRow = rowEls.find((el: any) => el.text.includes('Question 1: What is Obsidian?') || el.text.includes('sess-am-basic'));
+	const targetRow = basicRow ?? rowEls[0];
+	check('AN1.3 target session row found in dropdown', targetRow !== undefined);
+
+	// User clicks the session row in the dropdown
+	targetRow?.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	eq('AN1.4 state items populated via dropdown click', state.items.length > 0, true);
+	check('AN1.5 DOM contains conversation messages from clicked session', container.querySelectorAll('.guki-message').length > 0);
+	eq('AN1.6 dropdown closed upon selection', dropdown?.isOpen(), false);
+
+	// AN2: "Load older" control presence and absence (Required red/green pair b)
+	// On a short conversation (sess-am-basic with 4 turns), nothing older remains -> control must be GONE
+	await view.handleSelectSession('sess-am-basic');
+	eq('AN2.1 short session state items is 4', state.items.length, 4);
+	check('AN2.2 load older control is absent for short session with no older items', view.getLoadOlderEl() === null);
+	check('AN2.3 DOM does not contain load older button', container.querySelector('.guki-load-older') === null);
+
+	// On a long conversation (>50 turns, e.g. sess-am-long-real with 70 turns), control must be PRESENT above messages
+	await view.handleSelectSession('sess-am-long-real');
+	eq('AN2.4 initial draw has 50 items', state.items.length, 50);
+	check('AN2.5 load older control is present when older items exist', view.getLoadOlderEl() !== null);
+	check('AN2.6 DOM contains load older button', container.querySelector('.guki-load-older') !== null);
+	check('AN2.7 load older button sits above conversation in DOM', container.querySelector('.guki-messages')?.children[0] === view.getLoadOlderEl());
+
+	// AN3: Viewport preservation and prepend order on "load older" (Required red/green pair c)
+	// Before prepend: oldest drawn item is turn 21, message list scroll position captured
+	const scrollEl = container.querySelector('.guki-messages');
+	scrollEl.scrollHeight = 5000;
+	scrollEl.scrollTop = 100;
+	scrollEl.clientHeight = 800;
+
+	const firstMsgBefore = scrollEl.querySelector('.guki-message');
+	check('AN3.1 first message before prepend is turn 21', firstMsgBefore?.text?.includes('Prompt for turn 21'));
+
+	// Track whether scrollIntoView was called on anchor
+	let anchorScrolledIntoView = false;
+	if (firstMsgBefore) {
+		firstMsgBefore.scrollIntoView = () => { anchorScrolledIntoView = true; };
+	}
+
+	// User clicks "load older"
+	const loadOlderBtn = view.getLoadOlderEl();
+	loadOlderBtn?.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	eq('AN3.2 all 70 items now loaded in state', state.items.length, 70);
+	eq('AN3.3 all 70 items rendered in DOM', container.querySelectorAll('.guki-message').length, 70);
+
+	// Required red/green pair c: older items must be PREPENDED, not appended at bottom
+	const messagesAfter = container.querySelectorAll('.guki-message');
+	check('AN3.4 first rendered message is now turn 1 (prepended at top)', messagesAfter[0]?.text?.includes('Prompt for turn 1'));
+	check('AN3.5 last rendered message is turn 70 (newest stays at bottom)', messagesAfter[69]?.text?.includes('Reply for turn 70'));
+
+	// Viewport jump prevention assertions:
+	// 1. Did NOT scroll to bottom (scrollTop was not set to scrollHeight)
+	check('AN3.6 prepend did not scroll to bottom', scrollEl.scrollTop < scrollEl.scrollHeight);
+	// 2. Anchor element scrollIntoView called to preserve eye position
+	check('AN3.7 anchor element scrollIntoView called to preserve eye position', anchorScrolledIntoView === true);
+
+	// With all 70 turns loaded, nothing older remains -> control must be GONE
+	check('AN3.8 load older control is gone after all older items loaded', view.getLoadOlderEl() === null);
+	check('AN3.9 DOM no longer contains load older button', container.querySelector('.guki-load-older') === null);
+
+	// AN4: Multi-press paging integrity across at least 2 presses
+	// Fixture: 120 turns (requires 3 pages: 50 + 50 + 20)
+	const multiFile = join(TRANSCRIPT_TEST_DIR, 'sess-an-multipress.jsonl');
+	const multiLines: string[] = [];
+	for (let i = 1; i <= 120; i++) {
+		const isUser = i % 2 === 1;
+		multiLines.push(
+			JSON.stringify({
+				type: isUser ? 'user' : 'assistant',
+				uuid: `msg-multi-${String(i)}`,
+				parentUuid: i === 1 ? undefined : `msg-multi-${String(i - 1)}`,
+				message: isUser
+					? { role: 'user', content: `Multi prompt ${String(i)}` }
+					: { role: 'assistant', content: [{ type: 'text', text: `Multi reply ${String(i)}` }] },
+			}),
+		);
+	}
+	multiLines.push(JSON.stringify({ type: 'last-prompt', leafUuid: 'msg-multi-120', sessionId: 'sess-an-multipress' }));
+	multiLines.push('');
+	writeFileSync(multiFile, multiLines.join('\n'));
+
+	await view.handleSelectSession('sess-an-multipress');
+	eq('AN4.1 initial page loads 50 newest turns', state.items.length, 50);
+	check('AN4.2 oldest initial item is turn 71', state.items[0]?.id === 'msg-multi-71' || container.text.includes('Multi prompt 71'));
+	check('AN4.3 newest initial item is turn 120', container.text.includes('Multi reply 120'));
+	check('AN4.4 load older control present before press 1', view.getLoadOlderEl() !== null);
+
+	// Press 1: loads turns 21-70 (50 items)
+	view.getLoadOlderEl()?.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	eq('AN4.5 after press 1, state items count is 100', state.items.length, 100);
+	check('AN4.6 after press 1, oldest item is turn 21', container.text.includes('Multi prompt 21'));
+	check('AN4.7 after press 1, turn 70 is present', container.text.includes('Multi reply 70'));
+	check('AN4.8 load older control STILL present before press 2', view.getLoadOlderEl() !== null);
+
+	// Press 2: loads turns 1-20 (20 items)
+	view.getLoadOlderEl()?.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	eq('AN4.9 after press 2, all 120 items loaded', state.items.length, 120);
+	check('AN4.10 after press 2, oldest item is turn 1', container.text.includes('Multi prompt 1'));
+	check('AN4.11 after press 2, newest item is turn 120', container.text.includes('Multi reply 120'));
+
+	// Integrity checks across 120 items:
+	// No duplicate item IDs
+	const itemIds = state.items.map((it) => it.id);
+	const uniqueIds = new Set(itemIds);
+	eq('AN4.12 no duplicate item ids across paged presses', uniqueIds.size, 120);
+
+	// No gap
+	let hasGap = false;
+	for (let i = 1; i <= 120; i++) {
+		if (!uniqueIds.has(`msg-multi-${String(i)}`)) {
+			hasGap = true;
+			break;
+		}
+	}
+	eq('AN4.13 no gap across the full conversation history', hasGap, false);
+
+	// Chain order preserved
+	const multiMessages = container.querySelectorAll('.guki-message');
+	eq('AN4.14 DOM renders all 120 messages in order', multiMessages.length, 120);
+	check('AN4.15 first DOM message is turn 1', multiMessages[0]?.text?.includes('Multi prompt 1'));
+	check('AN4.16 71st DOM message is turn 71', multiMessages[70]?.text?.includes('Multi prompt 71'));
+	check('AN4.17 120th DOM message is turn 120', multiMessages[119]?.text?.includes('Multi reply 120'));
+
+	// Truthful end-of-conversation: control is gone
+	check('AN4.18 load older control gone at conversation root', view.getLoadOlderEl() === null);
+	check('AN4.19 DOM has no load older button at root', container.querySelector('.guki-load-older') === null);
+
+	// Subsequent press attempt does nothing (no-op)
+	await view.handleLoadOlder();
+	eq('AN4.20 calling handleLoadOlder at root leaves item count unchanged', state.items.length, 120);
+}
+
+// AO: In-panel conversation history control in panel container
+{
+	console.log('AO. In-panel conversation history control in panel container');
+
+	const container = new FakeElement() as any;
+	const app = new App();
+	const leaf = new WorkspaceLeaf(app, container);
+	const state = new ChatState();
+
+	const session = {
+		state,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
+		getSlashCommands: () => ['clear', 'help'],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const store = new NodeTranscriptStore(TRANSCRIPT_TEST_DIR);
+	const view = new ChatView(leaf, session, store);
+	await (view as any).onOpen();
+
+	const rootEl = container.querySelector('.guki-root');
+	const triggerEl = view.getHistoryTriggerEl();
+	const actionEl = container.querySelector('.view-action');
+
+	check('AO.1 history trigger element exists', triggerEl !== null && triggerEl !== undefined);
+	check('AO.2 trigger element is inside panel root container', rootEl !== null && triggerEl !== null && rootEl.contains(triggerEl) === true);
+	check('AO.3 view registers no view-action chrome element', actionEl === null);
+
+	const dropdown = view.getHistoryDropdown();
+	check('AO.4 history dropdown initially closed', dropdown?.isOpen() === false);
+	triggerEl?.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	check('AO.5 clicking in-panel trigger element toggles history dropdown open', dropdown?.isOpen() === true);
+
+	await (view as any).onClose();
+	check('AO.6 onClose cleans up history trigger reference', view.getHistoryTriggerEl() === null);
+}
+
+// AP. Görev 8 Round T4b: Resume past conversation on first message
+{
+	console.log('AP. Görev 8 Round T4b: Resume past conversation on first message');
+
+	const { EventEmitter } = createRequire(import.meta.url)('node:events');
+	const cp = (window as any).require('child_process');
+	const origSpawn = cp.spawn;
+	const spawnCalls: Array<{ binary: string; argv: string[]; options: any }> = [];
+	let activeChild: any = null;
+
+	cp.spawn = (binary: string, argv: string[], options: any) => {
+		const stdout = new EventEmitter() as any;
+		stdout.setEncoding = () => {};
+		const stderr = new EventEmitter() as any;
+		stderr.setEncoding = () => {};
+		const stdin = new EventEmitter() as any;
+		stdin.write = () => true;
+		stdin.end = () => {
+			if (activeChild && !activeChild._exited) {
+				activeChild._exited = true;
+				activeChild.emit('exit', 0, null);
+			}
+		};
+
+		const child = new EventEmitter() as any;
+		child.stdout = stdout;
+		child.stderr = stderr;
+		child.stdin = stdin;
+		child.pid = 99000 + spawnCalls.length;
+		child.kill = (sig?: string) => {
+			if (!child._exited) {
+				child._exited = true;
+				child.emit('exit', 0, sig ?? null);
+			}
+		};
+		spawnCalls.push({ binary, argv: [...argv], options });
+		activeChild = child;
+		return child;
+	};
+
+	const realAdapter = new FileSystemAdapter();
+	realAdapter.getBasePath = () => TRANSCRIPT_TEST_DIR;
+	(realAdapter as any).read = () => Promise.resolve(
+		readFileSync(join(process.cwd(), 'src', 'cli', 'mcp-permission-server.mjs'), 'utf8'),
+	);
+
+	const app = {
+		vault: {
+			adapter: realAdapter,
+			configDir: '.obsidian',
+		},
+	} as unknown as App;
+
+	const container = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(app, container);
+	const session = new SessionManager(app, undefined, process.execPath);
+	const store = new NodeTranscriptStore(TRANSCRIPT_TEST_DIR);
+	const view = new ChatView(leaf, session, store);
+	await (view as any).onOpen();
+
+	const targetSessionId = 'sess-am-basic';
+
+	// (a) Selection alone spawns NOTHING
+	await view.handleSelectSession(targetSessionId);
+	eq('AP.1 selection alone spawns nothing', spawnCalls.length, 0);
+
+	const textarea = container.querySelector('textarea');
+	const sendBtn = container.querySelector('.guki-composer-send');
+
+	// Drive real send path: composer textarea input -> send button click
+	textarea.value = 'First message continuing sess-am-basic';
+	textarea.listeners['input']?.();
+	sendBtn.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	// (b) First message after selection spawns exactly once with --resume <id> and broker flags
+	eq('AP.2 first message after selection spawns exactly once', spawnCalls.length, 1);
+	const firstSpawnArgv = spawnCalls[0]?.argv ?? [];
+	const resumeIndex = firstSpawnArgv.indexOf('--resume');
+	check('AP.3 --resume flag is present in argv', resumeIndex !== -1);
+	eq('AP.4 --resume argument matches selected session ID', firstSpawnArgv[resumeIndex + 1], targetSessionId);
+	const resumeCount = firstSpawnArgv.filter((a) => a === '--resume').length;
+	eq('AP.5 --resume flag appears exactly once', resumeCount, 1);
+	check('AP.6 broker flags present alongside --resume', firstSpawnArgv.includes('--permission-prompt-tool'));
+
+	// (d) Second message of a resumed conversation does not respawn and does not re-add flag
+	textarea.value = 'Second message in resumed conversation';
+	textarea.listeners['input']?.();
+	sendBtn.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	eq('AP.7 second message does not respawn process', spawnCalls.length, 1);
+
+	// (e) Switching away from a live conversation ends the running process, and manager can still send
+	const prevChild = activeChild;
+	let prevChildStopped = false;
+	if (prevChild) {
+		prevChild.on('exit', () => { prevChildStopped = true; });
+	}
+	await view.handleSelectSession('sess-am-second');
+	check('AP.8 switching away stops the running process', prevChildStopped === true || prevChild?._exited === true);
+	eq('AP.9 switching conversation alone does not spawn', spawnCalls.length, 1);
+
+	textarea.value = 'Message in second resumed session';
+	textarea.listeners['input']?.();
+	sendBtn.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	eq('AP.10 manager spawns for newly selected session', spawnCalls.length, 2);
+	const secondSpawnArgv = spawnCalls[1]?.argv ?? [];
+	const secondResumeIndex = secondSpawnArgv.indexOf('--resume');
+	check('AP.11 second session argv has --resume', secondResumeIndex !== -1);
+	eq('AP.12 second session argv has second session ID', secondSpawnArgv[secondResumeIndex + 1], 'sess-am-second');
+	check('AP.13 broker flags survived and present in second session', secondSpawnArgv.includes('--permission-prompt-tool'));
+
+	// (c) A fresh conversation with no selection spawns with NO --resume anywhere in argv
+	const freshContainer = new FakeElement() as any;
+	const freshLeaf = new WorkspaceLeaf(app, freshContainer);
+	const freshSession = new SessionManager(app, undefined, process.execPath);
+	const freshView = new ChatView(freshLeaf, freshSession, store);
+	await (freshView as any).onOpen();
+
+	const freshTextarea = freshContainer.querySelector('textarea');
+	const freshSendBtn = freshContainer.querySelector('.guki-composer-send');
+	freshTextarea.value = 'Message in fresh unresumed conversation';
+	freshTextarea.listeners['input']?.();
+	freshSendBtn.click();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	eq('AP.14 fresh conversation spawns on first message', spawnCalls.length, 3);
+	const freshArgv = spawnCalls[2]?.argv ?? [];
+	check('AP.15 fresh conversation has NO --resume flag in argv', !freshArgv.includes('--resume'));
+	check('AP.16 fresh conversation has broker flags', freshArgv.includes('--permission-prompt-tool'));
+
+	// Teardown
+	session.dispose();
+	freshSession.dispose();
+	cp.spawn = origSpawn;
+}
+
+// AQ: Görev 8: Dynamic conversation-history button placement
+{
+	console.log('AQ. Görev 8: Dynamic conversation-history button placement');
+
+	const app = new App();
+	const state = new ChatState();
+	const session = {
+		state,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
+		getSlashCommands: () => ['clear', 'help'],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+	const store = new NodeTranscriptStore(TRANSCRIPT_TEST_DIR);
+
+	// (a) Docked in a side panel -> in-panel button present, no view action registered
+	{
+		const container = new FakeElement() as any;
+		const leaf = new WorkspaceLeaf(app, container);
+		(leaf as any).setRoot((app.workspace as any).rightSplit);
+		const view = new ChatView(leaf, session, store);
+		await (view as any).onOpen();
+
+		const inPanelBtn = container.querySelector('.guki-header-history-btn');
+		const viewActionEl = container.querySelector('.view-action');
+		const headerEl = container.querySelector('.guki-header');
+
+		check('AQ.a1 in-panel button present when docked in side panel', inPanelBtn !== null);
+		check('AQ.a2 in-panel header strip present in side panel', headerEl !== null);
+		check('AQ.a3 no view action registered in side panel', viewActionEl === null);
+		check('AQ.a4 exactly one control in side panel', inPanelBtn !== null && viewActionEl === null);
+
+		await (view as any).onClose();
+	}
+
+	// (b) Docked in the main area -> view action registered, no in-panel header strip in the DOM
+	{
+		const container = new FakeElement() as any;
+		const leaf = new WorkspaceLeaf(app, container);
+		(leaf as any).setRoot((app.workspace as any).rootSplit);
+		const view = new ChatView(leaf, session, store);
+		await (view as any).onOpen();
+
+		const inPanelBtn = container.querySelector('.guki-header-history-btn');
+		const headerEl = container.querySelector('.guki-header');
+		const viewActionEl = container.querySelector('.view-action');
+
+		check('AQ.b1 view action registered when docked in main area', viewActionEl !== null);
+		check('AQ.b2 no in-panel header strip in DOM in main area', headerEl === null);
+		check('AQ.b3 no in-panel button in main area', inPanelBtn === null);
+		check('AQ.b4 exactly one control in main area', viewActionEl !== null && inPanelBtn === null);
+
+		await (view as any).onClose();
+	}
+
+	// (c) In both placements, clicking the visible control opens the dropdown, and trigger is that control
+	{
+		// Side panel placement
+		const sideContainer = new FakeElement() as any;
+		const sideLeaf = new WorkspaceLeaf(app, sideContainer);
+		(sideLeaf as any).setRoot((app.workspace as any).rightSplit);
+		const sideView = new ChatView(sideLeaf, session, store);
+		await (sideView as any).onOpen();
+
+		const sideDropdown = sideView.getHistoryDropdown();
+		const sideControl = sideView.getHistoryTriggerEl();
+		check('AQ.c1 side panel dropdown trigger matches visible control', sideDropdown?.getTriggerEl() === sideControl && sideControl !== null);
+		check('AQ.c2 side panel history dropdown initially closed', sideDropdown?.isOpen() === false);
+		sideControl?.click();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		check('AQ.c3 clicking side panel trigger opens dropdown', sideDropdown?.isOpen() === true);
+		await (sideView as any).onClose();
+
+		// Main area placement
+		const mainContainer = new FakeElement() as any;
+		const mainLeaf = new WorkspaceLeaf(app, mainContainer);
+		(mainLeaf as any).setRoot((app.workspace as any).rootSplit);
+		const mainView = new ChatView(mainLeaf, session, store);
+		await (mainView as any).onOpen();
+
+		const mainDropdown = mainView.getHistoryDropdown();
+		const mainControl = mainView.getHistoryTriggerEl();
+		check('AQ.c4 main area dropdown trigger matches visible control', mainDropdown?.getTriggerEl() === mainControl && mainControl !== null);
+		check('AQ.c5 main area dropdown trigger is the view action', mainControl === mainContainer.querySelector('.view-action'));
+		check('AQ.c6 main area history dropdown initially closed', mainDropdown?.isOpen() === false);
+		mainControl?.click();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		check('AQ.c7 clicking main area view action opens dropdown', mainDropdown?.isOpen() === true);
+		await (mainView as any).onClose();
+	}
+
+	// (d) Moving the panel sidebar -> main -> sidebar leaves exactly one control after each move
+	{
+		const container = new FakeElement() as any;
+		const leaf = new WorkspaceLeaf(app, container);
+		(leaf as any).setRoot((app.workspace as any).rightSplit);
+		const view = new ChatView(leaf, session, store);
+		await (view as any).onOpen();
+
+		// Initial: sidebar
+		const sideBtn = container.querySelector('.guki-header-history-btn');
+		const sideAction = container.querySelector('.view-action');
+		check('AQ.d1 initially in sidebar has in-panel button and no view action', sideBtn !== null && sideAction === null);
+
+		// Move to main area
+		(leaf as any).setRoot((app.workspace as any).rootSplit);
+		(app.workspace as any).trigger('layout-change');
+
+		const mainBtn = container.querySelector('.guki-header-history-btn');
+		const mainHeader = container.querySelector('.guki-header');
+		const mainAction = container.querySelector('.view-action');
+		const dropdown = view.getHistoryDropdown();
+		const activeTriggerAfterMoveToMain = view.getHistoryTriggerEl();
+		const controlsCountAfterMoveToMain = container.querySelectorAll('.view-action').length + container.querySelectorAll('.guki-header-history-btn').length;
+
+		eq('AQ.d2 move sidebar to main leaves exactly one control (old control torn down)', controlsCountAfterMoveToMain, 1);
+		check('AQ.d3 move sidebar to main has view action and no in-panel header', mainAction !== null && mainBtn === null && mainHeader === null);
+		check('AQ.d4 dropdown trigger updated to view action after move to main', dropdown?.getTriggerEl() === mainAction && activeTriggerAfterMoveToMain === mainAction);
+
+		// Move back to sidebar
+		(leaf as any).setRoot((app.workspace as any).rightSplit);
+		(app.workspace as any).trigger('layout-change');
+
+		const returnBtn = container.querySelector('.guki-header-history-btn');
+		const returnHeader = container.querySelector('.guki-header');
+		const returnAction = container.querySelector('.view-action');
+		const activeTriggerAfterReturn = view.getHistoryTriggerEl();
+		const controlsCountAfterReturn = container.querySelectorAll('.view-action').length + container.querySelectorAll('.guki-header-history-btn').length;
+
+		eq('AQ.d5 move main back to sidebar leaves exactly one control (view action torn down)', controlsCountAfterReturn, 1);
+		check('AQ.d6 move main back to sidebar has in-panel button and no view action', returnBtn !== null && returnHeader !== null && returnAction === null);
+		check('AQ.d7 dropdown trigger updated to in-panel button after return', dropdown?.getTriggerEl() === returnBtn && activeTriggerAfterReturn === returnBtn);
+
+		await (view as any).onClose();
+	}
+
+	// (e) Trap 1 safeguard: cramped main area leaf falls back to in-panel button (never zero controls)
+	{
+		const container = new FakeElement() as any;
+		const leaf = new WorkspaceLeaf(app, container);
+		(leaf as any).setRoot((app.workspace as any).rootSplit);
+		const view = new ChatView(leaf, session, store);
+		await (view as any).onOpen();
+
+		// Initially wide main area -> view action present
+		check('AQ.e1 wide main area has view action', container.querySelector('.view-action') !== null);
+
+		// Resize main leaf to narrow (< 480px)
+		container.clientWidth = 320;
+		(view as any).rootEl.clientWidth = 320;
+		view.onResize();
+
+		const narrowInPanelBtn = container.querySelector('.guki-header-history-btn');
+		const narrowViewAction = container.querySelector('.view-action');
+		const dropdown = view.getHistoryDropdown();
+		const narrowControlsCount = container.querySelectorAll('.view-action').length + container.querySelectorAll('.guki-header-history-btn').length;
+
+		check('AQ.e2 narrow main leaf falls back to in-panel button', narrowInPanelBtn !== null);
+		check('AQ.e3 narrow main leaf tears down view action', narrowViewAction === null);
+		eq('AQ.e4 narrow main leaf has exactly one control (never zero)', narrowControlsCount, 1);
+		check('AQ.e5 dropdown trigger updated to in-panel button in narrow main leaf', dropdown?.getTriggerEl() === narrowInPanelBtn);
+
+		// Resize back to wide (>= 480px)
+		container.clientWidth = 800;
+		(view as any).rootEl.clientWidth = 800;
+		view.onResize();
+
+		const wideInPanelBtn = container.querySelector('.guki-header-history-btn');
+		const wideViewAction = container.querySelector('.view-action');
+		const wideControlsCount = container.querySelectorAll('.view-action').length + container.querySelectorAll('.guki-header-history-btn').length;
+
+		check('AQ.e6 wide main leaf restores view action', wideViewAction !== null);
+		check('AQ.e7 wide main leaf removes in-panel button', wideInPanelBtn === null);
+		eq('AQ.e8 wide main leaf has exactly one control (never zero)', wideControlsCount, 1);
+
+		await (view as any).onClose();
+	}
+}
+
+// Clean up temporary test files
+rmSync(TRANSCRIPT_TEST_DIR, { recursive: true, force: true });
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
