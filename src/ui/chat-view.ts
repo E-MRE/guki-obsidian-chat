@@ -36,6 +36,10 @@ export class ChatView extends ItemView {
 	private headerEl: HTMLElement | null = null;
 	private historyTriggerEl: HTMLElement | null = null;
 	private viewActionEl: HTMLElement | null = null;
+	/** The in-panel new-conversation button (narrow / side-panel layout). */
+	private newConvTriggerEl: HTMLElement | null = null;
+	/** The view-action new-conversation button (wide main-area layout). */
+	private newConvActionEl: HTMLElement | null = null;
 	private resizeObserver: ResizeObserver | null = null;
 	private pendingMeasure: number | null = null;
 	private messageList: MessageList | null = null;
@@ -363,6 +367,11 @@ export class ChatView extends ItemView {
 			this.viewActionEl.remove();
 			this.viewActionEl = null;
 		}
+		if (this.newConvActionEl) {
+			this.newConvActionEl.remove();
+			this.newConvActionEl = null;
+		}
+		this.newConvTriggerEl = null;
 		if (this.headerEl) {
 			this.headerEl.remove();
 			this.headerEl = null;
@@ -764,6 +773,36 @@ export class ChatView extends ItemView {
 	 * view-action chrome and an in-panel header strip.
 	 * Exactly one control is present at a time: never two, never zero.
 	 */
+	getNewConvTriggerEl(): HTMLElement | null {
+		return this.newConvActionEl ?? this.newConvTriggerEl;
+	}
+
+	/**
+	 * Returns the panel to a fresh conversation without touching the one that was open.
+	 *
+	 * `SessionManager.switchConversation(null)` already does the hard part — cancels pending
+	 * permission requests, fails an in-flight turn, drains the queue, stops the child process and
+	 * clears the resume id — so this only clears what the VIEW holds: the transcript on screen, the
+	 * session id, the cached summary and the header. Nothing is deleted on disk: the previous
+	 * conversation stays in the history list with whatever name it had.
+	 *
+	 * A no-op on an already-fresh panel: with no session id there is nothing to leave, and calling
+	 * through would stop a process the user may be waiting on.
+	 */
+	handleNewConversation(): void {
+		if (!this.currentSessionId) {
+			return;
+		}
+		this.historyDropdown?.close();
+		this.session.switchConversation?.(null);
+		this.currentSessionId = null;
+		this.currentSessionSummary = null;
+		this.currentPage = null;
+		this.session.state.setItems([]);
+		this.updateLoadOlderControl();
+		this.updateHeader();
+	}
+
 	syncHistoryControl(): void {
 		if (!this.rootEl || !this.historyDropdown) {
 			return;
@@ -775,10 +814,19 @@ export class ChatView extends ItemView {
 				this.headerEl.remove();
 				this.headerEl = null;
 				this.historyTriggerEl = null;
+				this.newConvTriggerEl = null;
+			}
+			if (this.newConvTriggerEl) {
+				this.newConvTriggerEl = null;
 			}
 			if (!this.viewActionEl) {
 				this.viewActionEl = this.addAction('history', 'Conversation history', () => {
 					void this.historyDropdown?.toggle();
+				});
+			}
+			if (!this.newConvActionEl) {
+				this.newConvActionEl = this.addAction('square-pen', 'New conversation', () => {
+					this.handleNewConversation();
 				});
 			}
 			this.historyDropdown.setTriggerEl(this.viewActionEl);
@@ -787,6 +835,10 @@ export class ChatView extends ItemView {
 			if (this.viewActionEl) {
 				this.viewActionEl.remove();
 				this.viewActionEl = null;
+			}
+			if (this.newConvActionEl) {
+				this.newConvActionEl.remove();
+				this.newConvActionEl = null;
 			}
 			if (!this.headerEl) {
 				const header = this.rootEl.createDiv({ cls: 'guki-header' });
@@ -805,6 +857,18 @@ export class ChatView extends ItemView {
 				setIcon(this.historyTriggerEl, 'history');
 				this.registerDomEvent(this.historyTriggerEl, 'click', () => {
 					void this.historyDropdown?.toggle();
+				});
+
+				this.newConvTriggerEl = header.createEl('button', {
+					cls: 'clickable-icon guki-header-newconv-btn',
+					attr: {
+						'aria-label': 'New conversation',
+						'type': 'button',
+					},
+				});
+				setIcon(this.newConvTriggerEl, 'square-pen');
+				this.registerDomEvent(this.newConvTriggerEl, 'click', () => {
+					this.handleNewConversation();
 				});
 			}
 			this.historyDropdown.setTriggerEl(this.historyTriggerEl);
