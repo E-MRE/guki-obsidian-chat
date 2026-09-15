@@ -14,6 +14,7 @@
 import { setIcon } from 'obsidian';
 import { resolveSessionTitle, type SessionSummary } from '../data/session-index';
 import type { ConversationTitleStore } from '../data/conversation-titles';
+import { t } from '../i18n';
 
 export interface HistoryRowItem {
 	sessionId: string;
@@ -283,7 +284,7 @@ export class HistoryDropdown {
 			} else {
 				this.items[itemIndex] = {
 					...this.items[itemIndex]!,
-					title: trimmed.length > 0 ? trimmed : (this.items[itemIndex]?.title ?? 'Untitled session'),
+					title: trimmed.length > 0 ? trimmed : (this.items[itemIndex]?.title ?? t('chat.history.untitled-session')),
 					isDerivedTitle: false,
 				};
 			}
@@ -423,7 +424,7 @@ export class HistoryDropdown {
 		if (this.items.length === 0) {
 			this.dropdownEl.createDiv({
 				cls: 'guki-history-empty',
-				text: 'No past conversations found in this vault.',
+				text: t('chat.history.empty'),
 			});
 			return;
 		}
@@ -440,7 +441,7 @@ export class HistoryDropdown {
 					cls: 'guki-history-rename-input',
 					attr: {
 						type: 'text',
-						'aria-label': 'Rename session',
+						'aria-label': t('chat.history.rename-session'),
 					},
 				});
 				inputEl.value = item.title;
@@ -472,7 +473,7 @@ export class HistoryDropdown {
 					text: item.title,
 				});
 				if (item.isDerivedTitle) {
-					titleEl.setAttribute('title', `Derived: ${item.title}`);
+					titleEl.setAttribute('title', t('chat.history.derived', { title: item.title }));
 				}
 
 				itemEl.createSpan({
@@ -491,7 +492,7 @@ export class HistoryDropdown {
 					cls: 'clickable-icon guki-history-rename-btn',
 					attr: {
 						type: 'button',
-						'aria-label': 'Rename conversation',
+						'aria-label': t('chat.history.rename-conversation'),
 					},
 				});
 				setIcon(renameBtn, 'pencil');
