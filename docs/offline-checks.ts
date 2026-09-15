@@ -93,8 +93,13 @@ import { startsExpanded, toolCategory, toolResultText, toolSummary } from '../sr
 import { diffFromToolInput, diffStats, emptyPaneText } from '../src/ui/diff-view';
 import { toolPermissionBodyText, toolResultTitle, toolStatusText } from '../src/ui/tool-card';
 import { canRememberPermission, createPermissionCard, permissionDiff, rememberLabelText, shortenPathForLabel, type PermissionActions } from '../src/ui/permission-card';
-import { clearRememberedDecisions, DEFAULT_SETTINGS, formatRememberedDecision, removeRememberedDecision } from '../src/ui/settings-tab';
+import { clearRememberedDecisions, DEFAULT_SETTINGS, formatRememberedDecision, GukiSettingTab, removeRememberedDecision } from '../src/ui/settings-tab';
 import GukiChatPlugin from '../src/main';
+import { getLocale, setLocale, t } from '../src/i18n';
+import { settingsStrings } from '../src/i18n/keys/settings';
+import { chatStrings } from '../src/i18n/keys/chat';
+import { transcriptStrings } from '../src/i18n/keys/transcript';
+import { coreStrings } from '../src/i18n/keys/core';
 import { ChatView, currentStatus, HISTORY_PAGE_SIZE } from '../src/ui/chat-view';
 import { renderQuotaBar } from '../src/ui/composer';
 import { appendPromptHistory, PROMPT_HISTORY_CAP } from '../src/core/prompt-history';
@@ -169,7 +174,7 @@ import {
 	type HistoryRowItem,
 } from '../src/ui/history-dropdown';
 import { NodeTranscriptStore } from '../src/data/transcript-store';
-import { App, FileSystemAdapter, TFile, WorkspaceLeaf } from 'obsidian';
+import { App, FileSystemAdapter, Setting, TFile, WorkspaceLeaf } from 'obsidian';
 import { parseAskUserQuestionInput, decideAskUserQuestion, formatAskUserQuestionSummary, parseAskUserQuestionAnswers } from '../src/core/ask-user-question';
 import { AskUserQuestionInline } from '../src/ui/ask-user-question';
 import { DiskTranscriptLoader, resolveTranscriptBranch } from '../src/data/disk-transcript-loader';
@@ -14720,6 +14725,174 @@ console.log('\nAY. Görev 13 — Send message with preference');
 		await (view as any).onClose();
 	}
 }
+
+// --- AZ. i18n foundation -------------------------------------------------
+
+console.log('\nAZ. i18n foundation');
+
+const i18nSlices = [settingsStrings, chatStrings, transcriptStrings, coreStrings] as const;
+const i18nAll = {
+	...settingsStrings,
+	...chatStrings,
+	...transcriptStrings,
+	...coreStrings,
+};
+const placeholderNames = (value: string): string[] =>
+	[...value.matchAll(/\{([^{}]+)\}/g)].map((match) => match[1] ?? '').sort();
+
+check('AZ1. placeholder parity holds for every merged dictionary key',
+	Object.values(i18nAll).every((message) =>
+		JSON.stringify(placeholderNames(message.en)) === JSON.stringify(placeholderNames(message.tr))),
+);
+
+check('AZ2. merged dictionary has no overwritten keys or empty Turkish values',
+	Object.keys(i18nAll).length === i18nSlices.reduce((sum, slice) => sum + Object.keys(slice).length, 0) &&
+		Object.values(i18nAll).every((message) => message.tr.length > 0),
+);
+
+setLocale('en');
+const englishInterpolated = t('settings.remembered.count.one', { count: 2 });
+const missingPlaceholder = t('settings.remembered.count.one');
+setLocale('tr');
+const turkishInterpolated = t('settings.remembered.count.one', { count: 2 });
+check('AZ3. translator switches locales, interpolates, and preserves missing placeholders',
+	englishInterpolated === '2 remembered decision.' &&
+		turkishInterpolated === '2 hatırlanan karar.' &&
+		missingPlaceholder === '{count} remembered decision.' &&
+		getLocale() === 'tr',
+);
+
+{
+	const container = new FakeElement() as any;
+	const app = new App();
+	(app.vault as any).configDir = '.obsidian';
+	const plugin = new GukiChatPlugin(app as any, { dir: 'plugins/guki-chat' } as any);
+	plugin.settings = { ...DEFAULT_SETTINGS, rememberedDecisions: [] };
+	const tab = new GukiSettingTab(app as any, plugin);
+	(tab as any).app = app;
+	(tab as any).containerEl = container;
+
+	const settingPrototype = Setting.prototype as any;
+	const originalMethods = {
+		setName: settingPrototype.setName,
+		setDesc: settingPrototype.setDesc,
+		setHeading: settingPrototype.setHeading,
+		addText: settingPrototype.addText,
+		addDropdown: settingPrototype.addDropdown,
+		addToggle: settingPrototype.addToggle,
+		addButton: settingPrototype.addButton,
+	};
+	const addText = (value: string) => container.createSpan({ text: value });
+	settingPrototype.setName = function(value: string) { addText(value); return this; };
+	settingPrototype.setDesc = function(value: string) { addText(value); return this; };
+	settingPrototype.setHeading = function() { return this; };
+	settingPrototype.addText = function(callback: (control: any) => void) {
+		const control = {
+			setPlaceholder: (value: string) => { addText(value); return control; },
+			setValue: () => control,
+			onChange: () => control,
+		};
+		callback(control);
+		return this;
+	};
+	settingPrototype.addDropdown = function(callback: (control: any) => void) {
+		const control = {
+			addOption: (_value: string, label: string) => { addText(label); return control; },
+			setValue: () => control,
+			onChange: () => control,
+		};
+		callback(control);
+		return this;
+	};
+	settingPrototype.addToggle = function(callback: (control: any) => void) {
+		const control = { setValue: () => control, onChange: () => control };
+		callback(control);
+		return this;
+	};
+	settingPrototype.addButton = function(callback: (control: any) => void) {
+		const control = {
+			setButtonText: (value: string) => { addText(value); return control; },
+			setWarning: () => control,
+			onClick: () => control,
+		};
+		callback(control);
+		return this;
+	};
+
+	setLocale('tr');
+	tab.display();
+	Object.assign(settingPrototype, originalMethods);
+	check('AZ4. real settings tab renders specific Turkish strings',
+		container.text.includes('Dil') &&
+			container.text.includes('İngilizce') &&
+			container.text.includes('Claude code ikili dosya yolu') &&
+			container.text.includes('Kasa dışındaki izinler') &&
+			container.text.includes('Her şeye izin ver (yüksek risk)') &&
+			container.text.includes('Hatırlanan izin yok.'),
+	);
+}
+
+{
+	setLocale('en');
+	const app = new App();
+	const container = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(app, container);
+	const plugin = new GukiChatPlugin(app as any, { dir: 'plugins/guki-chat' } as any);
+	plugin.settings = { ...DEFAULT_SETTINGS, language: 'en' };
+	plugin.saveData = async () => {};
+	const session = {
+		state: new ChatState(),
+		busy: false,
+		blocked: null,
+		vaultPaths: async () => ({
+			root: '/fake/vault',
+			resolve: (raw: string) => raw,
+			isInside: () => true,
+		}),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+	} as unknown as SessionManager;
+	const factory = plugin.createChatViewFactory(session);
+	const originalView = factory(leaf);
+	await leaf.open(originalView);
+	const originalInput = required(container.querySelector('textarea'), 'AZ5 initial composer textarea');
+	originalInput.value = 'Taslak mesajım kaybolmasın';
+
+	let localeDuringRebuild = '';
+	let rebuiltView: ChatView | null = null;
+	const removedCommands: string[] = [];
+	const addedCommands: Array<{ id: string; name: string }> = [];
+	(app.workspace as any).getLeavesOfType = (type: string) => type === 'guki-chat-view' ? [leaf] : [];
+	(leaf as any).getViewState = () => ({ type: 'guki-chat-view', active: true });
+	(leaf as any).setViewState = async (viewState: { type: string }) => {
+		if (viewState.type === 'empty') {
+			await (leaf.view as any).onClose();
+			return;
+		}
+		localeDuringRebuild = getLocale();
+		rebuiltView = factory(leaf);
+		await leaf.open(rebuiltView);
+	};
+	(plugin as any).removeCommand = (id: string) => removedCommands.push(id);
+	(plugin as any).addCommand = (command: { id: string; name: string }) => addedCommands.push(command);
+
+	plugin.settings.language = 'tr';
+	await plugin.saveSettings();
+	const rebuiltInput = required(container.querySelector('textarea'), 'AZ5 rebuilt composer textarea');
+	check('AZ5. production language door rebuilds the panel in Turkish and preserves the draft',
+		rebuiltView !== null && rebuiltView !== originalView &&
+			localeDuringRebuild === 'tr' && getLocale() === 'tr' &&
+			rebuiltInput.value === 'Taslak mesajım kaybolmasın' &&
+			removedCommands.includes('open-chat') &&
+			addedCommands.some((command) => command.id === 'open-chat' && command.name === 'Sohbeti aç'),
+	);
+	await (leaf.view as any).onClose();
+}
+
+setLocale('en');
+check('AZ6. locale is restored to English after i18n checks', getLocale() === 'en');
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
