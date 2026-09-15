@@ -34,10 +34,12 @@ blocklist of personal terms would have to spell out the very facts it exists to 
 would go stale the moment the host session's context changed. Instead `--check` asks whether
 the fields above are still carrying content, which is true of any capture from any machine.
 
-`cwd` in `system/init` is left alone. It holds the vault path, which is a machine path
-rather than vault content, and the same path is hard-coded in `src/constants.ts`
-(`FALLBACK_VAULT_PATH`) and asserted in the Phase 6 `listSessions` criterion. Generalising
-it is a code change, not a scrub.
+`cwd` in `system/init` IS scrubbed. It was left alone originally because the same path was
+hard-coded in `src/constants.ts` as `FALLBACK_VAULT_PATH`, so redacting it here would only
+have moved the leak. That constant was deleted on 2026-09-04 and nothing asserts the capture's
+`cwd` value, so the exemption outlived its reason — and a later capture went out carrying a
+real home directory under it. Structural, like every other field here: any capture from any
+machine is flagged until `cwd` reads the placeholder.
 
 Checking prose documents:
   Alongside the capture scrubber, this tool audits text documents (Markdown and any other
@@ -84,6 +86,7 @@ INIT_REPLACEMENTS = {
 	'tools': ['example-tool'],
 	'agents': ['example-agent'],
 	'messaging_socket_path': '/redacted/messaging.sock',
+	'cwd': '/redacted/vault',
 }
 
 HOOK_SUBTYPES = ('hook_response', 'hook_progress')

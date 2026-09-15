@@ -7116,7 +7116,7 @@ console.log('AA4. Label and list formatting: directory displayed, distinguishabl
 	);
 	eq(
 		'AA4.2: long directory is shortened at front keeping meaningful tail',
-		rememberLabelText('Bash', '/Users/emregultekir/Documents/otherprojects/guki-obsidian-chat'),
+		rememberLabelText('Bash', '/Users/alice/Documents/otherprojects/guki-obsidian-chat'),
 		'Always allow this exact command in …/otherprojects/guki-obsidian-chat',
 	);
 	eq(
@@ -7150,7 +7150,7 @@ console.log('AA4. Label and list formatting: directory displayed, distinguishabl
 
 	// 4. Settings list: long paths differing at root remain distinguishable
 	const rootA = '/Volumes/ExternalBackupDrive/2026/documents/archive/project/overview.md';
-	const rootB = '/Users/emregultekir/documents/archive/project/overview.md';
+	const rootB = '/Users/alice/documents/archive/project/overview.md';
 	const fmtRootA = formatRememberedDecision({ id: 'rem-r-a', category: 'read', path: rootA });
 	const fmtRootB = formatRememberedDecision({ id: 'rem-r-b', category: 'read', path: rootB });
 	check('AA4.11: two long paths differing at start remain distinguishable', fmtRootA.title !== fmtRootB.title);
@@ -12419,14 +12419,29 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	eq('AM7.7 assistant duration left blank without invention', (state.items[1] as any)?.meta?.durationMs, undefined);
 	eq('AM7.8 DOM renders all 50 paged messages', container.querySelectorAll('.guki-message').length, 50);
 
-	// Also verify against an actual ~/.claude/projects/ transcript on disk if present
-	const realClaudeFile = join(homedir(), '.claude', 'projects', '-Users-emregultekir-Documents-otherprojects-guki-obsidian-chat', '011fb901-bdfe-4df1-ba50-04a1808fbc07.jsonl');
-	if (existsSync(realClaudeFile)) {
+	// Also verify against an actual ~/.claude/projects/ transcript on disk if present.
+	// Any project directory with any session file will do — pinning this to one machine's
+	// user name and session id made it a no-op everywhere else while reading as a live check.
+	const realClaudeRoot = join(homedir(), '.claude', 'projects');
+	const realClaudeHit = existsSync(realClaudeRoot)
+		? readdirSync(realClaudeRoot)
+			.map((dir) => join(realClaudeRoot, dir))
+			.flatMap((dir) => {
+				try {
+					return readdirSync(dir)
+						.filter((f) => f.endsWith('.jsonl'))
+						.map((f) => ({ dir, id: f.slice(0, -'.jsonl'.length) }));
+				} catch {
+					return [];
+				}
+			})[0]
+		: undefined;
+	if (realClaudeHit) {
 		const realSession = {
 			state: new ChatState(),
 			busy: false,
 			blocked: null,
-			vaultPaths: async () => ({ root: '/Users/emregultekir/Documents/otherprojects/guki-obsidian-chat', outside: '/fake/outside' }),
+			vaultPaths: async () => ({ root: realClaudeHit.dir }),
 			getSlashCommands: () => ['clear', 'help'],
 			send: () => {},
 			interrupt: () => {},
@@ -12437,7 +12452,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 		const realLeaf = new WorkspaceLeaf(app, realContainer);
 		const realView = new ChatView(realLeaf, realSession);
 		await (realView as any).onOpen();
-		await realView.handleSelectSession('011fb901-bdfe-4df1-ba50-04a1808fbc07');
+		await realView.handleSelectSession(realClaudeHit.id);
 		check('AM7.9 real transcript on disk draws message items', realSession.state.items.length >= 1);
 		check('AM7.10 real transcript DOM renders messages', realContainer.querySelectorAll('.guki-message').length >= 1);
 	}
