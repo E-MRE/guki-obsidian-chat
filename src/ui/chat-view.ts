@@ -127,8 +127,13 @@ export class ChatView extends ItemView {
 
 	async handleTurnEnd(): Promise<void> {
 		if (!this.currentSessionId) {
-			const sid = (this.session as any)?.reducer?.getSessionId?.() ?? (this.session as any)?.getSessionId?.();
-			if (sid) {
+			// `StreamReducer.currentSessionId` is a getter, and it is the only place the id exists
+			// before the user picks a conversation from the list. An earlier version reached for a
+			// `getSessionId()` method that exists nowhere: optional chaining turned that into
+			// `undefined`, so a fresh conversation never learned its id and the panel header stayed
+			// on the fallback. Checks AW1.3/AW2.3 keep that from coming back.
+			const sid = (this.session as any)?.reducer?.currentSessionId ?? null;
+			if (typeof sid === 'string' && sid.length > 0) {
 				this.currentSessionId = sid;
 			}
 		}

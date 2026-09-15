@@ -14044,6 +14044,71 @@ console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed
 	rmSync(avDir5, { recursive: true, force: true });
 }
 
+// ---------------------------------------------------------------------------
+// AW. The view must learn a fresh conversation's session id from the REAL reducer surface.
+// Why this section exists: the closed-list header fix read `reducer.getSessionId?.()`, a method
+// that exists nowhere in src/. Optional chaining made it evaluate to undefined, so on a brand new
+// conversation the view never learned its id and the header stayed on the fallback — while every
+// offline check passed, because no check drove the path the real app takes.
+// ---------------------------------------------------------------------------
+{
+	// AW1: the real StreamReducer's surface, asserted by name. If this getter is ever renamed,
+	// this check fails here rather than silently disabling the panel header in the real app.
+	const realReducer = new StreamReducer(new ChatState());
+	eq('AW1.1 real reducer starts with no session id', realReducer.currentSessionId, null);
+	realReducer.apply({ type: 'system', subtype: 'init', session_id: 'sess-aw-real' } as any);
+	eq('AW1.2 real reducer exposes the id through currentSessionId', realReducer.currentSessionId, 'sess-aw-real');
+	eq('AW1.3 the real reducer has no getSessionId method', typeof (realReducer as any).getSessionId, 'undefined');
+
+	// AW2: a fresh conversation — the view is given a reducer with the REAL surface only
+	// (a `currentSessionId` property, no invented method) and must still learn the id at turn end.
+	const awDir = mkdtempSync(join(tmpdir(), 'guki-aw-'));
+	const awSession = 'sess-aw-fresh';
+	writeFileSync(
+		join(awDir, `${awSession}.jsonl`),
+		[
+			JSON.stringify({ type: 'user', timestamp: '2026-09-15T10:00:00.000Z', message: { content: 'ilk mesaj burada' } }),
+			JSON.stringify({ type: 'ai-title', sessionId: awSession, aiTitle: 'Gercek Oturum Basligi' }),
+		].join('\n') + '\n',
+		'utf8',
+	);
+
+	const awLeaf = new WorkspaceLeaf(new App() as any, new FakeElement() as any, new FakeElement() as any);
+	const awReducer = {
+		onTurnEnd: null as (() => void) | null,
+		currentSessionId: null as string | null,
+	};
+	const awSessionObj = {
+		state: new ChatState(),
+		reducer: awReducer,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: awDir, outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const awView = new ChatView(awLeaf as any, awSessionObj, new NodeTranscriptStore(awDir));
+	await (awView as any).onOpen();
+
+	eq('AW2.1 header starts at the fallback', awView.getDisplayText(), 'GuKi Chat');
+	check('AW2.2 the view attached a turn-end handler', typeof awReducer.onTurnEnd === 'function');
+
+	// The CLI announces the id mid-turn, exactly as system/init does in the real app.
+	awReducer.currentSessionId = awSession;
+	await awReducer.onTurnEnd!();
+	await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+	eq('AW2.3 the view learned the session id from the real accessor', (awView as any).getCurrentSessionId?.() ?? (awView as any).currentSessionId, awSession);
+	eq('AW2.4 the panel header shows the conversation name on a fresh conversation', awView.getDisplayText(), 'Gercek Oturum Basligi');
+
+	await (awView as any).onClose?.();
+	rmSync(awDir, { recursive: true, force: true });
+}
+
 // Clean up temporary test files
 rmSync(TRANSCRIPT_TEST_DIR, { recursive: true, force: true });
 
