@@ -24,6 +24,8 @@ import type { SessionManager } from '../core/session-manager';
 import { Composer, type ComposerStatus } from './composer';
 import { HistoryDropdown } from './history-dropdown';
 import { NodeTranscriptStore, type SessionPage, type TranscriptStore } from '../data/transcript-store';
+import type { ConversationTitleStore } from '../data/conversation-titles';
+import { panelTitleFor, type SessionSummary } from '../data/session-index';
 import { MessageList } from './message-list';
 
 /** Page size for historical conversation paging (UI layer policy, Görev 8). */
@@ -39,9 +41,12 @@ export class ChatView extends ItemView {
 	private messageList: MessageList | null = null;
 	private composer: Composer | null = null;
 	private historyDropdown: HistoryDropdown | null = null;
-	private transcriptStore: TranscriptStore = new NodeTranscriptStore();
+	private transcriptStore: TranscriptStore;
+	private titleStore?: ConversationTitleStore;
 	private unsubscribe: (() => void) | null = null;
 	private currentSessionId: string | null = null;
+	private currentSessionSummary: SessionSummary | null = null;
+	private turnEndCleanup: (() => void) | null = null;
 	private currentPage: SessionPage | null = null;
 	private loadOlderEl: HTMLElement | null = null;
 
@@ -59,19 +64,119 @@ export class ChatView extends ItemView {
 		leaf: WorkspaceLeaf,
 		private readonly session: SessionManager,
 		transcriptStore?: TranscriptStore,
+		conversationTitles?: ConversationTitleStore,
 	) {
 		super(leaf);
-		if (transcriptStore) {
-			this.transcriptStore = transcriptStore;
+		this.titleStore = conversationTitles;
+		this.transcriptStore = transcriptStore ?? new NodeTranscriptStore(undefined, conversationTitles);
+		if (this.leaf && !(this.leaf as any).view) {
+			(this.leaf as any).view = this;
 		}
+	}
+
+	getConversationTitleStore(): ConversationTitleStore | undefined {
+		return this.titleStore;
 	}
 
 	getViewType(): string {
 		return VIEW_TYPE_GUKI_CHAT;
 	}
 
+	getPanelTitle(): string | null {
+		let summary = this.currentSessionSummary;
+		if (this.currentSessionId) {
+			if (!summary) {
+				summary = {
+					sessionId: this.currentSessionId,
+					startedAt: '',
+					customTitle: this.titleStore?.get(this.currentSessionId),
+				};
+			} else if (this.titleStore) {
+				const custom = this.titleStore.get(this.currentSessionId);
+				summary = { ...summary, customTitle: custom };
+			}
+		}
+		return panelTitleFor(summary);
+	}
+
 	getDisplayText(): string {
-		return CHAT_VIEW_TITLE;
+		return this.getPanelTitle() ?? CHAT_VIEW_TITLE;
+	}
+
+	getCurrentSessionSummary(): SessionSummary | null {
+		return this.currentSessionSummary;
+	}
+
+	setCurrentSessionSummary(summary: SessionSummary | null): void {
+		this.currentSessionSummary = summary;
+		this.currentSessionId = summary?.sessionId ?? null;
+		this.updateHeader();
+	}
+
+	updateHeader(): void {
+		// ponytail: `WorkspaceLeaf.updateHeader()` is absent from Obsidian's public typings — the
+		// symbol was measured inside the shipping app bundle (2026-09-15), not read from the API.
+		// The guard below means that if a future Obsidian drops it, the panel header silently stops
+		// updating: no error, no log, the title just freezes at whatever it last said. Upgrade path
+		// if that day comes: re-set the view state through a public API, or show the conversation
+		// name inside the panel body instead of the leaf header.
+		if (this.leaf && typeof (this.leaf as any).updateHeader === 'function') {
+			(this.leaf as any).updateHeader();
+		}
+	}
+
+	async handleTurnEnd(): Promise<void> {
+		if (!this.currentSessionId) {
+			// `StreamReducer.currentSessionId` is a getter, and it is the only place the id exists
+			// before the user picks a conversation from the list. An earlier version reached for a
+			// `getSessionId()` method that exists nowhere: optional chaining turned that into
+			// `undefined`, so a fresh conversation never learned its id and the panel header stayed
+			// on the fallback. Checks AW1.3/AW2.3 keep that from coming back.
+			const sid = (this.session as any)?.reducer?.currentSessionId ?? null;
+			if (typeof sid === 'string' && sid.length > 0) {
+				this.currentSessionId = sid;
+			}
+		}
+		if (this.historyDropdown && this.historyDropdown.isOpen()) {
+			await this.historyDropdown.refresh();
+			if (this.currentSessionId) {
+				const updated = this.historyDropdown.getSummary(this.currentSessionId);
+				if (updated) {
+					this.currentSessionSummary = { ...updated };
+				}
+			}
+		} else if (this.currentSessionId) {
+			// Dropdown is closed: read only the current session's own file — no directory scan.
+			const paths = await this.session.vaultPaths().catch(() => undefined);
+			const summary = await this.transcriptStore.sessionTitle(this.currentSessionId, paths?.root);
+			if (summary) {
+				this.currentSessionSummary = summary;
+			}
+		}
+		this.updateHeader();
+	}
+
+	private attachTurnEndHandler(): void {
+		const reducer = (this.session as any)?.reducer;
+		if (reducer && typeof reducer === 'object') {
+			const prevTurnEnd = reducer.onTurnEnd;
+			reducer.onTurnEnd = () => {
+				prevTurnEnd?.();
+				void this.handleTurnEnd();
+			};
+			this.turnEndCleanup = () => {
+				reducer.onTurnEnd = prevTurnEnd;
+			};
+		} else if ((this.session as any) && typeof (this.session as any).onTurnEnd !== 'undefined') {
+			const prevTurnEnd = (this.session as any).onTurnEnd;
+			(this.session as any).onTurnEnd = () => {
+				prevTurnEnd?.();
+				void this.handleTurnEnd();
+			};
+			this.turnEndCleanup = () => {
+				(this.session as any).onTurnEnd = prevTurnEnd;
+			};
+		}
 	}
 
 	getIcon(): string {
@@ -93,6 +198,19 @@ export class ChatView extends ItemView {
 			},
 			onSelectSession: (sessionId: string) => {
 				void this.handleSelectSession(sessionId);
+			},
+			titleStore: this.titleStore,
+			onSaveTitle: async (sessionId: string, title: string) => {
+				const trimmed = title.trim();
+				if (this.currentSessionSummary && this.currentSessionSummary.sessionId === sessionId) {
+					this.currentSessionSummary.customTitle = trimmed.length > 0 ? trimmed : undefined;
+				} else if (this.currentSessionId === sessionId) {
+					if (!this.currentSessionSummary) {
+						this.currentSessionSummary = { sessionId, startedAt: '' };
+					}
+					this.currentSessionSummary.customTitle = trimmed.length > 0 ? trimmed : undefined;
+				}
+				this.updateHeader();
 			},
 		});
 
@@ -227,9 +345,15 @@ export class ChatView extends ItemView {
 				}
 			}),
 		);
+
+		this.attachTurnEndHandler();
+		this.updateHeader();
 	}
 
 	protected async onClose(): Promise<void> {
+		this.turnEndCleanup?.();
+		this.turnEndCleanup = null;
+		this.currentSessionSummary = null;
 		this.unsubscribe?.();
 		this.unsubscribe = null;
 		this.messageList = null;
@@ -294,6 +418,31 @@ export class ChatView extends ItemView {
 			}
 			this.currentSessionId = sessionId;
 			this.session.switchConversation?.(sessionId);
+
+			let summary = this.historyDropdown?.getSummary(sessionId);
+			if (!summary && this.transcriptStore) {
+				try {
+					const summaries = await this.transcriptStore.listSessions(paths?.root ?? '');
+					summary = summaries.find((s) => s.sessionId === sessionId);
+				} catch {
+					// ignore
+				}
+			}
+			if (summary) {
+				this.currentSessionSummary = { ...summary };
+			} else {
+				this.currentSessionSummary = {
+					sessionId,
+					startedAt: '',
+					customTitle: this.titleStore?.get(sessionId),
+				};
+			}
+			if (this.titleStore) {
+				const custom = this.titleStore.get(sessionId);
+				this.currentSessionSummary.customTitle = custom;
+			}
+			this.updateHeader();
+
 			this.updateLoadOlderControl();
 			this.messageList?.scrollToBottom();
 		} catch (err: unknown) {
@@ -303,6 +452,8 @@ export class ChatView extends ItemView {
 			const msg = err instanceof Error ? err.message : String(err);
 			this.session.state.addNotice('error', 'Could not load conversation.', msg);
 			this.currentSessionId = sessionId;
+			this.currentSessionSummary = null;
+			this.updateHeader();
 			this.session.switchConversation?.(null);
 			this.messageList?.scrollToBottom();
 		}

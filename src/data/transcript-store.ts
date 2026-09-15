@@ -3,10 +3,12 @@
  * (RESEARCH §D, this task's own measurement) — `readSession` and any UI over it are v2.
  */
 import { nodeFs, nodeOs, nodePath } from '../cli/node-api';
-import { projectSlug, scanSessionsDir, type SessionSummary } from './session-index';
+import { projectSlug, scanSessionsDir, buildSessionSummary, type SessionSummary } from './session-index';
 import { DiskTranscriptLoader, type PagedTranscriptResult } from './disk-transcript-loader';
 import { translateTranscriptRecords, type TranslateOptions } from './transcript-translator';
 import type { ChatItem } from '../core/chat-state';
+
+import type { ConversationTitleStore } from './conversation-titles';
 
 export type { SessionSummary };
 
@@ -79,16 +81,69 @@ export interface TranscriptStore {
 	readSession(sessionId: string, vaultPath?: string, options?: ReadSessionOptions): Promise<SessionPage>;
 	readSession(sessionId: string, options?: ReadSessionOptions): Promise<SessionPage>;
 	resumeArgs(sessionId: string): string[];
+	/** Reads the single transcript file for `sessionId`, returns its summary with the custom-title
+	 *  overlay applied, or null when the file does not exist yet. Never does a directory scan. */
+	sessionTitle(sessionId: string, vaultPath?: string): Promise<SessionSummary | null>;
 }
 
 export class NodeTranscriptStore implements TranscriptStore {
-	constructor(private readonly basePath?: string) {}
+	constructor(
+		private readonly basePath?: string,
+		private readonly titles?: ConversationTitleStore,
+	) {}
 
 	async listSessions(vaultPath: string): Promise<SessionSummary[]> {
 		const os = await nodeOs();
 		const path = await nodePath();
 		const projectsDir = this.basePath ?? path.join(os.homedir(), '.claude', 'projects', projectSlug(vaultPath));
-		return scanSessionsDir(projectsDir);
+		const summaries = await scanSessionsDir(projectsDir);
+
+		if (this.titles) {
+			for (const summary of summaries) {
+				const custom = this.titles.get(summary.sessionId);
+				if (custom !== undefined) {
+					summary.customTitle = custom;
+				}
+			}
+			if (summaries.length > 0) {
+				const scannedIds = summaries.map((s) => s.sessionId);
+				await this.titles.pruneTo(scannedIds);
+			}
+		}
+
+		return summaries;
+	}
+
+	/**
+	 * Reads the single transcript file for the given session and returns its `SessionSummary` with
+	 * the stored custom-title overlay applied.  Returns `null` when the file does not exist yet.
+	 *
+	 * Deliberately does NOT scan the directory — it resolves exactly one file via
+	 * `resolveSessionFilePath`, calls `buildSessionSummary` (the shared parser) on that file, and
+	 * overlays the stored custom title.  This is the mechanism required by amendment §8.
+	 */
+	async sessionTitle(sessionId: string, vaultPath?: string): Promise<SessionSummary | null> {
+		const filePath = await this.resolveSessionFilePath(sessionId, vaultPath);
+		if (!filePath) {
+			return null;
+		}
+		let summary: SessionSummary | null;
+		try {
+			summary = await buildSessionSummary(filePath, sessionId);
+		} catch {
+			return null;
+		}
+		if (summary === null) {
+			return null;
+		}
+		// Apply the custom-title overlay (§3 contract: the single seam for customTitle).
+		if (this.titles) {
+			const custom = this.titles.get(sessionId);
+			if (custom !== undefined) {
+				summary.customTitle = custom;
+			}
+		}
+		return summary;
 	}
 
 	async resolveSessionFilePath(sessionId: string, vaultPath?: string): Promise<string | null> {

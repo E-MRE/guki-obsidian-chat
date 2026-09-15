@@ -9,11 +9,13 @@ import {
 	type PermissionSettings,
 	type RememberedDecision,
 } from '../core/permission-policy';
+import type { ConversationTitleMap } from '../data/conversation-titles';
 import type GukiChatPlugin from '../main';
 
 export interface GukiChatSettings extends PermissionSettings {
 	claudeBinaryPath: string;
 	slashCommands?: string[];
+	conversationTitles?: ConversationTitleMap;
 }
 
 export const DEFAULT_SETTINGS: GukiChatSettings = {

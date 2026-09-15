@@ -144,6 +144,7 @@ import { absolutePathForFile } from '../src/cli/node-api';
 import { Composer, pasteBelongsToComposer, type ComposerOptions } from '../src/ui/composer';
 import { filterVaultFiles, insertItem, type DropdownItem, type TriggerMatch } from '../src/ui/composer-dropdown';
 import {
+	buildSessionSummary,
 	extractUserPromptText,
 	isExplicitHumanUser,
 	isSyntheticUser,
@@ -152,8 +153,12 @@ import {
 	sanitizeDerivedTitle,
 	scanSessionsDir,
 	sessionDisplayTitle,
+	resolveSessionTitle,
+	panelTitleFor,
 	type SessionSummary,
+	type TitleSource,
 } from '../src/data/session-index';
+import { ConversationTitleStore, type ConversationTitleMap } from '../src/data/conversation-titles';
 import {
 	formatSessionDate,
 	HistoryDropdown,
@@ -12843,11 +12848,1275 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	}
 }
 
+// AR: Phase 7 Task 9 Lane 1: Title data layer, precedence, and listSessions overlay
+{
+	console.log('AR. Phase 7 Task 9 Lane 1: Title data layer and listSessions overlay');
+
+	// --- AR1: ConversationTitleStore exact surface and semantics ---
+	{
+		let savedMap: ConversationTitleMap | null = null;
+		let saveCount = 0;
+		const mockSave = async (map: ConversationTitleMap) => {
+			savedMap = map;
+			saveCount++;
+		};
+
+		// Degradation of malformed initial data
+		const badStore1 = new ConversationTitleStore(null as any, mockSave);
+		eq('AR1.1 malformed null initial data degrades to empty snapshot', Object.keys(badStore1.snapshot()).length, 0);
+
+		const badStore2 = new ConversationTitleStore('not-an-object' as any, mockSave);
+		eq('AR1.2 malformed non-object initial data degrades to empty snapshot', Object.keys(badStore2.snapshot()).length, 0);
+
+		const badStore3 = new ConversationTitleStore({ 's1': { bad: true } } as any, mockSave);
+		eq('AR1.3 entries missing title degrade to empty', Object.keys(badStore3.snapshot()).length, 0);
+
+		// Basic get on empty store
+		const store = new ConversationTitleStore({}, mockSave);
+		eq('AR1.4 get returns undefined for non-existent session', store.get('unknown-session'), undefined);
+
+		// Set trims title and stamps updatedAt
+		const beforeSet = Date.now();
+		await store.set('session-1', '  User Given Name  ');
+		const afterSet = Date.now();
+
+		eq('AR1.5 get returns stored trimmed name', store.get('session-1'), 'User Given Name');
+		const snap = store.snapshot();
+		eq('AR1.6 snapshot contains stored entry', snap['session-1']?.title, 'User Given Name');
+		check('AR1.7 updatedAt is stamped with current time', (snap['session-1']?.updatedAt ?? 0) >= beforeSet && (snap['session-1']?.updatedAt ?? 0) <= afterSet);
+		eq('AR1.8 save callback was called once', saveCount, 1);
+		eq('AR1.9 save callback received current snapshot', savedMap?.['session-1']?.title, 'User Given Name');
+
+		// Snapshot is a defensive copy
+		if (snap['session-1']) {
+			snap['session-1'].title = 'Mutated Snapshot';
+		}
+		eq('AR1.10 mutating snapshot does not affect store', store.get('session-1'), 'User Given Name');
+
+		// Undo path: empty or whitespace-only title removes the entry
+		await store.set('session-1', '');
+		eq('AR1.11 setting empty string removes the entry', store.get('session-1'), undefined);
+		eq('AR1.12 save callback was called on removal', saveCount, 2);
+		eq('AR1.13 snapshot after empty set has no session-1', store.snapshot()['session-1'], undefined);
+
+		// Re-set, then whitespace-only undo
+		await store.set('session-1', 'Temp Title');
+		eq('AR1.14 entry re-added', store.get('session-1'), 'Temp Title');
+		await store.set('session-1', '   \t\n  ');
+		eq('AR1.15 setting whitespace-only string removes the entry', store.get('session-1'), undefined);
+
+		// Remove method
+		await store.set('session-2', 'Keep Me');
+		saveCount = 0;
+		await store.remove('session-2');
+		eq('AR1.16 remove method deletes entry', store.get('session-2'), undefined);
+		eq('AR1.17 remove calls save callback when entry was present', saveCount, 1);
+
+		saveCount = 0;
+		await store.remove('session-nonexistent');
+		eq('AR1.18 remove does not call save when nothing was deleted', saveCount, 0);
+
+		// PruneTo
+		await store.set('s-keep-1', 'Keep 1');
+		await store.set('s-keep-2', 'Keep 2');
+		await store.set('s-drop-1', 'Drop 1');
+		saveCount = 0;
+
+		const pruned = await store.pruneTo(['s-keep-1', 's-keep-2', 's-other']);
+		eq('AR1.19 pruneTo returns true when entries were dropped', pruned, true);
+		eq('AR1.20 dropped entry removed from store', store.get('s-drop-1'), undefined);
+		eq('AR1.21 kept entry 1 remains', store.get('s-keep-1'), 'Keep 1');
+		eq('AR1.22 kept entry 2 remains', store.get('s-keep-2'), 'Keep 2');
+		eq('AR1.23 pruneTo called save callback once', saveCount, 1);
+
+		saveCount = 0;
+		const prunedNothing = await store.pruneTo(['s-keep-1', 's-keep-2']);
+		eq('AR1.24 pruneTo returns false when nothing removed', prunedNothing, false);
+		eq('AR1.25 pruneTo does not call save when nothing changed', saveCount, 0);
+	}
+
+	// --- AR2: Precedence and helpers in session-index.ts ---
+	{
+		const summaryCustomAi: SessionSummary = {
+			sessionId: 's-c-ai',
+			customTitle: 'My Custom Name',
+			title: 'AI Given Title',
+			derivedTitle: 'Derived prompt text',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		};
+		const rCustomAi = resolveSessionTitle(summaryCustomAi);
+		eq('AR2.1 custom+ai precedence: custom wins text', rCustomAi.text, 'My Custom Name');
+		eq('AR2.2 custom+ai precedence: source is custom', rCustomAi.source, 'custom');
+		eq('AR2.3 panelTitleFor returns custom title', panelTitleFor(summaryCustomAi), 'My Custom Name');
+		const dtCustom = sessionDisplayTitle(summaryCustomAi);
+		eq('AR2.4 sessionDisplayTitle on custom returns text', dtCustom?.text, 'My Custom Name');
+		eq('AR2.5 sessionDisplayTitle on custom isDerived is false', dtCustom?.isDerived, false);
+
+		const summaryCustomDerived: SessionSummary = {
+			sessionId: 's-c-der',
+			customTitle: 'Renamed Project',
+			derivedTitle: 'First user prompt text',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		};
+		const rCustomDer = resolveSessionTitle(summaryCustomDerived);
+		eq('AR2.6 custom+derived precedence: custom wins text', rCustomDer.text, 'Renamed Project');
+		eq('AR2.7 custom+derived precedence: source is custom', rCustomDer.source, 'custom');
+		eq('AR2.8 panelTitleFor on custom+derived returns custom title', panelTitleFor(summaryCustomDerived), 'Renamed Project');
+
+		const summaryAiOnly: SessionSummary = {
+			sessionId: 's-ai',
+			title: 'Claude AI Generated Title',
+			derivedTitle: 'First message trim',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		};
+		const rAi = resolveSessionTitle(summaryAiOnly);
+		eq('AR2.9 ai-only precedence: ai title wins text', rAi.text, 'Claude AI Generated Title');
+		eq('AR2.10 ai-only precedence: source is ai', rAi.source, 'ai');
+		eq('AR2.11 panelTitleFor on ai returns ai title', panelTitleFor(summaryAiOnly), 'Claude AI Generated Title');
+		const dtAi = sessionDisplayTitle(summaryAiOnly);
+		eq('AR2.12 sessionDisplayTitle on ai returns text', dtAi?.text, 'Claude AI Generated Title');
+		eq('AR2.13 sessionDisplayTitle on ai isDerived is false', dtAi?.isDerived, false);
+
+		const summaryDerivedOnly: SessionSummary = {
+			sessionId: 's-der',
+			derivedTitle: 'Help me fix the compiler error',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		};
+		const rDer = resolveSessionTitle(summaryDerivedOnly);
+		eq('AR2.14 derived-only precedence: derived text wins', rDer.text, 'Help me fix the compiler error');
+		eq('AR2.15 derived-only precedence: source is derived', rDer.source, 'derived');
+		eq('AR2.16 panelTitleFor on derived returns null (never show trim in header)', panelTitleFor(summaryDerivedOnly), null);
+		const dtDer = sessionDisplayTitle(summaryDerivedOnly);
+		eq('AR2.17 sessionDisplayTitle on derived returns text', dtDer?.text, 'Help me fix the compiler error');
+		eq('AR2.18 sessionDisplayTitle on derived isDerived is true', dtDer?.isDerived, true);
+
+		const summaryNone: SessionSummary = {
+			sessionId: 's-none',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		};
+		const rNone = resolveSessionTitle(summaryNone);
+		eq('AR2.19 none precedence: text is Untitled session', rNone.text, 'Untitled session');
+		eq('AR2.20 none precedence: source is none', rNone.source, 'none');
+		eq('AR2.21 panelTitleFor on none returns null', panelTitleFor(summaryNone), null);
+		eq('AR2.22 panelTitleFor on null returns null', panelTitleFor(null), null);
+		eq('AR2.23 panelTitleFor on undefined returns null', panelTitleFor(undefined), null);
+		eq('AR2.24 sessionDisplayTitle on none returns null', sessionDisplayTitle(summaryNone), null);
+	}
+
+	// --- AR3: shapeSessionRow delegates to resolveSessionTitle ---
+	{
+		const rowCustom = shapeSessionRow({
+			sessionId: 's1',
+			customTitle: 'Manual Session Title',
+			title: 'AI Title',
+			derivedTitle: 'Trimmed prompt',
+			startedAt: '2026-09-01T10:00:00.000Z',
+			costUsd: 0.15,
+		});
+		eq('AR3.1 shapeSessionRow uses customTitle when present', rowCustom.title, 'Manual Session Title');
+		eq('AR3.2 shapeSessionRow isDerivedTitle is false for customTitle', rowCustom.isDerivedTitle, false);
+		check('AR3.3 derived trim is absent from row title', !rowCustom.title.includes('Trimmed prompt'));
+
+		const rowAi = shapeSessionRow({
+			sessionId: 's2',
+			title: 'AI Title',
+			derivedTitle: 'Trimmed prompt',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		});
+		eq('AR3.4 shapeSessionRow uses AI title when customTitle absent', rowAi.title, 'AI Title');
+		eq('AR3.5 shapeSessionRow isDerivedTitle is false for AI title', rowAi.isDerivedTitle, false);
+
+		const rowDerived = shapeSessionRow({
+			sessionId: 's3',
+			derivedTitle: 'Trimmed prompt',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		});
+		eq('AR3.6 shapeSessionRow uses derivedTitle when both custom and ai absent', rowDerived.title, 'Trimmed prompt');
+		eq('AR3.7 shapeSessionRow isDerivedTitle is true for derivedTitle', rowDerived.isDerivedTitle, true);
+
+		const rowNone = shapeSessionRow({
+			sessionId: 's4',
+			startedAt: '2026-09-01T10:00:00.000Z',
+		});
+		eq('AR3.8 shapeSessionRow falls back to Untitled session', rowNone.title, 'Untitled session');
+		eq('AR3.9 shapeSessionRow isDerivedTitle is false for Untitled session', rowNone.isDerivedTitle, false);
+	}
+
+	// --- AR4: scanSessionsDir isolation and customTitle never set by scanner ---
+	{
+		const fixtureDir = mkdtempSync(join(tmpdir(), 'guki-ar-scan-'));
+		const s1File = join(fixtureDir, 'session-scan-1.jsonl');
+		writeFileSync(
+			s1File,
+			[
+				JSON.stringify({ type: 'user', timestamp: '2026-09-01T10:00:00.000Z', message: 'Hello world prompt' }),
+				JSON.stringify({ type: 'ai-title', aiTitle: 'Scanned AI Title' }),
+			].join('\n') + '\n',
+			'utf8',
+		);
+
+		const scanned = await scanSessionsDir(fixtureDir);
+		eq('AR4.1 scanned sessions count is 1', scanned.length, 1);
+		eq('AR4.2 scanned session title is aiTitle', scanned[0]?.title, 'Scanned AI Title');
+		eq('AR4.3 scanSessionsDir NEVER sets customTitle', scanned[0]?.customTitle, undefined);
+
+		rmSync(fixtureDir, { recursive: true, force: true });
+	}
+
+	// --- AR5: NodeTranscriptStore overlay and pruning semantics ---
+	{
+		const fixtureDir = mkdtempSync(join(tmpdir(), 'guki-ar-store-'));
+		const sLive1 = join(fixtureDir, 'live-1.jsonl');
+		const sLive2 = join(fixtureDir, 'live-2.jsonl');
+		writeFileSync(sLive1, JSON.stringify({ type: 'user', timestamp: '2026-09-01T10:00:00.000Z', message: 'First prompt' }) + '\n', 'utf8');
+		writeFileSync(sLive2, JSON.stringify({ type: 'user', timestamp: '2026-09-01T11:00:00.000Z', message: 'Second prompt' }) + '\n', 'utf8');
+
+		let saveCount = 0;
+		let lastSavedMap: ConversationTitleMap | null = null;
+		const mockSave = async (map: ConversationTitleMap) => {
+			saveCount++;
+			lastSavedMap = map;
+		};
+
+		const titleStore = new ConversationTitleStore(
+			{
+				'live-1': { title: 'Custom One', updatedAt: 1000 },
+				'dead-session': { title: 'Ghost Session', updatedAt: 2000 },
+			},
+			mockSave,
+		);
+
+		const store = new NodeTranscriptStore(fixtureDir, titleStore);
+		const list = await store.listSessions('dummy-vault');
+
+		eq('AR5.1 listSessions returned two scanned sessions', list.length, 2);
+		const live1Summary = list.find((s) => s.sessionId === 'live-1');
+		const live2Summary = list.find((s) => s.sessionId === 'live-2');
+		eq('AR5.2 live-1 has customTitle overlaid from store', live1Summary?.customTitle, 'Custom One');
+		eq('AR5.3 live-2 without customTitle has customTitle undefined', live2Summary?.customTitle, undefined);
+
+		// Pruning occurred on scan because dead-session was not in scanned sessions
+		eq('AR5.4 dead-session was pruned from titleStore', titleStore.get('dead-session'), undefined);
+		eq('AR5.5 live-1 survived in titleStore', titleStore.get('live-1'), 'Custom One');
+		eq('AR5.6 save callback called once on scan pruning dead entry', saveCount, 1);
+		eq('AR5.7 saved map does not contain dead-session', lastSavedMap?.['dead-session'], undefined);
+		eq('AR5.8 saved map contains live-1', lastSavedMap?.['live-1']?.title, 'Custom One');
+
+		// Prune safety invariant: scanning an empty directory MUST NOT prune titles!
+		const emptyDir = mkdtempSync(join(tmpdir(), 'guki-ar-empty-'));
+		saveCount = 0;
+		const emptyStore = new NodeTranscriptStore(emptyDir, titleStore);
+		const emptyList = await emptyStore.listSessions('dummy-vault');
+
+		eq('AR5.9 empty scan returned 0 sessions', emptyList.length, 0);
+		eq('AR5.10 prune safety invariant: save callback was NOT called on zero sessions scan', saveCount, 0);
+		eq('AR5.11 stored titles survive empty scan', titleStore.get('live-1'), 'Custom One');
+
+		rmSync(fixtureDir, { recursive: true, force: true });
+		rmSync(emptyDir, { recursive: true, force: true });
+	}
+
+	// --- AR6: Settings persistence through saveData in GukiChatPlugin ---
+	{
+		const plugin = new GukiChatPlugin(createMockPluginApp() as any, { dir: 'plugins/guki-chat' } as any);
+
+		let savedData: any = null;
+		plugin.loadData = async () => ({
+			claudeBinaryPath: '/custom/claude',
+			slashCommands: ['help', 'clear'],
+			permissionMode: 'plan',
+			conversationTitles: {
+				's-existing': { title: 'Existing Name', updatedAt: 12345 },
+			},
+		});
+		plugin.saveData = async (data: any) => {
+			savedData = data;
+		};
+
+		await plugin.onload();
+
+		// Invariant: whole settings object is preserved
+		eq('AR6.1 loadSettings restores conversationTitles', plugin.settings.conversationTitles?.['s-existing']?.title, 'Existing Name');
+		eq('AR6.2 loadSettings preserves claudeBinaryPath', plugin.settings.claudeBinaryPath, '/custom/claude');
+		eq('AR6.3 loadSettings preserves slashCommands', plugin.settings.slashCommands?.length, 2);
+
+		// Now simulate updating a title via titleStore save callback
+		const titleStore = (plugin as any).titleStore as ConversationTitleStore;
+		check('AR6.4 plugin created titleStore', titleStore !== undefined && titleStore !== null);
+
+		// Deliberately NOT guarded by `if (titleStore)`: a check that skips itself when the thing
+		// it guards is missing proves nothing. If the wiring regresses, these must go red, not quiet.
+		await titleStore?.set('s-new', 'Newly Added Title');
+		check('AR6.5 saveData was called with whole settings object', savedData !== null);
+		eq('AR6.6 saved data has newly added title', savedData?.conversationTitles?.['s-new']?.title, 'Newly Added Title');
+		eq('AR6.7 saved data preserves claudeBinaryPath', savedData?.claudeBinaryPath, '/custom/claude');
+		eq('AR6.8 saved data preserves slashCommands', savedData?.slashCommands?.length, 2);
+		eq('AR6.9 saved data preserves permissionMode', savedData?.permissionMode, 'plan');
+
+		// A session id that collides with a JS object key must survive a snapshot round trip:
+		// `copy['__proto__'] = v` on a plain object sets the prototype instead of an own key.
+		{
+			const protoStore = new ConversationTitleStore(undefined, async () => {});
+			await protoStore.set('__proto__', 'Prototype Named Session');
+			const snap = protoStore.snapshot();
+			eq('AR6.10 snapshot keeps a __proto__ session id as an own key', Object.keys(snap).includes('__proto__'), true);
+			eq('AR6.11 snapshot survives JSON round trip for __proto__ id', JSON.parse(JSON.stringify(snap))['__proto__']?.title, 'Prototype Named Session');
+		}
+
+		plugin.onunload();
+	}
+}
+
+// AS. Phase 7 Task 9 Lane 2: Manual rename in the history list
+{
+	console.log('AS. Phase 7 Task 9 Lane 2: Manual rename in the history list');
+
+	const mockSummaries: SessionSummary[] = [
+		{
+			sessionId: 'sess-l2-1',
+			title: 'CLI Title 1',
+			startedAt: '2026-09-15T01:00:00.000Z',
+			costUsd: 0.12,
+		},
+		{
+			sessionId: 'sess-l2-2',
+			derivedTitle: 'Derived Prompt 2',
+			startedAt: '2026-09-15T02:00:00.000Z',
+		},
+	];
+
+	let savedSettings: any = null;
+	const settings = {
+		claudeBinaryPath: '/custom/claude',
+		permissionMode: 'plan',
+		conversationTitles: {} as Record<string, any>,
+	};
+	const titleStore = new ConversationTitleStore(
+		settings.conversationTitles,
+		async (map) => {
+			settings.conversationTitles = map;
+			savedSettings = JSON.parse(JSON.stringify(settings));
+		},
+	);
+
+	let selectedSessionId: string | null = null;
+	const container = new FakeElement() as any;
+	const dropdown = new HistoryDropdown({
+		containerEl: container,
+		getSessions: async () => mockSummaries,
+		onSelectSession: (id) => {
+			selectedSessionId = id;
+		},
+		titleStore,
+	});
+
+	await dropdown.openDropdown();
+	const dropdownEl = dropdown.getDropdownEl() as any;
+	let renderedRows = dropdownEl.children.filter((c: any) => c.hasClass('guki-history-item'));
+	eq('AS1.1 rendered row count is 2', renderedRows.length, 2);
+
+	const renameBtn0 = renderedRows[0]?.querySelector('.guki-history-rename-btn');
+	const renameBtn1 = renderedRows[1]?.querySelector('.guki-history-rename-btn');
+	check('AS1.2 first row has pencil rename button', renameBtn0 !== null);
+	check('AS1.3 second row has pencil rename button', renameBtn1 !== null);
+
+	// AS1: Clicking pencil button does NOT select the row or close the dropdown
+	renameBtn0?.click();
+	eq('AS1.4 clicking pencil does not trigger session selection', selectedSessionId, null);
+	check('AS1.5 dropdown remains open after clicking pencil', dropdown.isOpen() === true);
+
+	// AS2: Clicking pencil opens input pre-filled with row's current name and selected
+	const inputEl0 = dropdownEl.querySelector('input');
+	check('AS2.1 clicking pencil opened input in first row', inputEl0 !== null);
+	eq('AS2.2 input is pre-filled with current row name', inputEl0?.value, 'CLI Title 1');
+	eq('AS2.3 input selection starts at 0', inputEl0?.selectionStart, 0);
+	eq('AS2.4 input selection covers full title length', inputEl0?.selectionEnd, 'CLI Title 1'.length);
+
+	// AS3: While input is open, ArrowDown/ArrowUp do NOT move dropdown selection
+	const initialIndex = dropdown.getSelectedIndex();
+	dropdown.handleKeyDown({ key: 'ArrowDown', preventDefault: () => {} } as any);
+	eq('AS3.1 ArrowDown while input open does not advance selection', dropdown.getSelectedIndex(), initialIndex);
+	dropdown.handleKeyDown({ key: 'ArrowUp', preventDefault: () => {} } as any);
+	eq('AS3.2 ArrowUp while input open does not change selection', dropdown.getSelectedIndex(), initialIndex);
+
+	// AS4: Enter stores name, updates row, writes saveData, dropdown stays open
+	if (inputEl0) {
+		inputEl0.value = 'My Custom Session Name';
+	}
+	dropdown.handleKeyDown({ key: 'Enter', preventDefault: () => {} } as any);
+	await (dropdown as any).commitEdit?.();
+
+	check('AS4.1 dropdown remains open across Enter save', dropdown.isOpen() === true);
+	eq('AS4.2 row item title updated to custom name', dropdown.getItems()[0]?.title, 'My Custom Session Name');
+	eq('AS4.3 row item is NOT marked derived', dropdown.getItems()[0]?.isDerivedTitle, false);
+	eq('AS4.4 titleStore snapshot contains new custom title', titleStore.get('sess-l2-1'), 'My Custom Session Name');
+	check('AS4.5 saveData was called with full settings object', savedSettings !== null);
+	eq('AS4.6 saveData preserved claudeBinaryPath', savedSettings?.claudeBinaryPath, '/custom/claude');
+	eq('AS4.7 saveData stored new title in conversationTitles', savedSettings?.conversationTitles?.['sess-l2-1']?.title, 'My Custom Session Name');
+
+	renderedRows = dropdownEl.children.filter((c: any) => c.hasClass('guki-history-item'));
+	check('AS4.8 DOM row element displays updated title', renderedRows[0]?.text.includes('My Custom Session Name'));
+	check('AS4.9 input element removed after save', renderedRows[0]?.querySelector('input') === null);
+
+	// AS5: Escape cancels, stores nothing, restores row text, dropdown stays open
+	const renameBtn1Before = renderedRows[1]?.querySelector('.guki-history-rename-btn');
+	renameBtn1Before?.click();
+	const inputEl1 = dropdownEl.querySelector('input');
+	check('AS5.1 second row input opened', inputEl1 !== null);
+	eq('AS5.2 second row input pre-filled with derived title', inputEl1?.value, 'Derived Prompt 2');
+
+	if (inputEl1) {
+		inputEl1.value = 'Discarded Edit';
+	}
+	dropdown.handleKeyDown({ key: 'Escape', preventDefault: () => {} } as any);
+
+	check('AS5.3 dropdown remains open across Escape cancel', dropdown.isOpen() === true);
+	eq('AS5.4 row item retains original derived title', dropdown.getItems()[1]?.title, 'Derived Prompt 2');
+	eq('AS5.5 row item retains derived status', dropdown.getItems()[1]?.isDerivedTitle, true);
+	eq('AS5.6 titleStore does NOT contain canceled edit', titleStore.get('sess-l2-2'), undefined);
+	renderedRows = dropdownEl.children.filter((c: any) => c.hasClass('guki-history-item'));
+	check('AS5.7 input element removed after Escape', renderedRows[1]?.querySelector('input') === null);
+	check('AS5.8 DOM row displays original derived title', renderedRows[1]?.text.includes('Derived Prompt 2'));
+
+	// AS6: Blur stores the name
+	const renameBtn1Again = renderedRows[1]?.querySelector('.guki-history-rename-btn');
+	renameBtn1Again?.click();
+	const inputEl1Blur = dropdownEl.querySelector('input');
+	if (inputEl1Blur) {
+		inputEl1Blur.value = 'Saved By Blur';
+		inputEl1Blur.blur();
+	}
+	await (dropdown as any).commitEdit?.();
+
+	check('AS6.1 dropdown remains open after blur save', dropdown.isOpen() === true);
+	eq('AS6.2 titleStore contains name saved via blur', titleStore.get('sess-l2-2'), 'Saved By Blur');
+	eq('AS6.3 row item displays name saved via blur', dropdown.getItems()[1]?.title, 'Saved By Blur');
+	eq('AS6.4 name saved via blur is NOT marked derived', dropdown.getItems()[1]?.isDerivedTitle, false);
+
+	// AS7: Saving empty or whitespace-only box removes name and falls back correctly
+	// Case A: with CLI title (sess-l2-1 has CLI title 'CLI Title 1')
+	renderedRows = dropdownEl.children.filter((c: any) => c.hasClass('guki-history-item'));
+	const renameBtn0Again = renderedRows[0]?.querySelector('.guki-history-rename-btn');
+	renameBtn0Again?.click();
+	const inputEl0Clear = dropdownEl.querySelector('input');
+	if (inputEl0Clear) {
+		inputEl0Clear.value = '   ';
+	}
+	dropdown.handleKeyDown({ key: 'Enter', preventDefault: () => {} } as any);
+	await (dropdown as any).commitEdit?.();
+
+	check('AS7.1 whitespace save removes entry from titleStore', titleStore.get('sess-l2-1') === undefined);
+	eq('AS7.2 row falls back to CLI title', dropdown.getItems()[0]?.title, 'CLI Title 1');
+	eq('AS7.3 CLI title fallback is NOT marked derived', dropdown.getItems()[0]?.isDerivedTitle, false);
+	check('AS7.4 dropdown stays open after removing custom name', dropdown.isOpen() === true);
+
+	// Case B: with only derived trim (sess-l2-2 has only derivedTitle 'Derived Prompt 2')
+	renderedRows = dropdownEl.children.filter((c: any) => c.hasClass('guki-history-item'));
+	const renameBtn1Clear = renderedRows[1]?.querySelector('.guki-history-rename-btn');
+	renameBtn1Clear?.click();
+	const inputEl1Clear = dropdownEl.querySelector('input');
+	if (inputEl1Clear) {
+		inputEl1Clear.value = '';
+	}
+	dropdown.handleKeyDown({ key: 'Enter', preventDefault: () => {} } as any);
+	await (dropdown as any).commitEdit?.();
+
+	check('AS7.5 empty save removes entry from titleStore', titleStore.get('sess-l2-2') === undefined);
+	eq('AS7.6 row falls back to derived prompt trim', dropdown.getItems()[1]?.title, 'Derived Prompt 2');
+	eq('AS7.7 derived trim fallback IS marked derived', dropdown.getItems()[1]?.isDerivedTitle, true);
+	check('AS7.8 dropdown stays open after empty save', dropdown.isOpen() === true);
+
+	// AS8: ChatView integration passes titleStore to HistoryDropdown
+	const leafContainer = new FakeElement() as any;
+	const leafContent = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App() as any, leafContainer, leafContent);
+	const session = {
+		state: new ChatState(),
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => ['clear', 'help'],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+	const transcriptStore = new NodeTranscriptStore('/tmp/test-vault');
+	const view = new ChatView(leaf as any, session as any, transcriptStore, titleStore);
+	await (view as any).onOpen();
+	const viewDropdown = view.getHistoryDropdown();
+	check('AS8.1 view has history dropdown', viewDropdown !== null);
+	eq('AS8.2 ChatView passes titleStore to HistoryDropdown', (viewDropdown as any).options?.titleStore, titleStore);
+	await (view as any).onClose();
+
+	dropdown.close();
+}
+
+// ---------------------------------------------------------------------------
+// AT. Rename edge cases found by the V2 verification round (orchestrator fixes)
+// ---------------------------------------------------------------------------
+{
+	const mockSummaries: SessionSummary[] = [
+		{ sessionId: 'sess-at-1', title: 'CLI Title 1', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-at-2', title: 'CLI Title 2', startedAt: '2026-09-15T02:00:00.000Z' },
+	];
+
+	const settings = { conversationTitles: {} as Record<string, any> };
+	// A save that does not resolve until we let it: this is the whole point of the check —
+	// a second rename must not be swallowed while the first one is still writing.
+	let releaseFirstSave: (() => void) | null = null;
+	let saveCount = 0;
+	const titleStore = new ConversationTitleStore(
+		settings.conversationTitles,
+		async (map) => {
+			settings.conversationTitles = map;
+			saveCount += 1;
+			if (saveCount === 1) {
+				await new Promise<void>((resolve) => { releaseFirstSave = resolve; });
+			}
+		},
+	);
+
+	let selectedSessionId: string | null = null;
+	const container = new FakeElement() as any;
+	const dropdown = new HistoryDropdown({
+		containerEl: container,
+		getSessions: async () => mockSummaries,
+		onSelectSession: (id) => { selectedSessionId = id; },
+		titleStore,
+	});
+
+	await dropdown.openDropdown();
+	const dropdownEl = dropdown.getDropdownEl() as any;
+	const rows = () => dropdownEl.children.filter((c: any) => c.hasClass('guki-history-item'));
+
+	// AT1: renaming a second row while the first save is still in flight must not be dropped.
+	rows()[0]?.querySelector('.guki-history-rename-btn')?.click();
+	let input = dropdownEl.querySelector('input');
+	input.value = 'First New Name';
+	const firstCommit = dropdown.commitEdit();
+
+	rows()[1]?.querySelector('.guki-history-rename-btn')?.click();
+	input = dropdownEl.querySelector('input');
+	check('AT1.1 second row editor opened while the first save is in flight', input !== null);
+	input.value = 'Second New Name';
+	const secondCommit = dropdown.commitEdit();
+
+	// The save callback runs a microtask later, so the release handle does not exist yet.
+	while (releaseFirstSave === null) {
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+	}
+	releaseFirstSave();
+	await firstCommit;
+	await secondCommit;
+
+	eq('AT1.2 first rename survived', titleStore.get('sess-at-1'), 'First New Name');
+	eq('AT1.3 second rename was not dropped by the in-flight save', titleStore.get('sess-at-2'), 'Second New Name');
+	eq('AT1.4 both renames reached the store', saveCount, 2);
+
+	// AT2: Enter twice in a row must not fall through into opening whatever row is highlighted.
+	selectedSessionId = null;
+	rows()[1]?.querySelector('.guki-history-rename-btn')?.click();
+	input = dropdownEl.querySelector('input');
+	input.value = 'Renamed By Keyboard';
+	const enter = { key: 'Enter', preventDefault: () => {} } as unknown as KeyboardEvent;
+	dropdown.handleKeyDown(enter);
+	dropdown.handleKeyDown(enter);
+	await dropdown.commitEdit();
+	eq('AT2.1 the rename itself committed', titleStore.get('sess-at-2'), 'Renamed By Keyboard');
+	eq('AT2.2 the second Enter did not open a conversation', selectedSessionId, null);
+	check('AT2.3 the dropdown is still open after the second Enter', dropdown.isOpen() === true);
+
+	// AT3: an Enter that is not a leftover from committing still works normally.
+	dropdown.handleKeyDown(enter);
+	check('AT3.1 a later Enter still selects a conversation', selectedSessionId !== null);
+}
+
+// ---------------------------------------------------------------------------
+// AU. Phase 7 Task 9 Lane 3: History dropdown refresh and panel header title
+// ---------------------------------------------------------------------------
+console.log('AU. Phase 7 Task 9 Lane 3: History dropdown refresh and panel header title');
+
+// AU1: Dropdown closed vs open scan counts & on-disk title refresh (F1)
+{
+	let scanCount = 0;
+	let currentSummaries: SessionSummary[] = [
+		{ sessionId: 'sess-au-1', title: 'Old Disk Title', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-au-2', title: 'Session 2 Title', startedAt: '2026-09-15T02:00:00.000Z' },
+	];
+
+	const leafContainer = new FakeElement() as any;
+	const leafContent = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App() as any, leafContainer, leafContent);
+
+	const mockReducer = {
+		onTurnEnd: null as (() => void) | null,
+	};
+	const session = {
+		state: new ChatState(),
+		reducer: mockReducer,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const mockStore = {
+		listSessions: async () => {
+			scanCount++;
+			return [...currentSummaries];
+		},
+		readSession: async () => Object.assign([], { hasMoreBefore: false, loadBefore: async () => [] }) as any,
+		resumeArgs: () => [],
+	} as unknown as TranscriptStore;
+
+	const titleStore = new ConversationTitleStore({}, async () => {});
+	const view = new ChatView(leaf as any, session as any, mockStore, titleStore);
+	await (view as any).onOpen();
+
+	const dropdown = view.getHistoryDropdown()!;
+	check('AU1.0 dropdown exists', dropdown !== null);
+	eq('AU1.0b dropdown is closed initially', dropdown.isOpen(), false);
+
+	// Dropdown closed + turn ends -> scan count is exactly zero
+	scanCount = 0;
+	// Unconditional on purpose: if the view never wires a turn-end handler, this must go red.
+	// Guarding the call would let the check pass by doing nothing at all.
+	check('AU1.0c view attached a turn-end handler to the reducer', typeof mockReducer.onTurnEnd === 'function');
+	mockReducer.onTurnEnd!();
+	eq('AU1.1 dropdown closed + turn ends has scan count exactly zero', scanCount, 0);
+
+	// Open dropdown -> initial scan
+	await view.toggleHistory();
+	check('AU1.2a dropdown is open', dropdown.isOpen() === true);
+	const initialScanCount = scanCount;
+	check('AU1.2b initial open scanned once', initialScanCount >= 1);
+
+	// Row shows old title initially
+	const rows = () => dropdown.getDropdownEl().children.filter((c: any) => c.hasClass?.('guki-history-item'));
+	const firstTitleEl = rows()[0]?.querySelector('.guki-history-title');
+	eq('AU1.2c first row shows old title', firstTitleEl?.text, 'Old Disk Title');
+
+	// Simulate title changed on disk while dropdown is open
+	currentSummaries = [
+		{ sessionId: 'sess-au-1', title: 'New Disk Title Arrived', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-au-2', title: 'Session 2 Title', startedAt: '2026-09-15T02:00:00.000Z' },
+	];
+
+	// Turn ends while dropdown is open -> rescanned
+	const prevScanCount = scanCount;
+	if (mockReducer.onTurnEnd) {
+		mockReducer.onTurnEnd();
+	} else if (typeof (view as any).handleTurnEnd === 'function') {
+		await (view as any).handleTurnEnd();
+	}
+	await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+	eq('AU1.3 dropdown open + turn ends triggered rescan', scanCount, prevScanCount + 1);
+	const updatedTitleEl = rows()[0]?.querySelector('.guki-history-title');
+	eq('AU1.4 row title updated on disk shows new text', updatedTitleEl?.text, 'New Disk Title Arrived');
+
+	await (view as any).onClose();
+}
+
+// AU2: Refresh preserves keyboard-selected row by sessionId and handles missing session fallback
+{
+	let currentSummaries: SessionSummary[] = [
+		{ sessionId: 'sess-a', title: 'Session A', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-b', title: 'Session B', startedAt: '2026-09-15T02:00:00.000Z' },
+		{ sessionId: 'sess-c', title: 'Session C', startedAt: '2026-09-15T03:00:00.000Z' },
+	];
+
+	const dropdownContainer = new FakeElement() as any;
+	const dropdown = new HistoryDropdown({
+		containerEl: dropdownContainer,
+		getSessions: async () => [...currentSummaries],
+		onSelectSession: () => {},
+	});
+
+	await dropdown.openDropdown();
+	check('AU2.1 dropdown is open', dropdown.isOpen() === true);
+	eq('AU2.2 initial selected index is 0', dropdown.getSelectedIndex(), 0);
+
+	// Select Session B (ArrowDown)
+	dropdown.handleKeyDown({ key: 'ArrowDown', preventDefault: () => {} } as any);
+	eq('AU2.3 selected index is 1 (Session B)', dropdown.getSelectedIndex(), 1);
+	eq('AU2.4 selected item is sess-b', dropdown.getItems()[dropdown.getSelectedIndex()]?.sessionId, 'sess-b');
+
+	// Simulate new session arrived at the top: [sess-new, sess-a, sess-b, sess-c]
+	currentSummaries = [
+		{ sessionId: 'sess-new', title: 'Session New', startedAt: '2026-09-15T04:00:00.000Z' },
+		{ sessionId: 'sess-a', title: 'Session A', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-b', title: 'Session B', startedAt: '2026-09-15T02:00:00.000Z' },
+		{ sessionId: 'sess-c', title: 'Session C', startedAt: '2026-09-15T03:00:00.000Z' },
+	];
+
+	check('AU2.5a dropdown has refresh method', typeof (dropdown as any).refresh === 'function');
+	await (dropdown as any).refresh();
+	eq('AU2.5 selected item after refresh is still sess-b', dropdown.getItems()[dropdown.getSelectedIndex()]?.sessionId, 'sess-b');
+	eq('AU2.6 selected index followed sess-b to 2', dropdown.getSelectedIndex(), 2);
+
+	// Simulate sess-b disappearing from the scan: [sess-new, sess-a, sess-c]
+	currentSummaries = [
+		{ sessionId: 'sess-new', title: 'Session New', startedAt: '2026-09-15T04:00:00.000Z' },
+		{ sessionId: 'sess-a', title: 'Session A', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-c', title: 'Session C', startedAt: '2026-09-15T03:00:00.000Z' },
+	];
+
+	await (dropdown as any).refresh();
+	check('AU2.7 dropdown remains open when selected session disappears', dropdown.isOpen() === true);
+	eq('AU2.8 selection moved to nearest row index 2', dropdown.getSelectedIndex(), 2);
+	eq('AU2.9 selection is now sess-c', dropdown.getItems()[dropdown.getSelectedIndex()]?.sessionId, 'sess-c');
+
+	dropdown.close();
+}
+
+// AU3: Refresh preserves open rename editor and typed text
+{
+	let currentSummaries: SessionSummary[] = [
+		{ sessionId: 'sess-edit-1', title: 'Edit Session 1', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-edit-2', title: 'Edit Session 2', startedAt: '2026-09-15T02:00:00.000Z' },
+	];
+
+	const dropdownContainer = new FakeElement() as any;
+	const titleStore = new ConversationTitleStore({}, async () => {});
+	const dropdown = new HistoryDropdown({
+		containerEl: dropdownContainer,
+		getSessions: async () => [...currentSummaries],
+		onSelectSession: () => {},
+		titleStore,
+	});
+
+	await dropdown.openDropdown();
+	dropdown.startEditing('sess-edit-1');
+	check('AU3.1 dropdown is editing', dropdown.isEditing() === true);
+	eq('AU3.2 editing sessionId is sess-edit-1', dropdown.getEditingSessionId(), 'sess-edit-1');
+
+	const input = dropdown.getDropdownEl().querySelector('input') as any;
+	check('AU3.3 input element exists before refresh', input !== null);
+	input.value = 'User In-Progress Typing...';
+	input.setSelectionRange?.(5, 12);
+
+	check('AU3.3b dropdown has refresh method', typeof (dropdown as any).refresh === 'function');
+	await (dropdown as any).refresh();
+
+	check('AU3.4 dropdown is still editing after refresh', dropdown.isEditing() === true);
+	eq('AU3.5 editing sessionId is still sess-edit-1', dropdown.getEditingSessionId(), 'sess-edit-1');
+	const inputAfter = dropdown.getDropdownEl().querySelector('input') as any;
+	check('AU3.6 input element exists after refresh', inputAfter !== null);
+	eq('AU3.7 typed text is intact after refresh', inputAfter?.value, 'User In-Progress Typing...');
+	eq('AU3.8 selectionStart preserved', inputAfter?.selectionStart, 5);
+	eq('AU3.9 selectionEnd preserved', inputAfter?.selectionEnd, 12);
+
+	dropdown.close();
+}
+
+// AU4: F3 Panel Header precedence and derived trim never produced on header path
+{
+	const leaf = new WorkspaceLeaf(new App() as any);
+	const session = {
+		state: new ChatState(),
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+	} as unknown as SessionManager;
+
+	const titleStore = new ConversationTitleStore(
+		{ 'sess-custom': { title: 'User Custom Name', updatedAt: 1000 } },
+		async () => {},
+	);
+	const view = new ChatView(leaf as any, session as any, undefined, titleStore);
+
+	check('AU4.0a view has setCurrentSessionSummary', typeof (view as any).setCurrentSessionSummary === 'function');
+	check('AU4.0b view has getPanelTitle', typeof (view as any).getPanelTitle === 'function');
+
+	// 1. Session with stored name + CLI title + derived trim -> stored name wins
+	(view as any).setCurrentSessionSummary?.({
+		sessionId: 'sess-custom',
+		title: 'CLI Title',
+		derivedTitle: 'Derived Prompt Trim',
+		startedAt: '2026-09-15T01:00:00.000Z',
+	});
+	eq('AU4.1 header shows stored custom name', view.getDisplayText(), 'User Custom Name');
+	eq('AU4.1b getPanelTitle produces stored name', (view as any).getPanelTitle?.(), 'User Custom Name');
+
+	// 2. Session with CLI title + derived trim (no stored name) -> CLI title wins
+	(view as any).setCurrentSessionSummary?.({
+		sessionId: 'sess-cli',
+		title: 'CLI Title Only',
+		derivedTitle: 'Derived Prompt Trim',
+		startedAt: '2026-09-15T02:00:00.000Z',
+	});
+	eq('AU4.2 header shows CLI title when no stored name', view.getDisplayText(), 'CLI Title Only');
+	eq('AU4.2b getPanelTitle produces CLI title', (view as any).getPanelTitle?.(), 'CLI Title Only');
+
+	// AU4.3/AU4.5 (and AU5.1/AU5.11/AU5.13) expect the fallback constant, which is also what the
+	// pre-change code returned, so on their own they cannot tell the two apart. They are not
+	// hardened by twisting the fixture — `GuKi Chat` IS the required answer here. What makes the
+	// block discriminating is the positive check beside them: AU4.2 demands a real name, and a
+	// getDisplayText() that went back to returning a constant fails it.
+	// 3. Session with derived trim only -> GuKi Chat (CHAT_VIEW_TITLE)
+	(view as any).setCurrentSessionSummary?.({
+		sessionId: 'sess-derived',
+		derivedTitle: 'Derived Prompt Trim',
+		startedAt: '2026-09-15T03:00:00.000Z',
+	});
+	eq('AU4.3 header shows GuKi Chat when only label is derived trim', view.getDisplayText(), 'GuKi Chat');
+	eq('AU4.4 getPanelTitle returns null for derived trim (never produced on header path)', (view as any).getPanelTitle?.(), null);
+
+	// 4. Session with no label at all -> GuKi Chat
+	(view as any).setCurrentSessionSummary?.({
+		sessionId: 'sess-empty',
+		startedAt: '2026-09-15T04:00:00.000Z',
+	});
+	eq('AU4.5 header shows GuKi Chat when no label at all', view.getDisplayText(), 'GuKi Chat');
+	eq('AU4.6 getPanelTitle returns null when no label at all', (view as any).getPanelTitle?.(), null);
+}
+
+// AU5: Header updates after turn ends, rename save/remove, and switching conversations
+{
+	const leafContainer = new FakeElement() as any;
+	const leafContent = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App() as any, leafContainer, leafContent);
+	let currentSummaries: SessionSummary[] = [
+		{ sessionId: 'sess-named', title: 'Conversation Alpha', startedAt: '2026-09-15T01:00:00.000Z' },
+		{ sessionId: 'sess-nameless', derivedTitle: 'Prompt trim only', startedAt: '2026-09-15T02:00:00.000Z' },
+	];
+
+	const mockReducer = {
+		onTurnEnd: null as (() => void) | null,
+	};
+	const session = {
+		state: new ChatState(),
+		reducer: mockReducer,
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		switchConversation: () => {},
+	} as unknown as SessionManager;
+
+	const mockStore = {
+		listSessions: async () => [...currentSummaries],
+		readSession: async () => Object.assign([], { hasMoreBefore: false, loadBefore: async () => [] }) as any,
+		resumeArgs: () => [],
+	} as unknown as TranscriptStore;
+
+	const settings = { conversationTitles: {} as Record<string, any> };
+	const titleStore = new ConversationTitleStore(settings.conversationTitles, async () => {});
+
+	const view = new ChatView(leaf as any, session as any, mockStore, titleStore);
+	await (view as any).onOpen();
+
+	const initialHeaderUpdates = (leaf as any).headerUpdates ?? 0;
+	eq('AU5.1 initial header is GuKi Chat', view.getDisplayText(), 'GuKi Chat');
+
+	// Switch conversation to sess-named
+	await view.handleSelectSession('sess-named');
+	eq('AU5.2 header updated to Conversation Alpha on conversation switch', view.getDisplayText(), 'Conversation Alpha');
+	eq('AU5.3 leaf title updated to Conversation Alpha', (leaf as any).title, 'Conversation Alpha');
+	check('AU5.4 header was re-asked after switching conversation', ((leaf as any).headerUpdates ?? 0) > initialHeaderUpdates);
+
+	// Rename conversation via dropdown save
+	const updatesBeforeRename = (leaf as any).headerUpdates ?? 0;
+	const dropdown = view.getHistoryDropdown()!;
+	await dropdown.openDropdown();
+	dropdown.startEditing('sess-named');
+	const renameInput = dropdown.getDropdownEl().querySelector('input') as any;
+	renameInput.value = 'Custom Alpha Renamed';
+	await dropdown.commitEdit();
+
+	eq('AU5.5 header updated to Custom Alpha Renamed after rename', view.getDisplayText(), 'Custom Alpha Renamed');
+	eq('AU5.6 leaf title updated to Custom Alpha Renamed', (leaf as any).title, 'Custom Alpha Renamed');
+	check('AU5.7 header was re-asked after rename save', ((leaf as any).headerUpdates ?? 0) > updatesBeforeRename);
+
+	// Remove rename (empty string)
+	const updatesBeforeRemove = (leaf as any).headerUpdates ?? 0;
+	dropdown.startEditing('sess-named');
+	const renameInput2 = dropdown.getDropdownEl().querySelector('input') as any;
+	renameInput2.value = '';
+	await dropdown.commitEdit();
+
+	eq('AU5.8 header reverted to Conversation Alpha after rename removal', view.getDisplayText(), 'Conversation Alpha');
+	check('AU5.9 header was re-asked after rename removal', ((leaf as any).headerUpdates ?? 0) > updatesBeforeRemove);
+
+	// Turn ends triggers header update
+	const updatesBeforeTurnEnd = (leaf as any).headerUpdates ?? 0;
+	if (mockReducer.onTurnEnd) {
+		mockReducer.onTurnEnd();
+	} else if (typeof (view as any).handleTurnEnd === 'function') {
+		await (view as any).handleTurnEnd();
+	}
+	await new Promise<void>((resolve) => setTimeout(resolve, 10));
+	check('AU5.10 header was re-asked after turn ends', ((leaf as any).headerUpdates ?? 0) > updatesBeforeTurnEnd);
+
+	// Switch to nameless conversation -> reverts to GuKi Chat, does not stick
+	const updatesBeforeNameless = (leaf as any).headerUpdates ?? 0;
+	await view.handleSelectSession('sess-nameless');
+	eq('AU5.11 switching to nameless conversation reverts header to GuKi Chat', view.getDisplayText(), 'GuKi Chat');
+	eq('AU5.12 leaf title reverted to GuKi Chat', (leaf as any).title, 'GuKi Chat');
+	check('AU5.13 previous conversation name did not stick', view.getDisplayText() !== 'Conversation Alpha');
+	check('AU5.14 header was re-asked after switching to nameless conversation', ((leaf as any).headerUpdates ?? 0) > updatesBeforeNameless);
+
+	await (view as any).onClose();
+}
+
+
+// ---------------------------------------------------------------------------
+// AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed (§8 amendment)
+// ---------------------------------------------------------------------------
+console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed');
+
+// AV1: NodeTranscriptStore.sessionTitle — reads one file, returns correct summary
+{
+	const avDir = mkdtempSync(join(tmpdir(), 'guki-av-title-'));
+
+	// AV1.1: File with ai-title — summary has title field and custom overlay is applied
+	const sessAiFile = join(avDir, 'sess-av-ai.jsonl');
+	writeFileSync(
+		sessAiFile,
+		[
+			JSON.stringify({ type: 'user', timestamp: '2026-09-15T10:00:00.000Z', message: 'Hello world' }),
+			JSON.stringify({ type: 'ai-title', aiTitle: 'CLI Generated Title' }),
+		].join('\n') + '\n',
+		'utf8',
+	);
+
+	// AV1.2: File with only a first-message (derived trim only — no ai-title)
+	const sessDerivedFile = join(avDir, 'sess-av-derived.jsonl');
+	writeFileSync(
+		sessDerivedFile,
+		JSON.stringify({ type: 'user', timestamp: '2026-09-15T10:01:00.000Z', message: 'A question with no title yet' }) + '\n',
+		'utf8',
+	);
+
+	// No custom title overlay
+	const plainStore = new NodeTranscriptStore(avDir);
+
+	const aiSummary = await plainStore.sessionTitle('sess-av-ai');
+	check('AV1.1 sessionTitle returns non-null for file with ai-title', aiSummary !== null);
+	eq('AV1.2 sessionTitle title matches ai-title', aiSummary?.title, 'CLI Generated Title');
+	eq('AV1.3 sessionTitle sessionId is correct', aiSummary?.sessionId, 'sess-av-ai');
+	eq('AV1.4 sessionTitle customTitle is absent without overlay', aiSummary?.customTitle, undefined);
+
+	// AV1.5: Derived trim only → summary returned but panelTitleFor returns null
+	const derivedSummary = await plainStore.sessionTitle('sess-av-derived');
+	check('AV1.5 sessionTitle returns non-null for derived-only file', derivedSummary !== null);
+	check('AV1.6 derived-only file has derivedTitle set', typeof derivedSummary?.derivedTitle === 'string');
+	eq('AV1.7 derived-only file has no ai-title', derivedSummary?.title, undefined);
+	eq('AV1.8 panelTitleFor returns null for derived-only summary', panelTitleFor(derivedSummary ?? null), null);
+
+	// AV1.9: Missing file → null, no throw
+	const missingSummary = await plainStore.sessionTitle('sess-av-does-not-exist');
+	eq('AV1.9 sessionTitle returns null for missing file', missingSummary, null);
+
+	// AV1.10: Custom title overlay — store has a custom name
+	const titleStore = new ConversationTitleStore(
+		{ 'sess-av-ai': { title: 'User Custom Override', updatedAt: 9999 } },
+		async () => {},
+	);
+	const overlayStore = new NodeTranscriptStore(avDir, titleStore);
+	const overlaySummary = await overlayStore.sessionTitle('sess-av-ai');
+	eq('AV1.10 sessionTitle applies custom-title overlay', overlaySummary?.customTitle, 'User Custom Override');
+	eq('AV1.11 panelTitleFor returns custom name when overlay is applied', panelTitleFor(overlaySummary ?? null), 'User Custom Override');
+
+	rmSync(avDir, { recursive: true, force: true });
+}
+
+// AV2: ChatView.handleTurnEnd with dropdown CLOSED — header reflects ai-title, scan count = 0
+// This is the main acceptance criterion from amendment §8. The view must NOT use
+// setCurrentSessionSummary — it must fetch the title itself via sessionTitle.
+{
+	const avDir2 = mkdtempSync(join(tmpdir(), 'guki-av-view-'));
+
+	// Write a transcript file with an ai-title for the "current" session
+	const sessFile = join(avDir2, 'sess-av-current.jsonl');
+	writeFileSync(
+		sessFile,
+		[
+			JSON.stringify({ type: 'user', timestamp: '2026-09-15T10:00:00.000Z', message: 'First message' }),
+			JSON.stringify({ type: 'ai-title', aiTitle: 'My Conversation Title' }),
+		].join('\n') + '\n',
+		'utf8',
+	);
+
+	const leafContainer = new FakeElement() as any;
+	const leafContent = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App() as any, leafContainer, leafContent);
+
+	let scanCount = 0;
+	const mockReducer = { onTurnEnd: null as (() => void) | null };
+
+	const session = {
+		state: new ChatState(),
+		reducer: mockReducer,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: avDir2, outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	// mockStore counts directory scans but delegates sessionTitle to the real NodeTranscriptStore
+	const realStore = new NodeTranscriptStore(avDir2);
+	const mockStore = {
+		listSessions: async () => {
+			scanCount++;
+			return await realStore.listSessions(avDir2);
+		},
+		readSession: async () => Object.assign([], { hasMoreBefore: false, loadBefore: async () => [] }) as any,
+		resumeArgs: () => [],
+		sessionTitle: async (sessionId: string, vaultPath?: string) => {
+			// Deliberately NOT incrementing scanCount — this is a single-file read, not a scan.
+			return await realStore.sessionTitle(sessionId, vaultPath);
+		},
+	} as unknown as TranscriptStore;
+
+	const view = new ChatView(leaf as any, session as any, mockStore as any);
+	await (view as any).onOpen();
+
+	// Set the current session id directly (simulates a session started from the CLI)
+	(view as any).currentSessionId = 'sess-av-current';
+
+	check('AV2.0 dropdown is closed initially', !(view.getHistoryDropdown()?.isOpen()));
+	check('AV2.1 view attached a turn-end handler', typeof mockReducer.onTurnEnd === 'function');
+
+	// Baseline: header is GuKi Chat before turn ends
+	eq('AV2.2 header is GuKi Chat before turn ends', view.getDisplayText(), 'GuKi Chat');
+
+	// Reset scan counter AFTER open (open may have triggered no scan since dropdown is closed)
+	scanCount = 0;
+	const headerUpdatesBefore = (leaf as any).headerUpdates ?? 0;
+
+	// Fire turn-end via the reducer hook (NOT via setCurrentSessionSummary)
+	mockReducer.onTurnEnd!();
+	// Allow any microtasks / async callbacks to settle
+	await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+	eq('AV2.3 scan count stays exactly zero with dropdown closed', scanCount, 0);
+	eq('AV2.4 header shows ai-title after turn ends with dropdown closed', view.getDisplayText(), 'My Conversation Title');
+	check('AV2.5 leaf header was updated after turn ends', ((leaf as any).headerUpdates ?? 0) > headerUpdatesBefore);
+
+	await (view as any).onClose();
+	rmSync(avDir2, { recursive: true, force: true });
+}
+
+// AV3: ChatView.handleTurnEnd with dropdown CLOSED and file has only derived trim — header stays GuKi Chat
+{
+	const avDir3 = mkdtempSync(join(tmpdir(), 'guki-av-derived-'));
+
+	const sessFile = join(avDir3, 'sess-av-derived2.jsonl');
+	writeFileSync(
+		sessFile,
+		JSON.stringify({ type: 'user', timestamp: '2026-09-15T10:00:00.000Z', message: 'A question with no title' }) + '\n',
+		'utf8',
+	);
+
+	const leafContainer = new FakeElement() as any;
+	const leafContent = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App() as any, leafContainer, leafContent);
+
+	const mockReducer = { onTurnEnd: null as (() => void) | null };
+	const session = {
+		state: new ChatState(),
+		reducer: mockReducer,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: avDir3, outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const realStore3 = new NodeTranscriptStore(avDir3);
+	const view = new ChatView(leaf as any, session as any, realStore3 as any);
+	await (view as any).onOpen();
+	(view as any).currentSessionId = 'sess-av-derived2';
+
+	check('AV3.1 dropdown is closed', !(view.getHistoryDropdown()?.isOpen()));
+	mockReducer.onTurnEnd!();
+	await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+	eq('AV3.2 header stays GuKi Chat for derived-only session', view.getDisplayText(), 'GuKi Chat');
+
+	await (view as any).onClose();
+	rmSync(avDir3, { recursive: true, force: true });
+}
+
+// AV4: ChatView.handleTurnEnd with dropdown CLOSED and file does not exist yet — no throw, header stays GuKi Chat
+{
+	const avDir4 = mkdtempSync(join(tmpdir(), 'guki-av-missing-'));
+
+	const leafContainer = new FakeElement() as any;
+	const leafContent = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App() as any, leafContainer, leafContent);
+
+	const mockReducer = { onTurnEnd: null as (() => void) | null };
+	const session = {
+		state: new ChatState(),
+		reducer: mockReducer,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: avDir4, outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const realStore4 = new NodeTranscriptStore(avDir4);
+	const view = new ChatView(leaf as any, session as any, realStore4 as any);
+	await (view as any).onOpen();
+	// Point to a session file that doesn't exist yet
+	(view as any).currentSessionId = 'sess-av-not-on-disk-yet';
+
+	let threw = false;
+	try {
+		mockReducer.onTurnEnd!();
+		await new Promise<void>((resolve) => setTimeout(resolve, 20));
+	} catch {
+		threw = true;
+	}
+
+	check('AV4.1 turn-end does not throw when file does not exist', !threw);
+	eq('AV4.2 header stays GuKi Chat when file does not exist', view.getDisplayText(), 'GuKi Chat');
+
+	await (view as any).onClose();
+	rmSync(avDir4, { recursive: true, force: true });
+}
+
+// AV5: Custom title overlay wins over ai-title in the closed-list path
+{
+	const avDir5 = mkdtempSync(join(tmpdir(), 'guki-av-custom-'));
+
+	const sessFile = join(avDir5, 'sess-av-cust.jsonl');
+	writeFileSync(
+		sessFile,
+		[
+			JSON.stringify({ type: 'user', timestamp: '2026-09-15T10:00:00.000Z', message: 'Hello' }),
+			JSON.stringify({ type: 'ai-title', aiTitle: 'CLI Title' }),
+		].join('\n') + '\n',
+		'utf8',
+	);
+
+	const leafContainer = new FakeElement() as any;
+	const leafContent = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App() as any, leafContainer, leafContent);
+
+	const titleStore5 = new ConversationTitleStore(
+		{ 'sess-av-cust': { title: 'Stored Custom Name', updatedAt: 9999 } },
+		async () => {},
+	);
+
+	const mockReducer = { onTurnEnd: null as (() => void) | null };
+	const session = {
+		state: new ChatState(),
+		reducer: mockReducer,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: avDir5, outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const realStore5 = new NodeTranscriptStore(avDir5, titleStore5);
+	const view = new ChatView(leaf as any, session as any, realStore5 as any, titleStore5);
+	await (view as any).onOpen();
+	(view as any).currentSessionId = 'sess-av-cust';
+
+	check('AV5.1 dropdown is closed', !(view.getHistoryDropdown()?.isOpen()));
+	mockReducer.onTurnEnd!();
+	await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+	eq('AV5.2 custom title wins over ai-title in closed-list path', view.getDisplayText(), 'Stored Custom Name');
+
+	await (view as any).onClose();
+	rmSync(avDir5, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// AW. The view must learn a fresh conversation's session id from the REAL reducer surface.
+// Why this section exists: the closed-list header fix read `reducer.getSessionId?.()`, a method
+// that exists nowhere in src/. Optional chaining made it evaluate to undefined, so on a brand new
+// conversation the view never learned its id and the header stayed on the fallback — while every
+// offline check passed, because no check drove the path the real app takes.
+// ---------------------------------------------------------------------------
+{
+	// AW1: the real StreamReducer's surface, asserted by name. If this getter is ever renamed,
+	// this check fails here rather than silently disabling the panel header in the real app.
+	const realReducer = new StreamReducer(new ChatState());
+	eq('AW1.1 real reducer starts with no session id', realReducer.currentSessionId, null);
+	realReducer.apply({ type: 'system', subtype: 'init', session_id: 'sess-aw-real' } as any);
+	eq('AW1.2 real reducer exposes the id through currentSessionId', realReducer.currentSessionId, 'sess-aw-real');
+	eq('AW1.3 the real reducer has no getSessionId method', typeof (realReducer as any).getSessionId, 'undefined');
+
+	// AW2: a fresh conversation — the view is given a reducer with the REAL surface only
+	// (a `currentSessionId` property, no invented method) and must still learn the id at turn end.
+	const awDir = mkdtempSync(join(tmpdir(), 'guki-aw-'));
+	const awSession = 'sess-aw-fresh';
+	writeFileSync(
+		join(awDir, `${awSession}.jsonl`),
+		[
+			JSON.stringify({ type: 'user', timestamp: '2026-09-15T10:00:00.000Z', message: { content: 'ilk mesaj burada' } }),
+			JSON.stringify({ type: 'ai-title', sessionId: awSession, aiTitle: 'Gercek Oturum Basligi' }),
+		].join('\n') + '\n',
+		'utf8',
+	);
+
+	const awLeaf = new WorkspaceLeaf(new App() as any, new FakeElement() as any, new FakeElement() as any);
+	const awReducer = {
+		onTurnEnd: null as (() => void) | null,
+		currentSessionId: null as string | null,
+	};
+	const awSessionObj = {
+		state: new ChatState(),
+		reducer: awReducer,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: awDir, outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const awView = new ChatView(awLeaf as any, awSessionObj, new NodeTranscriptStore(awDir));
+	await (awView as any).onOpen();
+
+	eq('AW2.1 header starts at the fallback', awView.getDisplayText(), 'GuKi Chat');
+	check('AW2.2 the view attached a turn-end handler', typeof awReducer.onTurnEnd === 'function');
+
+	// The CLI announces the id mid-turn, exactly as system/init does in the real app.
+	awReducer.currentSessionId = awSession;
+	await awReducer.onTurnEnd!();
+	await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+	eq('AW2.3 the view learned the session id from the real accessor', (awView as any).getCurrentSessionId?.() ?? (awView as any).currentSessionId, awSession);
+	eq('AW2.4 the panel header shows the conversation name on a fresh conversation', awView.getDisplayText(), 'Gercek Oturum Basligi');
+
+	await (awView as any).onClose?.();
+	rmSync(awDir, { recursive: true, force: true });
+}
+
 // Clean up temporary test files
 rmSync(TRANSCRIPT_TEST_DIR, { recursive: true, force: true });
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
+
+
+
 
 
 

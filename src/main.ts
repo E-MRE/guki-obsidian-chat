@@ -2,15 +2,29 @@ import { Plugin, WorkspaceLeaf } from 'obsidian';
 import { CHAT_VIEW_ICON, CHAT_VIEW_TITLE, VIEW_TYPE_GUKI_CHAT } from './constants';
 import { SessionManager } from './core/session-manager';
 import { normalizePermissionSettings } from './core/permission-policy';
+import { ConversationTitleStore } from './data/conversation-titles';
 import { ChatView } from './ui/chat-view';
 import { DEFAULT_SETTINGS, GukiSettingTab, type GukiChatSettings } from './ui/settings-tab';
 
 export default class GukiChatPlugin extends Plugin {
 	private session: SessionManager | null = null;
+	private titleStore: ConversationTitleStore | null = null;
 	settings: GukiChatSettings = DEFAULT_SETTINGS;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
+
+		const titleStore = new ConversationTitleStore(
+			this.settings.conversationTitles,
+			async (map) => {
+				this.settings = {
+					...this.settings,
+					conversationTitles: map,
+				};
+				await this.saveData(this.settings);
+			},
+		);
+		this.titleStore = titleStore;
 
 		// The session outlives any single view; the view only subscribes to its state.
 		// `manifest.dir` is how the permission server's own source is located at runtime; it is
@@ -41,7 +55,7 @@ export default class GukiChatPlugin extends Plugin {
 
 		this.addSettingTab(new GukiSettingTab(this.app, this));
 
-		this.registerView(VIEW_TYPE_GUKI_CHAT, (leaf) => new ChatView(leaf, session));
+		this.registerView(VIEW_TYPE_GUKI_CHAT, (leaf) => new ChatView(leaf, session, undefined, titleStore));
 
 		this.addRibbonIcon(CHAT_VIEW_ICON, CHAT_VIEW_TITLE, () => {
 			void this.activateView();
@@ -87,6 +101,9 @@ export default class GukiChatPlugin extends Plugin {
 			slashCommands: Array.isArray(data?.slashCommands)
 				? data.slashCommands.filter((s): s is string => typeof s === 'string')
 				: [],
+			conversationTitles: typeof data?.conversationTitles === 'object' && data?.conversationTitles !== null && !Array.isArray(data?.conversationTitles)
+				? data.conversationTitles
+				: {},
 		};
 	}
 
