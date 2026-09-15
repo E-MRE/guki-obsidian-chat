@@ -174,12 +174,11 @@ export default class GukiChatPlugin extends Plugin {
 					continue;
 				}
 				const viewState = leaf.getViewState();
-				const draft = leaf.view.containerEl.querySelector<HTMLTextAreaElement>('textarea')?.value ?? '';
+				const draft = leaf.view.captureDraft();
 				await leaf.setViewState({ type: 'empty' });
 				await leaf.setViewState(viewState);
-				const input = leaf.view.containerEl.querySelector<HTMLTextAreaElement>('textarea');
-				if (input) {
-					input.value = draft;
+				if (leaf.view instanceof ChatView) {
+					leaf.view.restoreDraft(draft);
 				}
 			}
 		}

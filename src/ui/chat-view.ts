@@ -21,7 +21,7 @@ import type { ChatState } from '../core/chat-state';
 import { formatModelName } from '../cli/events';
 import { decideAskUserQuestion } from '../core/ask-user-question';
 import type { SessionManager } from '../core/session-manager';
-import { Composer, type ComposerStatus } from './composer';
+import { Composer, type ComposerStatus, type ComposerDraft } from './composer';
 import type { SendKeyMode } from '../core/send-key';
 import { HistoryDropdown } from './history-dropdown';
 import { NodeTranscriptStore, type SessionPage, type TranscriptStore } from '../data/transcript-store';
@@ -686,6 +686,21 @@ export class ChatView extends ItemView {
 		}
 		if (unreadable.length > 0) {
 			new Notice(t('chat.attachment.image-data-unavailable', { files: unreadable.join(', ') }));
+		}
+	}
+
+	/**
+	 * The two halves of surviving a rebuild. A language change replaces this view wholesale, so
+	 * whatever the reader had in the composer — typed text and attachment chips alike — is carried
+	 * over these methods or it is lost.
+	 */
+	captureDraft(): ComposerDraft | null {
+		return this.composer?.getDraft() ?? null;
+	}
+
+	restoreDraft(draft: ComposerDraft | null): void {
+		if (draft) {
+			this.composer?.setDraft(draft);
 		}
 	}
 

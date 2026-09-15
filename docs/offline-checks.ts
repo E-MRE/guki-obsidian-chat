@@ -14858,8 +14858,14 @@ check('AZ3. translator switches locales, interpolates, and preserves missing pla
 	const factory = plugin.createChatViewFactory(session);
 	const originalView = factory(leaf);
 	await leaf.open(originalView);
-	const originalInput = required(container.querySelector('textarea'), 'AZ5 initial composer textarea');
-	originalInput.value = 'Taslak mesajım kaybolmasın';
+	// Driven through the production draft door, not the DOM: a chip lives only in the composer's
+	// own array, so it is the half a textarea-level rescue silently loses. The operator's manual
+	// round found a pasted screenshot and an attached note both disappearing on a language change.
+	originalView.restoreDraft({
+		text: 'Taslak mesajım kaybolmasın',
+		attachments: [{ kind: 'file', path: 'Notlar/ek.md', label: 'ek.md' } as never],
+	});
+	const attachedBefore = originalView.captureDraft()?.attachments.length ?? 0;
 
 	let localeDuringRebuild = '';
 	let rebuiltView: ChatView | null = null;
@@ -14882,10 +14888,12 @@ check('AZ3. translator switches locales, interpolates, and preserves missing pla
 	plugin.settings.language = 'tr';
 	await plugin.saveSettings();
 	const rebuiltInput = required(container.querySelector('textarea'), 'AZ5 rebuilt composer textarea');
+	const attachedAfter = rebuiltView?.captureDraft()?.attachments.length ?? 0;
 	check('AZ5. production language door rebuilds the panel in Turkish and preserves the draft',
 		rebuiltView !== null && rebuiltView !== originalView &&
 			localeDuringRebuild === 'tr' && getLocale() === 'tr' &&
 			rebuiltInput.value === 'Taslak mesajım kaybolmasın' &&
+			attachedBefore === 1 && attachedAfter === attachedBefore &&
 			removedCommands.includes('open-chat') &&
 			addedCommands.some((command) => command.id === 'open-chat' && command.name === 'Sohbeti aç'),
 	);

@@ -164,6 +164,12 @@ export function pasteBelongsToComposer(
 	return target.contains(formEl) && pointerInPanel && panelShown;
 }
 
+/** What a panel rebuild has to carry across: see `Composer.getDraft`. */
+export interface ComposerDraft {
+	text: string;
+	attachments: readonly Attachment[];
+}
+
 export class Composer {
 	private readonly chipsEl: HTMLElement;
 	private readonly inputEl: HTMLTextAreaElement;
@@ -634,6 +640,23 @@ export class Composer {
 			// Read synchronously by the view: `dataTransfer` is only valid during this event.
 			this.options.onDropped(event.dataTransfer);
 		});
+	}
+
+	/**
+	 * Everything the reader would lose if the panel were rebuilt under them. The typed text lives
+	 * in the textarea, but the chips live only in this array — a language change destroys the view,
+	 * so both have to be carried across by hand or a pasted screenshot silently disappears.
+	 */
+	getDraft(): ComposerDraft {
+		return { text: this.inputEl.value, attachments: [...this.attachments] };
+	}
+
+	/** The other half of `getDraft`, applied to the rebuilt composer. */
+	setDraft(draft: ComposerDraft): void {
+		this.inputEl.value = draft.text;
+		for (const attachment of draft.attachments) {
+			this.attach(attachment);
+		}
 	}
 
 	/**
