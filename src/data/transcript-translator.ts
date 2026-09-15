@@ -20,6 +20,7 @@
  */
 
 import { nodeFs, nodeOs, nodePath } from '../cli/node-api';
+import { t } from '../i18n';
 import type {
 	AssistantItem,
 	ChatItem,
@@ -163,7 +164,7 @@ function extractUserContent(record: TranscriptRecord): { text: string; images: I
 					images.push({
 						kind: 'image',
 						id: `${recordUuid}-img-${String(imgIndex)}`,
-						displayName: `image-${String(imgIndex + 1)}.png`,
+						displayName: t('core.transcript.imageName', { index: imgIndex + 1 }),
 						mediaType,
 						data,
 						byteLength,
@@ -297,7 +298,7 @@ export async function translateTranscriptRecords(
 			const divider: DividerItem = {
 				kind: 'divider',
 				id: dividerId,
-				text: 'Conversation compacted',
+				text: t('core.conversation.compacted'),
 			};
 			chatItems.push(divider);
 			continue;
@@ -370,7 +371,7 @@ export async function translateTranscriptRecords(
 							.join('\n');
 					}
 				}
-				currentAssistant.errorText = errText || 'API error';
+				currentAssistant.errorText = errText || t('core.transcript.apiError');
 			}
 
 			const msg = typeof r.message === 'object' && r.message !== null ? (r.message as Record<string, unknown>) : null;

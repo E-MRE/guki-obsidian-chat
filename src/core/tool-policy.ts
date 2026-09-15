@@ -9,6 +9,7 @@
  * `input` of type `unknown` — the input comes off the wire, so every read of it is guarded.
  */
 import type { IconName } from 'obsidian';
+import { t } from '../i18n';
 
 /**
  * `error` is deliberately **not** a member. PLAN §2 lists it as an overriding rule, not a
@@ -133,7 +134,7 @@ export function toolSummary(toolName: string | undefined, input: unknown): strin
 
 	// TodoWrite's primary argument is a list, and a count is the only useful one-liner for it.
 	if (Array.isArray(record.todos)) {
-		return `${String(record.todos.length)} items`;
+		return t('core.tool.todosCount', { count: record.todos.length });
 	}
 
 	// Unknown / MCP fallback.

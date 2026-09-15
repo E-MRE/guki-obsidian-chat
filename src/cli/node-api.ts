@@ -23,6 +23,7 @@
  * prefix, and Electron's `require` accepts either form.
  */
 import { Platform } from 'obsidian';
+import { t } from '../i18n';
 
 type ChildProcessModule = typeof import('child_process');
 type FsModule = typeof import('fs');
@@ -32,7 +33,7 @@ type PathModule = typeof import('path');
 type ProcessModule = typeof import('process');
 type ReadlineModule = typeof import('readline');
 
-const DESKTOP_ONLY = 'GuKi Chat runs the Claude Code CLI as a subprocess, which is desktop only.';
+const DESKTOP_ONLY = t('core.nodeApi.desktopOnly');
 
 /**
  * Electron exposes Node's `require` on `window` in the renderer. Typed narrowly as

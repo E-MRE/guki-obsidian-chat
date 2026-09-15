@@ -8,6 +8,7 @@
  */
 
 import type { QuotaSnapshot } from '../cli/events';
+import { t } from '../i18n';
 import type { ImageAttachment } from './attachments';
 import { type AskQuestionDef, parseAskUserQuestionInput } from './ask-user-question';
 
@@ -353,7 +354,7 @@ export class ChatState {
 		return item;
 	}
 
-	addDivider(id: string, text = 'Conversation compacted'): DividerItem {
+	addDivider(id: string, text = t('core.conversation.compacted')): DividerItem {
 		const item: DividerItem = { kind: 'divider', id, text };
 		this.itemList.push(item);
 		this.emitChange();

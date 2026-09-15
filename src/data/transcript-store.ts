@@ -3,6 +3,7 @@
  * (RESEARCH §D, this task's own measurement) — `readSession` and any UI over it are v2.
  */
 import { nodeFs, nodeOs, nodePath } from '../cli/node-api';
+import { t } from '../i18n';
 import { projectSlug, scanSessionsDir, buildSessionSummary, type SessionSummary } from './session-index';
 import { DiskTranscriptLoader, type PagedTranscriptResult } from './disk-transcript-loader';
 import { translateTranscriptRecords, type TranslateOptions } from './transcript-translator';
@@ -46,7 +47,7 @@ export class SessionPage extends Array<ChatItem> {
 
 	async loadBefore(count?: number): Promise<SessionPage> {
 		if (!this._loadBeforeHandler) {
-			throw new Error('No loadBefore handler attached to SessionPage');
+			throw new Error(t('core.transcriptStore.noLoadBeforeHandler'));
 		}
 		return this._loadBeforeHandler(count);
 	}
@@ -227,7 +228,7 @@ export class NodeTranscriptStore implements TranscriptStore {
 
 		const targetFile = await this.resolveSessionFilePath(sessionId, vaultPath);
 		if (!targetFile) {
-			throw new Error(`Transcript file not found for session: ${sessionId} (v2)`);
+			throw new Error(t('core.transcriptStore.fileNotFound', { sessionId }));
 		}
 
 		const fs = await nodeFs();

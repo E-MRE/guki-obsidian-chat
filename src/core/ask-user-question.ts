@@ -1,4 +1,5 @@
 import type { PermissionBehavior } from './permission-broker';
+import { t } from '../i18n';
 
 export interface AskQuestionOption {
 	label: string;
@@ -122,21 +123,21 @@ export function formatAskUserQuestionSummary(
 					? answers[String(idx)] ?? (q.id ? answers[q.id] : undefined) ?? answers[q.question]
 					: undefined;
 				const ansStr = Array.isArray(ans) ? ans.join(', ') : typeof ans === 'string' ? ans : '';
-				return `${q.question} → ${ansStr}`;
+				return t('core.ask.questionAnswer', { question: q.question, answer: ansStr });
 			});
-			return `Question: ${parts.join(' · ')}`;
+			return t('core.ask.questionsAnswered', { questions: parts.join(' · ') });
 		} else if (status === 'denied') {
-			return `Question: ${askQuestions.map((q) => q.question).join(' · ')} → Denied`;
+			return t('core.ask.questionsDenied', { questions: askQuestions.map((q) => q.question).join(' · ') });
 		} else {
-			return `Question: ${askQuestions.map((q) => q.question).join(' · ')} → Not answered (turn ended)`;
+			return t('core.ask.questionsNotAnswered', { questions: askQuestions.map((q) => q.question).join(' · ') });
 		}
 	} else {
 		if (status === 'allowed') {
-			return 'Question: Answered';
+			return t('core.ask.answered');
 		} else if (status === 'denied') {
-			return 'Question: (unreadable question) → Denied';
+			return t('core.ask.unreadableDenied');
 		} else {
-			return 'Question: (unreadable question) → Not answered (turn ended)';
+			return t('core.ask.unreadableNotAnswered');
 		}
 	}
 }

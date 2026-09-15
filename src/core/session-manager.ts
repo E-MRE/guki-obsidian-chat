@@ -18,6 +18,7 @@ import {
 	type SystemInitEvent,
 } from '../cli/events';
 import { MCP_SERVER_NAME } from '../constants';
+import { t } from '../i18n';
 import {
 	composeMessage,
 	imageAttachments,
@@ -176,7 +177,7 @@ export class SessionManager {
 		}
 		this.broker.cancelPending('The conversation was switched.');
 		if (this.reducer.hasActiveTurn()) {
-			this.reducer.failActiveTurn('The conversation was switched.');
+			this.reducer.failActiveTurn(t('core.session.conversationSwitched'));
 		}
 		this.cancelQueuedTurns();
 		this.queue.length = 0;
@@ -244,7 +245,7 @@ export class SessionManager {
 			return adapter.getBasePath();
 		}
 		throw new UnsupportedVaultAdapterError(
-			'This vault type is not supported, so the chat is disabled.',
+			t('core.session.vaultUnsupported'),
 		);
 	}
 
@@ -264,8 +265,8 @@ export class SessionManager {
 				this.blockInput(error.message);
 				this.state.addNotice(
 					'error',
-					'This vault type is not supported, so the chat is disabled.',
-					"The CLI needs a real filesystem path, and this vault's adapter does not provide one.",
+					t('core.session.vaultUnsupported'),
+					t('core.session.vaultPathMissing'),
 				);
 			}
 			return null;
@@ -288,7 +289,7 @@ export class SessionManager {
 		if (!this.vaultPathsPromise) {
 			const root = this.resolveVaultPath();
 			if (root === null) {
-				return Promise.reject(new Error(this.blockedReason ?? 'This vault type is not supported.'));
+				return Promise.reject(new Error(this.blockedReason ?? t('core.session.vaultUnsupportedShort')));
 			}
 			this.vaultPathsPromise = createVaultPaths(root);
 		}
@@ -361,7 +362,7 @@ export class SessionManager {
 		} else {
 			// No live process to interrupt: the turn is already dead, so say so instead of
 			// leaving the panel on a Stop button that does nothing.
-			this.reducer.failActiveTurn('The turn could not be stopped: the process is gone.');
+			this.reducer.failActiveTurn(t('core.session.turnCouldNotStop'));
 		}
 	}
 
@@ -405,7 +406,7 @@ export class SessionManager {
 			// The blocked reason, when there is one, is the truthful message: `ensureProcess` also
 			// fails when the *permission server* could not be started, and saying the CLI was the
 			// problem would send the reader looking in the wrong place.
-			next.item.errorText ??= this.blockedReason ?? 'The Claude Code CLI could not be started.';
+			next.item.errorText ??= this.blockedReason ?? t('core.session.cliCouldNotStart');
 			this.state.emitChange();
 			return;
 		}
@@ -414,8 +415,8 @@ export class SessionManager {
 		this.reducer.beginTurn(next.item);
 		const written = this.process?.write(userMessageLine(next.text, next.images)) ?? false;
 		if (!written) {
-			this.reducer.failActiveTurn('The message could not be written to the CLI: the process is gone.');
-			this.state.addNotice('error', 'The Claude Code process is not running.');
+			this.reducer.failActiveTurn(t('core.session.messageWriteProcessGone'));
+			this.state.addNotice('error', t('core.session.cliProcessNotRunning'));
 		}
 	}
 
@@ -448,14 +449,14 @@ export class SessionManager {
 			if (error instanceof BinaryNotFoundError) {
 				this.state.addNotice(
 					'error',
-					'Could not find the Claude Code CLI.',
-					`Looked at: ${error.attempts.join(', ')}. You can set a path in GuKi Chat's settings.`,
+					t('core.session.cliNotFound'),
+					t('core.session.lookedAtSettings', { attempts: error.attempts.join(', ') }),
 				);
 			} else {
 				this.state.addNotice(
 					'error',
-					'Could not find the Claude Code CLI.',
-					`${error instanceof Error ? error.message : String(error)} You can set a path in GuKi Chat's settings.`,
+					t('core.session.cliNotFound'),
+					t('core.session.errorSettingsPath', { error: error instanceof Error ? error.message : String(error) }),
 				);
 			}
 			return false;
@@ -470,12 +471,12 @@ export class SessionManager {
 		} catch (error) {
 			const detail =
 				error instanceof BinaryNotFoundError
-					? `Looked at: ${error.attempts.join(', ')}`
+					? t('core.session.lookedAt', { attempts: error.attempts.join(', ') })
 					: error instanceof Error
 						? error.message
 						: String(error);
-			this.blockInput('The approval gate could not be started, so the chat is disabled.');
-			this.state.addNotice('error', 'The permission server could not be started.', detail);
+			this.blockInput(t('core.session.approvalGateCouldNotStart'));
+			this.state.addNotice('error', t('core.session.permissionServerCouldNotStart'), detail);
 			return false;
 		}
 
@@ -517,8 +518,8 @@ export class SessionManager {
 		// Cleared first: `failActiveTurn` pumps the queue, and pumping it here would just try to
 		// spawn the same unusable binary again.
 		this.queue.length = 0;
-		this.reducer.failActiveTurn(`The Claude Code CLI could not be started: ${error.message}`);
-		this.state.addNotice('error', 'The Claude Code CLI could not be started.', error.message);
+		this.reducer.failActiveTurn(t('core.session.cliCouldNotStartDetail', { error: error.message }));
+		this.state.addNotice('error', t('core.session.cliCouldNotStart'), error.message);
 	}
 
 	/**
@@ -532,16 +533,18 @@ export class SessionManager {
 			return;
 		}
 
-		const how = info.signal !== null ? `signal ${info.signal}` : `exit code ${String(info.code)}`;
+		const how = info.signal !== null
+			? t('core.session.processSignal', { signal: info.signal })
+			: t('core.session.processExitCode', { code: String(info.code) });
 		// Same ordering rule as `handleSpawnError`: the queue goes before the turn is failed, so
 		// the pump that `failActiveTurn` triggers finds nothing to restart the process for.
 		this.queue.length = 0;
-		const failed = this.reducer.failActiveTurn(`The Claude Code process stopped (${how}).`);
+		const failed = this.reducer.failActiveTurn(t('core.session.processStopped', { how }));
 		this.state.addNotice(
 			'error',
 			failed
-				? 'The Claude Code process stopped mid-turn. The next message starts a new conversation.'
-				: 'The Claude Code process stopped. The next message starts a new conversation.',
+				? t('core.session.processStoppedMidTurn')
+				: t('core.session.processStoppedNewConversation'),
 			info.stderr.trim().length > 0 ? info.stderr.trim() : how,
 		);
 	}
@@ -569,17 +572,17 @@ export class SessionManager {
 
 		const detail =
 			status === null
-				? `'${MCP_SERVER_NAME}' is not in system/init.mcp_servers. A stdio MCP server that fails to start is never reported by the CLI.`
-				: `'${MCP_SERVER_NAME}' reported status '${status}', not '${MCP_CONNECTED}'.`;
+				? t('core.session.mcpMissing', { server: MCP_SERVER_NAME })
+				: t('core.session.mcpWrongStatus', { server: MCP_SERVER_NAME, status, connected: MCP_CONNECTED });
 
-		this.blockInput('The approval gate is not running, so the chat is disabled.');
+		this.blockInput(t('core.session.approvalGateNotRunning'));
 		this.queue.length = 0;
 		this.reducer.failActiveTurn(
-			'The permission server is not connected, so this turn was stopped before any tool could run.',
+			t('core.session.permissionServerNotConnected'),
 		);
 		this.state.addNotice(
 			'error',
-			'The permission server did not register. Reload the plugin, or restart Obsidian, before using the chat.',
+			t('core.session.permissionServerNotRegistered'),
 			detail,
 		);
 	}
