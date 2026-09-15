@@ -22,8 +22,9 @@ not a separate assistant with its own, weaker context.
 
 Not on the Community Plugins list yet — install manually:
 
-1. Download the latest release zip (or copy `main.js`, `manifest.json`, `styles.css` and
-   `mcp-permission-server.mjs` from this repo after building — see below).
+1. Download `main.js`, `manifest.json`, `styles.css` and `mcp-permission-server.mjs`
+   from the [latest release](https://github.com/E-MRE/guki-obsidian-chat/releases/latest)
+   (or build them from this repo — see below).
 2. Put those files in `<your-vault>/.obsidian/plugins/guki-chat/`.
 3. In Obsidian: Settings → Community plugins → turn off Restricted mode if this is your
    first community plugin → enable **GuKi Chat**.
@@ -33,11 +34,22 @@ open it from the command palette: **GuKi Chat: Open chat**.
 
 ## Settings
 
-**Claude Code binary path** — leave empty to auto-detect (checks the usual install
-locations, then falls back to a login-shell lookup). Only set this if auto-detect fails;
-find the settings page from Settings → Community plugins → the gear icon next to
-**GuKi Chat**. A change only takes effect on the next chat session — a CLI that's
-already running keeps using the binary it started with.
+Settings → Community plugins → the gear icon next to **GuKi Chat**.
+
+- **Language** — Automatic (follows Obsidian), English, or Turkish.
+- **Send message with** — Enter, or Cmd/Ctrl+Enter if you'd rather have Enter insert a
+  newline.
+- **Claude Code binary path** — leave empty to auto-detect (checks the usual install
+  locations, then falls back to a login-shell lookup). Only set this if auto-detect
+  fails. A change only takes effect on the next chat session — a CLI that's already
+  running keeps using the binary it started with.
+- **Permissions outside the vault** — separate choices for reading, writing, and running
+  commands: always ask, or auto-allow. Anything inside the vault is governed by the
+  permission cards in the chat.
+- **Allow everything (high risk)** — one switch that approves every tool call without
+  asking. Off by default, and it says what it costs you.
+- **Remembered permissions** — the decisions you told it to remember, listed one by one,
+  removable individually or all at once.
 
 ## What it does
 
@@ -45,15 +57,29 @@ already running keeps using the binary it started with.
   process per Obsidian session (not one per message — hooks that run at session start
   fire once, not on every turn).
 - Renders the stream as chat bubbles: markdown, code blocks, collapsible tool calls,
-  diffs for edits, and permission cards you approve or deny inline.
+  diffs for edits, and a separator line where the conversation was compacted.
+- **Permission cards in the composer** — a tool call that needs your OK, or a question
+  Claude asks you, appears where you type instead of interrupting the transcript. Once
+  answered, the transcript keeps a one-line record of what was asked and what you said.
+- **Conversation history** — browse past conversations from the panel, open one, and
+  resume it. Titles are generated automatically and you can rename them yourself. A
+  "new conversation" button starts a fresh one without closing the panel.
+- **`/` and `@` in the composer** — `/` opens your slash-command palette, `@` opens a
+  file picker for your vault's notes.
+- **Prompt history** — Up/Down in an empty composer walks back through what you sent.
+- Long tool calls fold themselves away once they're done ("Worked for MM:SS"), and the
+  panel tells you when the conversation is being compacted.
 - Drag-and-drop, clipboard paste, and a file picker for attaching images and files.
 - A status line with live cost, duration, and context-window usage.
 
-## Known limits (v1)
+## Known limits
 
-- No browsing of past sessions from the panel yet (the CLI's own `--resume` still works
-  from a terminal).
-- Paths and settings are per-vault; nothing is shared between vaults or synced.
+- Desktop only, and per-vault: paths and settings are never shared between vaults or
+  synced.
+- Paths outside the vault can be read or written when you allow it, but commands the
+  CLI runs outside the vault may still hit its own sandbox and ask again — that prompt
+  comes from Claude Code, not from this plugin.
+- No inline edit (Cmd+K) and no plan mode yet.
 
 ## Building from source
 
