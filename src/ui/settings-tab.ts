@@ -16,11 +16,13 @@ export interface GukiChatSettings extends PermissionSettings {
 	claudeBinaryPath: string;
 	slashCommands?: string[];
 	conversationTitles?: ConversationTitleMap;
+	promptHistory?: string[];
 }
 
 export const DEFAULT_SETTINGS: GukiChatSettings = {
 	claudeBinaryPath: '',
 	slashCommands: [],
+	promptHistory: [],
 	...DEFAULT_PERMISSION_SETTINGS,
 };
 
