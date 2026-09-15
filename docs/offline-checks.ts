@@ -12216,7 +12216,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	const session = {
 		state,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
 		getSlashCommands: () => ['clear', 'help'],
 		send: () => {},
@@ -12327,7 +12327,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	const session = {
 		state,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
 		getSlashCommands: () => ['clear', 'help'],
 		send: () => {},
@@ -12425,7 +12425,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 		const realSession = {
 			state: new ChatState(),
 			busy: false,
-			blocked: false,
+			blocked: null,
 			vaultPaths: async () => ({ root: '/Users/emregultekir/Documents/otherprojects/guki-obsidian-chat', outside: '/fake/outside' }),
 			getSlashCommands: () => ['clear', 'help'],
 			send: () => {},
@@ -12456,7 +12456,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	const session = {
 		state,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
 		getSlashCommands: () => ['clear', 'help'],
 		send: () => {},
@@ -12634,7 +12634,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	const session = {
 		state,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
 		getSlashCommands: () => ['clear', 'help'],
 		send: () => {},
@@ -12826,7 +12826,7 @@ function countHistoryControls(container: any): number {
 	const session = {
 		state,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
 		getSlashCommands: () => ['clear', 'help'],
 		send: () => {},
@@ -13485,7 +13485,7 @@ function countHistoryControls(container: any): number {
 	const session = {
 		state: new ChatState(),
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
 		getSlashCommands: () => ['clear', 'help'],
 		send: () => {},
@@ -13608,7 +13608,7 @@ console.log('AU. Phase 7 Task 9 Lane 3: History dropdown refresh and panel heade
 		state: new ChatState(),
 		reducer: mockReducer,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
 		getSlashCommands: () => [],
 		send: () => {},
@@ -14004,7 +14004,7 @@ console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed
 		state: new ChatState(),
 		reducer: mockReducer,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: avDir2, outside: '/fake/outside' }),
 		getSlashCommands: () => [],
 		send: () => {},
@@ -14077,7 +14077,7 @@ console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed
 		state: new ChatState(),
 		reducer: mockReducer,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: avDir3, outside: '/fake/outside' }),
 		getSlashCommands: () => [],
 		send: () => {},
@@ -14114,7 +14114,7 @@ console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed
 		state: new ChatState(),
 		reducer: mockReducer,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: avDir4, outside: '/fake/outside' }),
 		getSlashCommands: () => [],
 		send: () => {},
@@ -14172,7 +14172,7 @@ console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed
 		state: new ChatState(),
 		reducer: mockReducer,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: avDir5, outside: '/fake/outside' }),
 		getSlashCommands: () => [],
 		send: () => {},
@@ -14234,7 +14234,7 @@ console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed
 		state: new ChatState(),
 		reducer: awReducer,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: awDir, outside: '/fake/outside' }),
 		getSlashCommands: () => [],
 		send: () => {},
@@ -14647,7 +14647,7 @@ console.log('\nAY. Görev 13 — Send message with preference');
 	}
 	{
 		const fixture = makeSendKeyComposer('mod-enter');
-		fixture.composer.setBlocked('...');
+		fixture.composer.setBlocked('core.session.vaultUnsupported');
 		fixture.composer.setBlocked(null);
 		const value = placeholder(fixture.input);
 		check('AY5.4 unblocking mod-enter restores mod-enter placeholder', value.includes('Cmd/Ctrl+Enter to send') && !value.includes('(Enter to send'));
@@ -15206,6 +15206,32 @@ console.log('\nBA. i18n production gates');
 	eq('BA G6. live state reducer and reconstructed history share the handwritten Turkish compaction text',
 		`${directDivider.text}|${liveDivider?.text}|${diskDivider?.text}`,
 		'Konuşma sıkıştırıldı|Konuşma sıkıştırıldı|Konuşma sıkıştırıldı');
+}
+
+// G8: both halves of the language rule, pinned against each other in one scenario. The block is
+// CURRENT STATE — the vault is still unsupported — so its placeholder must follow a later locale.
+// The notice beside it RECORDS THAT IT HAPPENED, so it is history and keeps the English wording it
+// was written with. Raise the block under English, render the real view under Turkish, and assert
+// the placeholder moved while the notice did not. Expected strings are handwritten, so a broken
+// storage path cannot make the translator agree with its own output.
+{
+	setLocale('en');
+	const manager = new SessionManager({ vault: { adapter: {} } } as never);
+	(manager as unknown as { vaultPaths(): ReturnType<typeof createVaultPaths> }).vaultPaths =
+		async () => createVaultPaths('/fake/vault');
+	const container = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App(), container);
+
+	setLocale('tr');
+	const view = new ChatView(leaf, manager);
+	await (view as any).onOpen();
+	const input = required(container.querySelector('textarea'), 'BA G8 blocked composer textarea');
+	const detail = required(container.querySelector('.guki-message-meta'), 'BA G8 blocked notice detail');
+	eq('BA G8. blocked placeholder follows a live Turkish locale while its notice keeps English',
+		`${input.placeholder ?? input.getAttribute('placeholder')}|${detail.text}`,
+		'Bu kasa türü desteklenmediği için sohbet devre dışı bırakıldı.|The CLI needs a real filesystem path, and this vault\'s adapter does not provide one.');
+	await (view as any).onClose();
+	manager.dispose();
 }
 
 setLocale('en');

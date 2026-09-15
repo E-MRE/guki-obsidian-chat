@@ -30,6 +30,7 @@ import {
 } from './permission-card';
 import type { PermissionItem } from '../core/chat-state';
 import { DEFAULT_SEND_KEY, shouldSend, type SendKeyMode } from '../core/send-key';
+import type { BlockedReasonKey } from '../core/session-manager';
 import { t } from '../i18n';
 
 /**
@@ -181,7 +182,7 @@ export class Composer {
 	private pendingStatusMeasure: number | null = null;
 	private busy = false;
 	/** Non-null when the panel is refusing input; the text is shown in place of the placeholder. */
-	private blocked: string | null = null;
+	private blocked: BlockedReasonKey | null = null;
 	private attachments: Attachment[] = [];
 	/**
 	 * Nested `dragenter`/`dragleave` pairs fire as the pointer crosses child elements, so a plain
@@ -830,7 +831,7 @@ export class Composer {
 	 * reachable quietly — so the control is genuinely disabled, not merely styled as such.
 	 * Idempotent; called on every state change.
 	 */
-	setBlocked(reason: string | null): void {
+	setBlocked(reason: BlockedReasonKey | null): void {
 		if (reason === this.blocked) {
 			return;
 		}
@@ -843,7 +844,8 @@ export class Composer {
 		// same mistake as letting text be typed.
 		this.attachEl.disabled = isBlocked;
 		this.pickEl.disabled = isBlocked;
-		this.inputEl.placeholder = reason ?? this.placeholderText();
+		// Translated here, not where the block was raised, so a language change reaches it.
+		this.inputEl.placeholder = reason ? t(reason) : this.placeholderText();
 		this.actionEl.toggleClass('guki-composer-blocked', isBlocked);
 	}
 

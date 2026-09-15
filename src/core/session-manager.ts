@@ -43,6 +43,16 @@ const MCP_CONNECTED = 'connected';
  */
 class UnsupportedVaultAdapterError extends Error {}
 
+/**
+ * The message key for a current refusal, never the rendered sentence. A block describes the
+ * situation *now*, so it has to follow a later language change; storing the translated string
+ * froze it in whichever locale happened to be active when the block was raised.
+ */
+export type BlockedReasonKey =
+	| 'core.session.vaultUnsupported'
+	| 'core.session.approvalGateCouldNotStart'
+	| 'core.session.approvalGateNotRunning';
+
 interface QueuedTurn {
 	text: string;
 	/** The `image` content blocks this turn carries. Empty for every turn that is not an image. */
@@ -71,7 +81,7 @@ export class SessionManager {
 	 * server is not connected. A CLI running with no approval gate must never be usable, and the
 	 * refusal has to be visible rather than a silently degraded mode (PLAN Phase 5 task 9).
 	 */
-	private blockedReason: string | null = null;
+	private blockedReason: BlockedReasonKey | null = null;
 
 	/**
 	 * The settings-panel override, step 1 of `resolveClaudeBinary`'s order (RESEARCH C). Set at
@@ -147,7 +157,7 @@ export class SessionManager {
 	}
 
 	/** Non-null when input is refused. The composer shows it and disables itself. */
-	get blocked(): string | null {
+	get blocked(): BlockedReasonKey | null {
 		return this.blockedReason;
 	}
 
@@ -244,9 +254,7 @@ export class SessionManager {
 		if (adapter instanceof FileSystemAdapter) {
 			return adapter.getBasePath();
 		}
-		throw new UnsupportedVaultAdapterError(
-			t('core.session.vaultUnsupported'),
-		);
+		throw new UnsupportedVaultAdapterError();
 	}
 
 	/**
@@ -262,7 +270,9 @@ export class SessionManager {
 				throw error;
 			}
 			if (this.blockedReason === null) {
-				this.blockInput(error.message);
+				this.blockInput('core.session.vaultUnsupported');
+				// The notice records that this happened, so it is translated once, here, and keeps
+				// that wording. Only the block above is current state and follows the locale.
 				this.state.addNotice(
 					'error',
 					t('core.session.vaultUnsupported'),
@@ -289,7 +299,9 @@ export class SessionManager {
 		if (!this.vaultPathsPromise) {
 			const root = this.resolveVaultPath();
 			if (root === null) {
-				return Promise.reject(new Error(this.blockedReason ?? t('core.session.vaultUnsupportedShort')));
+				return Promise.reject(new Error(
+					this.blockedReason ? t(this.blockedReason) : t('core.session.vaultUnsupportedShort'),
+				));
 			}
 			this.vaultPathsPromise = createVaultPaths(root);
 		}
@@ -406,7 +418,9 @@ export class SessionManager {
 			// The blocked reason, when there is one, is the truthful message: `ensureProcess` also
 			// fails when the *permission server* could not be started, and saying the CLI was the
 			// problem would send the reader looking in the wrong place.
-			next.item.errorText ??= this.blockedReason ?? t('core.session.cliCouldNotStart');
+			next.item.errorText ??= this.blockedReason
+				? t(this.blockedReason)
+				: t('core.session.cliCouldNotStart');
 			this.state.emitChange();
 			return;
 		}
@@ -475,7 +489,7 @@ export class SessionManager {
 					: error instanceof Error
 						? error.message
 						: String(error);
-			this.blockInput(t('core.session.approvalGateCouldNotStart'));
+			this.blockInput('core.session.approvalGateCouldNotStart');
 			this.state.addNotice('error', t('core.session.permissionServerCouldNotStart'), detail);
 			return false;
 		}
@@ -575,7 +589,7 @@ export class SessionManager {
 				? t('core.session.mcpMissing', { server: MCP_SERVER_NAME })
 				: t('core.session.mcpWrongStatus', { server: MCP_SERVER_NAME, status, connected: MCP_CONNECTED });
 
-		this.blockInput(t('core.session.approvalGateNotRunning'));
+		this.blockInput('core.session.approvalGateNotRunning');
 		this.queue.length = 0;
 		this.reducer.failActiveTurn(
 			t('core.session.permissionServerNotConnected'),
@@ -587,8 +601,9 @@ export class SessionManager {
 		);
 	}
 
-	private blockInput(reason: string): void {
-		this.blockedReason = reason;
+	private blockInput(key: BlockedReasonKey): void {
+		// This describes current state: retain the key so every render follows the active locale.
+		this.blockedReason = key;
 		this.state.emitChange();
 	}
 
