@@ -16,3 +16,9 @@ data.json
 /docs/RESEARCH.md
 /docs/NEXT.md
 /docs/archive/
+
+# Orchestration workspace — lane briefs, agent evidence logs and campaign records.
+# Same category as the dev diary above: written for fresh-agent briefs, full of real local
+# paths, and 15MB of logs. Kept on disk (agents read it), never shipped in the public repo.
+/.orchestration/
+/.claude/
