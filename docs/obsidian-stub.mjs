@@ -12,6 +12,13 @@ export class FileSystemAdapter {
 // Nothing in these checks calls it; the stub only has to exist for the bundle to link.
 export const Platform = { isDesktop: true };
 
+// Undefined by default, matching old Obsidian releases. i18n checks can install a reader without
+// changing the behaviour of any existing section that imports this stub.
+export let getLanguage;
+export function setGetLanguageForChecks(reader) {
+	getLanguage = reader;
+}
+
 // Phase 6: `attachment-resolver.ts` checks `instanceof TFile` on whatever Obsidian's drag state
 // hands back, and `instanceof FileSystemAdapter` before it trusts a path. Both have to be real
 // classes here, not shapes, or the guard under test would answer "no" for every input and §O would
@@ -355,4 +362,3 @@ export class Plugin extends Component {
 	registerEvent(eventRef) { super.registerEvent(eventRef); }
 	addCommand() {}
 }
-

@@ -33,8 +33,6 @@ type PathModule = typeof import('path');
 type ProcessModule = typeof import('process');
 type ReadlineModule = typeof import('readline');
 
-const DESKTOP_ONLY = t('core.nodeApi.desktopOnly');
-
 /**
  * Electron exposes Node's `require` on `window` in the renderer. Typed narrowly as
  * `(id: string) => unknown` so the result has to be narrowed by an explicit cast at every call
@@ -50,14 +48,16 @@ function loadNodeModule(id: string): unknown {
 
 export function nodeChildProcess(): Promise<ChildProcessModule> {
 	if (!Platform.isDesktop) {
-		throw new Error(DESKTOP_ONLY);
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		throw new Error(t('core.nodeApi.desktopOnly'));
 	}
 	return Promise.resolve(loadNodeModule('child_process') as ChildProcessModule);
 }
 
 export function nodeFs(): Promise<FsModule> {
 	if (!Platform.isDesktop) {
-		throw new Error(DESKTOP_ONLY);
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		throw new Error(t('core.nodeApi.desktopOnly'));
 	}
 	return Promise.resolve(loadNodeModule('fs') as FsModule);
 }
@@ -69,28 +69,32 @@ export function nodeFs(): Promise<FsModule> {
  */
 export function nodeNet(): Promise<NetModule> {
 	if (!Platform.isDesktop) {
-		throw new Error(DESKTOP_ONLY);
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		throw new Error(t('core.nodeApi.desktopOnly'));
 	}
 	return Promise.resolve(loadNodeModule('net') as NetModule);
 }
 
 export function nodeOs(): Promise<OsModule> {
 	if (!Platform.isDesktop) {
-		throw new Error(DESKTOP_ONLY);
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		throw new Error(t('core.nodeApi.desktopOnly'));
 	}
 	return Promise.resolve(loadNodeModule('os') as OsModule);
 }
 
 export function nodePath(): Promise<PathModule> {
 	if (!Platform.isDesktop) {
-		throw new Error(DESKTOP_ONLY);
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		throw new Error(t('core.nodeApi.desktopOnly'));
 	}
 	return Promise.resolve(loadNodeModule('path') as PathModule);
 }
 
 export function nodeReadline(): Promise<ReadlineModule> {
 	if (!Platform.isDesktop) {
-		throw new Error(DESKTOP_ONLY);
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		throw new Error(t('core.nodeApi.desktopOnly'));
 	}
 	return Promise.resolve(loadNodeModule('readline') as ReadlineModule);
 }
@@ -104,7 +108,8 @@ export function nodeReadline(): Promise<ReadlineModule> {
  */
 export function nodeEnv(): Record<string, string | undefined> {
 	if (!Platform.isDesktop) {
-		throw new Error(DESKTOP_ONLY);
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		throw new Error(t('core.nodeApi.desktopOnly'));
 	}
 	return (loadNodeModule('process') as ProcessModule).env;
 }

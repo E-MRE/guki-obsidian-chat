@@ -146,7 +146,7 @@ import {
 	resolveVaultFile,
 	triageImageFiles,
 } from '../src/core/attachment-resolver';
-import { absolutePathForFile } from '../src/cli/node-api';
+import { absolutePathForFile, nodeFs } from '../src/cli/node-api';
 import { Composer, pasteBelongsToComposer, type ComposerOptions } from '../src/ui/composer';
 import { DEFAULT_SEND_KEY, shouldSend } from '../src/core/send-key';
 import { filterVaultFiles, insertItem, type DropdownItem, type TriggerMatch } from '../src/ui/composer-dropdown';
@@ -174,7 +174,8 @@ import {
 	type HistoryRowItem,
 } from '../src/ui/history-dropdown';
 import { NodeTranscriptStore } from '../src/data/transcript-store';
-import { App, FileSystemAdapter, Setting, TFile, WorkspaceLeaf } from 'obsidian';
+import * as Obsidian from 'obsidian';
+import { App, FileSystemAdapter, Platform, Setting, TFile, WorkspaceLeaf } from 'obsidian';
 import { parseAskUserQuestionInput, decideAskUserQuestion, formatAskUserQuestionSummary, parseAskUserQuestionAnswers } from '../src/core/ask-user-question';
 import { AskUserQuestionInline } from '../src/ui/ask-user-question';
 import { DiskTranscriptLoader, resolveTranscriptBranch } from '../src/data/disk-transcript-loader';
@@ -14893,6 +14894,73 @@ check('AZ3. translator switches locales, interpolates, and preserves missing pla
 
 setLocale('en');
 check('AZ6. locale is restored to English after i18n checks', getLocale() === 'en');
+
+// These producers are imported while English is active. Switching before invoking them proves
+// their translated values are evaluated per call rather than frozen during module evaluation.
+{
+	setLocale('tr');
+	const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+	const pasted = await readImageAttachment({
+		name: 'image.png',
+		type: 'image/png',
+		arrayBuffer: () => Promise.resolve(png.buffer),
+	} as unknown as File);
+	eq('AZ7. pasted-image label follows a live Turkish locale', pasted?.displayName, 'Yapıştırılan görüntü');
+
+	const originalIsDesktop = Platform.isDesktop;
+	let desktopOnlyMessage = '';
+	try {
+		(Platform as { isDesktop: boolean }).isDesktop = false;
+		nodeFs();
+	} catch (error) {
+		desktopOnlyMessage = error instanceof Error ? error.message : String(error);
+	} finally {
+		(Platform as { isDesktop: boolean }).isDesktop = originalIsDesktop;
+	}
+	eq('AZ8. desktop-only detail follows a live Turkish locale', desktopOnlyMessage,
+		'GuKi Chat, Claude Code CLI’ı bir alt işlem olarak çalıştırır; bu yalnızca masaüstünde kullanılabilir.');
+	setLocale('en');
+}
+
+// Drive the production feature-detection door against live namespace bindings from the stub.
+{
+	const languageStub = Obsidian as unknown as {
+		setGetLanguageForChecks: (reader: (() => string) | undefined) => void;
+	};
+	const app = new App();
+	(app.workspace as any).getLeavesOfType = () => [];
+	const plugin = new GukiChatPlugin(app as any, { dir: 'plugins/guki-chat' } as any);
+	plugin.settings = { ...DEFAULT_SETTINGS, language: 'auto' };
+	const applyLanguageSetting = () => (plugin as any).applyLanguageSetting(true) as Promise<void>;
+
+	languageStub.setGetLanguageForChecks(() => 'tr');
+	await applyLanguageSetting();
+	eq('AZ9. auto language selects Turkish through production applyLanguageSetting', getLocale(), 'tr');
+
+	const nonTurkishResults: string[] = [];
+	for (const language of ['en', 'de', 'not-a-language']) {
+		languageStub.setGetLanguageForChecks(() => language);
+		await applyLanguageSetting();
+		nonTurkishResults.push(getLocale());
+	}
+	check('AZ10. auto language defaults English, German, and garbage to English through production applyLanguageSetting',
+		nonTurkishResults.every((locale) => locale === 'en'));
+
+	languageStub.setGetLanguageForChecks(undefined);
+	let absentGetLanguageThrew = false;
+	try {
+		await applyLanguageSetting();
+	} catch {
+		absentGetLanguageThrew = true;
+	}
+	check('AZ11. auto language without getLanguage defaults to English without throwing through production applyLanguageSetting',
+		!absentGetLanguageThrew && getLocale() === 'en');
+
+	languageStub.setGetLanguageForChecks(undefined);
+	setLocale('en');
+}
+
+check('AZ12. locale is English after added i18n coverage', getLocale() === 'en');
 
 // --- BA. i18n production gates ------------------------------------------
 
