@@ -9,11 +9,13 @@ import {
 	type PermissionSettings,
 	type RememberedDecision,
 } from '../core/permission-policy';
+import { DEFAULT_SEND_KEY, type SendKeyMode } from '../core/send-key';
 import type { ConversationTitleMap } from '../data/conversation-titles';
 import type GukiChatPlugin from '../main';
 
 export interface GukiChatSettings extends PermissionSettings {
 	claudeBinaryPath: string;
+	sendKey?: SendKeyMode;
 	slashCommands?: string[];
 	conversationTitles?: ConversationTitleMap;
 	promptHistory?: string[];
@@ -21,6 +23,7 @@ export interface GukiChatSettings extends PermissionSettings {
 
 export const DEFAULT_SETTINGS: GukiChatSettings = {
 	claudeBinaryPath: '',
+	sendKey: DEFAULT_SEND_KEY,
 	slashCommands: [],
 	promptHistory: [],
 	...DEFAULT_PERMISSION_SETTINGS,
@@ -90,6 +93,20 @@ export class GukiSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						const trimmed = value.trim();
 						this.plugin.settings.claudeBinaryPath = trimmed;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Send message with')
+			.setDesc('Cmd/Ctrl+Enter avoids sending by accident when you paste a multi-line note; Enter then inserts a new line.')
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption('enter', 'Enter')
+					.addOption('mod-enter', 'Cmd/Ctrl+Enter')
+					.setValue(this.plugin.settings.sendKey ?? DEFAULT_SEND_KEY)
+					.onChange(async (value) => {
+						this.plugin.settings.sendKey = value as SendKeyMode;
 						await this.plugin.saveSettings();
 					}),
 			);

@@ -22,6 +22,7 @@ import { formatModelName } from '../cli/events';
 import { decideAskUserQuestion } from '../core/ask-user-question';
 import type { SessionManager } from '../core/session-manager';
 import { Composer, type ComposerStatus } from './composer';
+import type { SendKeyMode } from '../core/send-key';
 import { HistoryDropdown } from './history-dropdown';
 import { NodeTranscriptStore, type SessionPage, type TranscriptStore } from '../data/transcript-store';
 import type { ConversationTitleStore } from '../data/conversation-titles';
@@ -72,6 +73,7 @@ export class ChatView extends ItemView {
 		transcriptStore?: TranscriptStore,
 		conversationTitles?: ConversationTitleStore,
 		promptHistory?: PromptHistoryStore,
+		private readonly getSendKey?: () => SendKeyMode,
 	) {
 		super(leaf);
 		this.titleStore = conversationTitles;
@@ -242,6 +244,7 @@ export class ChatView extends ItemView {
 			getSlashCommands: () => this.session.getSlashCommands(),
 			getVaultPaths: () => this.session.vaultPaths(),
 			getPromptHistory: () => this.promptHistory?.list() ?? [],
+			getSendKey: () => this.getSendKey?.() ?? 'enter',
 			onPromptRecorded: (text: string) => {
 				void this.promptHistory?.record(text);
 			},
@@ -360,6 +363,10 @@ export class ChatView extends ItemView {
 
 		this.attachTurnEndHandler();
 		this.updateHeader();
+	}
+
+	refreshComposerPlaceholder(): void {
+		this.composer?.refreshPlaceholder();
 	}
 
 	protected async onClose(): Promise<void> {

@@ -2,8 +2,8 @@
  * The composer: attachment chips above a full-height textarea, with a bottom toolbar overlaid on
  * top of it — the two attach controls, the live status line, and Send.
  *
- * Enter sends, Shift+Enter inserts a newline, and that is the only key behaviour there is — no
- * other shortcut, by closed decision #3. The chat is not a terminal.
+ * The selected send-key preference decides which Enter combinations submit; non-submitting ones
+ * insert a newline. The chat is not a terminal.
  *
  * The composer stays presentational about attachments: it holds the chips and renders them, but it
  * never resolves a path or decides whether a file may be attached. It hands the drop, the paste,
@@ -29,6 +29,7 @@ import {
 	type PermissionActions,
 } from './permission-card';
 import type { PermissionItem } from '../core/chat-state';
+import { DEFAULT_SEND_KEY, shouldSend, type SendKeyMode } from '../core/send-key';
 
 /**
  * The live status line's data. Every field `null` means "not known yet" — before the first
@@ -85,9 +86,12 @@ export interface ComposerOptions {
 	getPromptHistory?(): readonly string[];
 	/** Records a successfully submitted, trimmed prompt. */
 	onPromptRecorded?(text: string): void;
+	/** Current send-key preference, supplied by the view so the DOM layer owns no persistence. */
+	getSendKey?(): SendKeyMode;
 }
 
 const DEFAULT_PLACEHOLDER = 'Message GuKi… (Enter to send, Shift+Enter for a new line)';
+const MOD_ENTER_PLACEHOLDER = 'Message GuKi… (Cmd/Ctrl+Enter to send, Enter for a new line)';
 
 /**
  * Whether a `paste` dispatched anywhere in the document belongs to this composer.
@@ -244,7 +248,7 @@ export class Composer {
 			cls: 'guki-composer-input',
 			attr: {
 				rows: '3',
-				placeholder: DEFAULT_PLACEHOLDER,
+				placeholder: this.placeholderText(),
 			},
 		});
 
@@ -385,13 +389,16 @@ export class Composer {
 				return;
 			}
 
-			if (event.key !== 'Enter' || event.shiftKey) {
+			if (event.key !== 'Enter') {
 				return;
 			}
-			event.preventDefault();
-			// Enter always sends, even mid-turn: the message queues behind the running one. Only
-			// the button stops, so a stray Enter can never throw away a reply in progress.
-			this.submit();
+			if (shouldSend(this.options.getSendKey?.() ?? DEFAULT_SEND_KEY, event)) {
+				event.preventDefault();
+				// Enter always sends, even mid-turn: the message queues behind the running one. Only
+				// the button stops, so a stray Enter can never throw away a reply in progress.
+				this.submit();
+			}
+			return;
 		});
 
 		// Typing past the `rows="3"` starting height grows the box, exactly as attaching a file
@@ -829,8 +836,20 @@ export class Composer {
 		// same mistake as letting text be typed.
 		this.attachEl.disabled = isBlocked;
 		this.pickEl.disabled = isBlocked;
-		this.inputEl.placeholder = reason ?? DEFAULT_PLACEHOLDER;
+		this.inputEl.placeholder = reason ?? this.placeholderText();
 		this.actionEl.toggleClass('guki-composer-blocked', isBlocked);
+	}
+
+	refreshPlaceholder(): void {
+		if (this.blocked === null) {
+			this.inputEl.placeholder = this.placeholderText();
+		}
+	}
+
+	private placeholderText(): string {
+		return (this.options.getSendKey?.() ?? DEFAULT_SEND_KEY) === 'mod-enter'
+			? MOD_ENTER_PLACEHOLDER
+			: DEFAULT_PLACEHOLDER;
 	}
 
 	private submit(): void {
