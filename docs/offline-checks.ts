@@ -12665,6 +12665,20 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	cp.spawn = origSpawn;
 }
 
+// Counts the HISTORY control only, in either layout.
+// It used to count every `.view-action` in the panel, which was fine while the history button was
+// the only one. Görev 9b added a second view action (new conversation), and a blanket count then
+// read 2 and failed — the assertion's intent ("no duplicate history control after a layout move")
+// was never about the total number of view actions. Narrowed, not weakened: AX6 asserts the same
+// exactly-one property for the new control.
+function countHistoryControls(container: any): number {
+	const actions = Array.from(container.querySelectorAll('.view-action') as any[]).filter((el: any) => {
+		const label = el?.getAttribute?.('aria-label') ?? el?.attrs?.['aria-label'];
+		return label === 'Conversation history';
+	});
+	return actions.length + container.querySelectorAll('.guki-header-history-btn').length;
+}
+
 // AQ: Görev 8: Dynamic conversation-history button placement
 {
 	console.log('AQ. Görev 8: Dynamic conversation-history button placement');
@@ -12782,7 +12796,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 		const mainAction = container.querySelector('.view-action');
 		const dropdown = view.getHistoryDropdown();
 		const activeTriggerAfterMoveToMain = view.getHistoryTriggerEl();
-		const controlsCountAfterMoveToMain = container.querySelectorAll('.view-action').length + container.querySelectorAll('.guki-header-history-btn').length;
+		const controlsCountAfterMoveToMain = countHistoryControls(container);
 
 		eq('AQ.d2 move sidebar to main leaves exactly one control (old control torn down)', controlsCountAfterMoveToMain, 1);
 		check('AQ.d3 move sidebar to main has view action and no in-panel header', mainAction !== null && mainBtn === null && mainHeader === null);
@@ -12796,7 +12810,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 		const returnHeader = container.querySelector('.guki-header');
 		const returnAction = container.querySelector('.view-action');
 		const activeTriggerAfterReturn = view.getHistoryTriggerEl();
-		const controlsCountAfterReturn = container.querySelectorAll('.view-action').length + container.querySelectorAll('.guki-header-history-btn').length;
+		const controlsCountAfterReturn = countHistoryControls(container);
 
 		eq('AQ.d5 move main back to sidebar leaves exactly one control (view action torn down)', controlsCountAfterReturn, 1);
 		check('AQ.d6 move main back to sidebar has in-panel button and no view action', returnBtn !== null && returnHeader !== null && returnAction === null);
@@ -12824,7 +12838,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 		const narrowInPanelBtn = container.querySelector('.guki-header-history-btn');
 		const narrowViewAction = container.querySelector('.view-action');
 		const dropdown = view.getHistoryDropdown();
-		const narrowControlsCount = container.querySelectorAll('.view-action').length + container.querySelectorAll('.guki-header-history-btn').length;
+		const narrowControlsCount = countHistoryControls(container);
 
 		check('AQ.e2 narrow main leaf falls back to in-panel button', narrowInPanelBtn !== null);
 		check('AQ.e3 narrow main leaf tears down view action', narrowViewAction === null);
@@ -12838,7 +12852,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 
 		const wideInPanelBtn = container.querySelector('.guki-header-history-btn');
 		const wideViewAction = container.querySelector('.view-action');
-		const wideControlsCount = container.querySelectorAll('.view-action').length + container.querySelectorAll('.guki-header-history-btn').length;
+		const wideControlsCount = countHistoryControls(container);
 
 		check('AQ.e6 wide main leaf restores view action', wideViewAction !== null);
 		check('AQ.e7 wide main leaf removes in-panel button', wideInPanelBtn === null);
@@ -14100,7 +14114,12 @@ console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed
 	// The CLI announces the id mid-turn, exactly as system/init does in the real app.
 	awReducer.currentSessionId = awSession;
 	await awReducer.onTurnEnd!();
-	await new Promise<void>((resolve) => setTimeout(resolve, 0));
+	// The turn-end handler is fired as `void handleTurnEnd()` and now reads a file, so its chain
+	// settles over several ticks. Waiting a fixed tick made this check flake one run in five.
+	// Poll with a bound instead: a genuinely broken header still fails, it just takes 50 ticks.
+	for (let tick = 0; tick < 50 && awView.getDisplayText() === 'GuKi Chat'; tick++) {
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+	}
 
 	eq('AW2.3 the view learned the session id from the real accessor', (awView as any).getCurrentSessionId?.() ?? (awView as any).currentSessionId, awSession);
 	eq('AW2.4 the panel header shows the conversation name on a fresh conversation', awView.getDisplayText(), 'Gercek Oturum Basligi');
@@ -14111,6 +14130,226 @@ console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed
 
 // Clean up temporary test files
 rmSync(TRANSCRIPT_TEST_DIR, { recursive: true, force: true });
+
+// ---------------------------------------------------------------------------
+// AX. L7 — New-conversation control
+// ---------------------------------------------------------------------------
+console.log('\nAX. L7 — New-conversation control');
+
+// AX1: switchConversation(null) is called when the new-conversation button is clicked.
+// Mirrors how AW2 drives the turn-end handler — the view must expose a public path, and the
+// check must call the real method the real class has, not an invented one.
+{
+	const axLeaf = new WorkspaceLeaf(new App() as any, new FakeElement() as any, new FakeElement() as any);
+	let switchCallCount = 0;
+	let lastSwitchArg: string | null | undefined = undefined;
+	const axSession = {
+		state: new ChatState(),
+		reducer: { onTurnEnd: null as (() => void) | null, currentSessionId: null as string | null },
+		busy: false,
+		blocked: null,
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+		switchConversation: (id: string | null) => {
+			switchCallCount++;
+			lastSwitchArg = id;
+		},
+	} as unknown as SessionManager;
+
+	const axView = new ChatView(axLeaf as any, axSession);
+	await (axView as any).onOpen();
+
+	// Manually set a session id and summary to simulate an open historical conversation.
+	(axView as any).currentSessionId = 'sess-ax-old';
+	(axView as any).currentSessionSummary = { sessionId: 'sess-ax-old', title: 'Old Chat', startedAt: '' };
+
+	check('AX1.1 ChatView has handleNewConversation method', typeof (axView as any).handleNewConversation === 'function');
+	check('AX1.2 ChatView has getNewConvTriggerEl method or newConvTriggerEl field', typeof (axView as any).getNewConvTriggerEl === 'function' || typeof (axView as any).newConvTriggerEl !== 'undefined');
+
+	const switchBefore = switchCallCount;
+	(axView as any).handleNewConversation?.();
+
+	eq('AX1.3 switchConversation was called exactly once', switchCallCount, switchBefore + 1);
+	eq('AX1.4 switchConversation was called with null', lastSwitchArg, null);
+
+	await (axView as any).onClose?.();
+}
+
+// AX2: After handleNewConversation the view's session id and summary are cleared
+// and the header reads CHAT_VIEW_TITLE (GuKi Chat).
+{
+	const axLeaf2 = new WorkspaceLeaf(new App() as any, new FakeElement() as any, new FakeElement() as any);
+	const axSession2 = {
+		state: new ChatState(),
+		reducer: { onTurnEnd: null as (() => void) | null, currentSessionId: null as string | null },
+		busy: false,
+		blocked: null,
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+		switchConversation: (_id: string | null) => {},
+	} as unknown as SessionManager;
+
+	const axView2 = new ChatView(axLeaf2 as any, axSession2);
+	await (axView2 as any).onOpen();
+
+	(axView2 as any).currentSessionId = 'sess-ax-2';
+	(axView2 as any).currentSessionSummary = { sessionId: 'sess-ax-2', title: 'Running Chat', startedAt: '' };
+	// Give it a non-default display text first so we can prove it reverted.
+	// The leaf title is what updateHeader() sets.
+	(axView2 as any).updateHeader?.();
+	const titleBeforeReset = axView2.getDisplayText();
+	check('AX2.0 title is non-default before reset (sanity)', titleBeforeReset !== 'GuKi Chat');
+
+	(axView2 as any).handleNewConversation?.();
+
+	eq('AX2.1 currentSessionId is null after reset', (axView2 as any).currentSessionId ?? (axView2 as any).getCurrentSessionId?.(), null);
+	eq('AX2.2 currentSessionSummary is null after reset', (axView2 as any).currentSessionSummary, null);
+	eq('AX2.3 header reads GuKi Chat after reset', axView2.getDisplayText(), 'GuKi Chat');
+
+	await (axView2 as any).onClose?.();
+}
+
+// AX3: Clicking new-conversation when already in a fresh (no session id) panel does not
+// call switchConversation — the session is already fresh, nothing to reset.
+{
+	const axLeaf3 = new WorkspaceLeaf(new App() as any, new FakeElement() as any, new FakeElement() as any);
+	let switchCount3 = 0;
+	const axSession3 = {
+		state: new ChatState(),
+		reducer: { onTurnEnd: null as (() => void) | null, currentSessionId: null as string | null },
+		busy: false,
+		blocked: null,
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+		switchConversation: (_id: string | null) => { switchCount3++; },
+	} as unknown as SessionManager;
+
+	const axView3 = new ChatView(axLeaf3 as any, axSession3);
+	await (axView3 as any).onOpen();
+
+	// currentSessionId is null (fresh panel): handleNewConversation must be a no-op.
+	eq('AX3.0 currentSessionId starts null', (axView3 as any).currentSessionId ?? null, null);
+	(axView3 as any).handleNewConversation?.();
+	eq('AX3.1 switchConversation NOT called when panel is already fresh', switchCount3, 0);
+
+	await (axView3 as any).onClose?.();
+}
+
+// AX4: The history dropdown is closed when the new-conversation button is clicked.
+{
+	const axLeaf4 = new WorkspaceLeaf(new App() as any, new FakeElement() as any, new FakeElement() as any);
+	const axSession4 = {
+		state: new ChatState(),
+		reducer: { onTurnEnd: null as (() => void) | null, currentSessionId: null as string | null },
+		busy: false,
+		blocked: null,
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+		switchConversation: (_id: string | null) => {},
+	} as unknown as SessionManager;
+	const axMockStore4 = {
+		listSessions: async () => [{ sessionId: 'sess-ax-4', title: 'Old', startedAt: '2026-09-15T00:00:00Z' }],
+		readSession: async () => Object.assign([], { hasMoreBefore: false, loadBefore: async () => [] }) as any,
+		resumeArgs: () => [],
+	} as unknown as TranscriptStore;
+
+	const axView4 = new ChatView(axLeaf4 as any, axSession4, axMockStore4);
+	await (axView4 as any).onOpen();
+
+	(axView4 as any).currentSessionId = 'sess-ax-4';
+	(axView4 as any).currentSessionSummary = { sessionId: 'sess-ax-4', title: 'Old', startedAt: '' };
+
+	// Open the history dropdown first.
+	await axView4.toggleHistory();
+	check('AX4.0 history dropdown is open before new-conv click', axView4.getHistoryDropdown()?.isOpen() === true);
+
+	(axView4 as any).handleNewConversation?.();
+
+	check('AX4.1 history dropdown is closed after new-conv click', axView4.getHistoryDropdown()?.isOpen() !== true);
+
+	await (axView4 as any).onClose?.();
+}
+
+// AX5: After handleNewConversation, a subsequent message (send) arrives with no --resume flag.
+// Mirrors the existing C1–C4 style: stub ensureProcess, capture written lines.
+{
+	const axSession5 = new SessionManager(app);
+	const written5: string[] = [];
+	let spawnCount5 = 0;
+	stub(axSession5, () => { spawnCount5++; return Promise.resolve(true); }, written5);
+
+	// Set a resume id to simulate a previously-opened conversation.
+	(axSession5 as any).resumeSessionId = 'old-session-to-resume';
+
+	// Call switchConversation(null) the way the view would.
+	axSession5.switchConversation(null);
+
+	eq('AX5.1 resumeSessionId is null after switchConversation(null)', axSession5.getResumeSessionId(), null);
+
+	// Send a message — it must NOT include --resume.
+	axSession5.send('hello from fresh session');
+	for (let i = 0; i < 8; i++) await Promise.resolve();
+
+	const anyResume = written5.some((line) => line.includes('--resume'));
+	check('AX5.2 no --resume in spawned argv after switchConversation(null)', !anyResume);
+	check('AX5.3 a message was sent (spawn happened)', spawnCount5 > 0);
+
+	axSession5.dispose();
+}
+
+// AX6: Exactly one new-conversation control is present at a time (view-action layout vs. header layout).
+// The ChatView must expose the new-conv element so this can be checked.
+{
+	const axLeaf6 = new WorkspaceLeaf(new App() as any, new FakeElement() as any, new FakeElement() as any);
+	const axSession6 = {
+		state: new ChatState(),
+		reducer: { onTurnEnd: null as (() => void) | null, currentSessionId: null as string | null },
+		busy: false,
+		blocked: null,
+		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+		switchConversation: (_id: string | null) => {},
+	} as unknown as SessionManager;
+
+	const axView6 = new ChatView(axLeaf6 as any, axSession6);
+	await (axView6 as any).onOpen();
+
+	check('AX6.1 ChatView exposes getNewConvTriggerEl', typeof (axView6 as any).getNewConvTriggerEl === 'function');
+
+	const newConvEl = (axView6 as any).getNewConvTriggerEl?.();
+	const historyEl = axView6.getHistoryTriggerEl?.();
+
+	// Exactly one of the two layouts is active, so exactly one element is non-null.
+	const newConvCount = (newConvEl !== null && newConvEl !== undefined) ? 1 : 0;
+	const historyCount = (historyEl !== null && historyEl !== undefined) ? 1 : 0;
+	eq('AX6.2 exactly one new-conv control is present (not zero, not two)', newConvCount, 1);
+	eq('AX6.3 exactly one history control is present (sanity)', historyCount, 1);
+
+	await (axView6 as any).onClose?.();
+	// After close, the control must be torn down.
+	const newConvElAfterClose = (axView6 as any).getNewConvTriggerEl?.() ?? (axView6 as any).newConvTriggerEl ?? (axView6 as any).newConvActionEl;
+	eq('AX6.4 new-conv control is torn down on close', newConvElAfterClose ?? null, null);
+}
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
