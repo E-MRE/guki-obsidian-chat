@@ -25,6 +25,7 @@ import { Composer, type ComposerStatus } from './composer';
 import { HistoryDropdown } from './history-dropdown';
 import { NodeTranscriptStore, type SessionPage, type TranscriptStore } from '../data/transcript-store';
 import type { ConversationTitleStore } from '../data/conversation-titles';
+import type { PromptHistoryStore } from '../data/prompt-history';
 import { panelTitleFor, type SessionSummary } from '../data/session-index';
 import { MessageList } from './message-list';
 
@@ -47,6 +48,7 @@ export class ChatView extends ItemView {
 	private historyDropdown: HistoryDropdown | null = null;
 	private transcriptStore: TranscriptStore;
 	private titleStore?: ConversationTitleStore;
+	private promptHistory?: PromptHistoryStore;
 	private unsubscribe: (() => void) | null = null;
 	private currentSessionId: string | null = null;
 	private currentSessionSummary: SessionSummary | null = null;
@@ -69,9 +71,11 @@ export class ChatView extends ItemView {
 		private readonly session: SessionManager,
 		transcriptStore?: TranscriptStore,
 		conversationTitles?: ConversationTitleStore,
+		promptHistory?: PromptHistoryStore,
 	) {
 		super(leaf);
 		this.titleStore = conversationTitles;
+		this.promptHistory = promptHistory;
 		this.transcriptStore = transcriptStore ?? new NodeTranscriptStore(undefined, conversationTitles);
 		if (this.leaf && !(this.leaf as any).view) {
 			(this.leaf as any).view = this;
@@ -237,6 +241,10 @@ export class ChatView extends ItemView {
 			app: this.app,
 			getSlashCommands: () => this.session.getSlashCommands(),
 			getVaultPaths: () => this.session.vaultPaths(),
+			getPromptHistory: () => this.promptHistory?.list() ?? [],
+			onPromptRecorded: (text: string) => {
+				void this.promptHistory?.record(text);
+			},
 			onSubmit: (text: string, attachments: readonly Attachment[]) => {
 				this.session.send(text, attachments);
 				return true;
