@@ -14653,17 +14653,23 @@ console.log('\nAY. Görev 13 — Send message with preference');
 		const app = new App();
 		const container = new FakeElement() as any;
 		const leaf = new WorkspaceLeaf(app, container);
+		const plugin = new GukiChatPlugin(app as any, { dir: 'plugins/guki-chat' } as any);
+		plugin.settings = { ...plugin.settings, sendKey: 'mod-enter' };
 		const session = {
 			state: new ChatState(),
 			busy: false,
 			blocked: null,
-			vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+			vaultPaths: async () => ({
+				root: '/fake/vault',
+				resolve: (raw: string) => raw,
+				isInside: () => true,
+			}),
 			getSlashCommands: () => [],
 			send: () => { submitted++; },
 			interrupt: () => {},
 			decidePermission: () => {},
 		} as unknown as SessionManager;
-		const view = new ChatView(leaf, session, undefined, undefined, undefined, () => 'mod-enter');
+		const view = plugin.createChatViewFactory(session)(leaf);
 		await (view as any).onOpen();
 		const input = required(container.querySelector('textarea'), 'AY6.1 ChatView composer textarea');
 		const keydown = (metaKey: boolean) => {
@@ -14693,20 +14699,17 @@ console.log('\nAY. Görev 13 — Send message with preference');
 			state: new ChatState(),
 			busy: false,
 			blocked: null,
-			vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+			vaultPaths: async () => ({
+				root: '/fake/vault',
+				resolve: (raw: string) => raw,
+				isInside: () => true,
+			}),
 			getSlashCommands: () => [],
 			send: () => {},
 			interrupt: () => {},
 			decidePermission: () => {},
 		} as unknown as SessionManager;
-		const view = new ChatView(
-			leaf,
-			session,
-			undefined,
-			undefined,
-			undefined,
-			() => plugin.settings.sendKey ?? DEFAULT_SEND_KEY,
-		);
+		const view = plugin.createChatViewFactory(session)(leaf);
 		await (view as any).onOpen();
 		const input = required(container.querySelector('textarea'), 'AY6.2 open ChatView composer textarea');
 		const before = placeholder(input);

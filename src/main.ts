@@ -67,14 +67,10 @@ export default class GukiChatPlugin extends Plugin {
 
 		this.addSettingTab(new GukiSettingTab(this.app, this));
 
-		this.registerView(VIEW_TYPE_GUKI_CHAT, (leaf) => new ChatView(
-			leaf,
-			session,
-			undefined,
-			titleStore,
-			promptHistory,
-			() => this.settings.sendKey ?? DEFAULT_SEND_KEY,
-		));
+		this.registerView(
+			VIEW_TYPE_GUKI_CHAT,
+			this.createChatViewFactory(session, titleStore, promptHistory),
+		);
 
 		this.addRibbonIcon(CHAT_VIEW_ICON, CHAT_VIEW_TITLE, () => {
 			void this.activateView();
@@ -102,6 +98,21 @@ export default class GukiChatPlugin extends Plugin {
 		this.app.workspace.onLayoutReady(() => {
 			void this.activateView();
 		});
+	}
+
+	createChatViewFactory(
+		session: SessionManager,
+		titleStore?: ConversationTitleStore,
+		promptHistory?: PromptHistoryStore,
+	): (leaf: WorkspaceLeaf) => ChatView {
+		return (leaf) => new ChatView(
+			leaf,
+			session,
+			undefined,
+			titleStore,
+			promptHistory,
+			() => this.settings.sendKey ?? DEFAULT_SEND_KEY,
+		);
 	}
 
 	onunload(): void {
