@@ -14646,8 +14646,77 @@ console.log('\nAY. Görev 13 — Send message with preference');
 		const value = placeholder(fixture.input);
 		check('AY5.4 unblocking mod-enter restores mod-enter placeholder', value.includes('Cmd/Ctrl+Enter to send') && !value.includes('(Enter to send'));
 	}
+
+	// AY6: the preference travels through the view factory and refreshes existing views.
+	{
+		let submitted = 0;
+		const app = new App();
+		const container = new FakeElement() as any;
+		const leaf = new WorkspaceLeaf(app, container);
+		const session = {
+			state: new ChatState(),
+			busy: false,
+			blocked: null,
+			vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+			getSlashCommands: () => [],
+			send: () => { submitted++; },
+			interrupt: () => {},
+			decidePermission: () => {},
+		} as unknown as SessionManager;
+		const view = new ChatView(leaf, session, undefined, undefined, undefined, () => 'mod-enter');
+		await (view as any).onOpen();
+		const input = required(container.querySelector('textarea'), 'AY6.1 ChatView composer textarea');
+		const keydown = (metaKey: boolean) => {
+			let defaultPrevented = false;
+			input.listeners['keydown']?.({
+				key: 'Enter', shiftKey: false, metaKey, ctrlKey: false, isComposing: false,
+				preventDefault: () => { defaultPrevented = true; },
+			});
+			return defaultPrevented;
+		};
+		input.value = 'plain Enter';
+		const plainPrevented = keydown(false);
+		input.value = 'Cmd Enter';
+		const commandPrevented = keydown(true);
+		check('AY6.1 ChatView passes its mod-enter preference to the real Composer',
+			submitted === 1 && !plainPrevented && commandPrevented && placeholder(input).includes('Cmd/Ctrl+Enter to send'));
+		await (view as any).onClose();
+	}
+	{
+		const app = new App();
+		const container = new FakeElement() as any;
+		const leaf = new WorkspaceLeaf(app, container);
+		(app.workspace as any).getLeavesOfType = (type: string) => type === 'guki-chat-view' ? [leaf] : [];
+		const plugin = new GukiChatPlugin(app as any, { dir: 'plugins/guki-chat' } as any);
+		plugin.saveData = async () => {};
+		const session = {
+			state: new ChatState(),
+			busy: false,
+			blocked: null,
+			vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
+			getSlashCommands: () => [],
+			send: () => {},
+			interrupt: () => {},
+			decidePermission: () => {},
+		} as unknown as SessionManager;
+		const view = new ChatView(
+			leaf,
+			session,
+			undefined,
+			undefined,
+			undefined,
+			() => plugin.settings.sendKey ?? DEFAULT_SEND_KEY,
+		);
+		await (view as any).onOpen();
+		const input = required(container.querySelector('textarea'), 'AY6.2 open ChatView composer textarea');
+		const before = placeholder(input);
+		plugin.settings = { ...plugin.settings, sendKey: 'mod-enter' };
+		await plugin.saveSettings();
+		check('AY6.2 saveSettings refreshes an open real ChatView composer placeholder',
+			before.includes('Enter to send') && placeholder(input).includes('Cmd/Ctrl+Enter to send'));
+		await (view as any).onClose();
+	}
 }
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
-

@@ -2,8 +2,8 @@
  * The composer: attachment chips above a full-height textarea, with a bottom toolbar overlaid on
  * top of it — the two attach controls, the live status line, and Send.
  *
- * Enter sends, Shift+Enter inserts a newline, and that is the only key behaviour there is — no
- * other shortcut, by closed decision #3. The chat is not a terminal.
+ * The selected send-key preference decides which Enter combinations submit; non-submitting ones
+ * insert a newline. The chat is not a terminal.
  *
  * The composer stays presentational about attachments: it holds the chips and renders them, but it
  * never resolves a path or decides whether a file may be attached. It hands the drop, the paste,

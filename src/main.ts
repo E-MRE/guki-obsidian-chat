@@ -130,7 +130,7 @@ export default class GukiChatPlugin extends Plugin {
 		};
 	}
 
-	/** Called by the settings tab on every change; takes effect on the next session start. */
+	/** Called by the settings tab on every change; the open composer placeholder updates immediately. */
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
 		this.session?.setClaudeBinaryOverride(this.settings.claudeBinaryPath);
