@@ -4,6 +4,7 @@ import { SessionManager } from './core/session-manager';
 import { normalizePermissionSettings } from './core/permission-policy';
 import { ConversationTitleStore } from './data/conversation-titles';
 import { PromptHistoryStore } from './data/prompt-history';
+import { DEFAULT_SEND_KEY } from './core/send-key';
 import { ChatView } from './ui/chat-view';
 import { DEFAULT_SETTINGS, GukiSettingTab, type GukiChatSettings } from './ui/settings-tab';
 
@@ -66,7 +67,14 @@ export default class GukiChatPlugin extends Plugin {
 
 		this.addSettingTab(new GukiSettingTab(this.app, this));
 
-		this.registerView(VIEW_TYPE_GUKI_CHAT, (leaf) => new ChatView(leaf, session, undefined, titleStore, promptHistory));
+		this.registerView(VIEW_TYPE_GUKI_CHAT, (leaf) => new ChatView(
+			leaf,
+			session,
+			undefined,
+			titleStore,
+			promptHistory,
+			() => this.settings.sendKey ?? DEFAULT_SEND_KEY,
+		));
 
 		this.addRibbonIcon(CHAT_VIEW_ICON, CHAT_VIEW_TITLE, () => {
 			void this.activateView();
@@ -118,6 +126,7 @@ export default class GukiChatPlugin extends Plugin {
 			conversationTitles: typeof data?.conversationTitles === 'object' && data?.conversationTitles !== null && !Array.isArray(data?.conversationTitles)
 				? data.conversationTitles
 				: {},
+			sendKey: data?.sendKey === 'mod-enter' ? 'mod-enter' : DEFAULT_SEND_KEY,
 		};
 	}
 
@@ -126,6 +135,11 @@ export default class GukiChatPlugin extends Plugin {
 		await this.saveData(this.settings);
 		this.session?.setClaudeBinaryOverride(this.settings.claudeBinaryPath);
 		this.session?.setPermissionSettings(this.settings);
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_GUKI_CHAT)) {
+			if (leaf.view instanceof ChatView) {
+				leaf.view.refreshComposerPlaceholder();
+			}
+		}
 	}
 
 	// No onunload leaf teardown on purpose: unregistering the view type is enough for
