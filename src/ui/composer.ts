@@ -81,6 +81,10 @@ export interface ComposerOptions {
 	getSlashCommands?(): readonly string[];
 	/** Current vault paths resolver, used to verify mention boundary conditions. */
 	getVaultPaths?(): Promise<import('../core/permission-policy').VaultPaths> | import('../core/permission-policy').VaultPaths | null;
+	/** Persistent prompts, oldest first, supplied by the view rather than the DOM layer. */
+	getPromptHistory?(): readonly string[];
+	/** Records a successfully submitted, trimmed prompt. */
+	onPromptRecorded?(text: string): void;
 }
 
 const DEFAULT_PLACEHOLDER = 'Message GuKi… (Enter to send, Shift+Enter for a new line)';
@@ -192,6 +196,8 @@ export class Composer {
 	private permissionCardSlot: RenderedPermissionCard | null = null;
 	private currentPermissionRequestId: string | null = null;
 	private readonly dropdown: ComposerDropdown;
+	/** The recalled entry currently shown in the textarea, or null outside history navigation. */
+	private promptHistoryIndex: number | null = null;
 
 	constructor(
 		containerEl: HTMLElement,
@@ -337,6 +343,48 @@ export class Composer {
 				}
 			}
 
+			if (this.promptHistoryIndex !== null) {
+				if (
+					event.key === 'ArrowUp' &&
+					// ponytail: this uses logical lines, so a very long soft-wrapped single line can look lower
+					// while still counting as the last line; measuring textarea visual rows needs hacks, so only
+					// upgrade this if that need is measured.
+					this.inputEl.value.lastIndexOf('\n', this.inputEl.selectionStart - 1) === -1
+				) {
+					event.preventDefault();
+					this.recallPromptHistory(Math.max(0, this.promptHistoryIndex - 1));
+					return;
+				}
+				if (
+					event.key === 'ArrowDown' &&
+					this.inputEl.value.indexOf('\n', this.inputEl.selectionStart) === -1
+				) {
+					event.preventDefault();
+					const history = this.options.getPromptHistory?.() ?? [];
+					if (this.promptHistoryIndex >= history.length - 1) {
+						this.inputEl.value = '';
+						this.inputEl.setSelectionRange(0, 0);
+						this.promptHistoryIndex = null;
+						this.autoGrow();
+					} else {
+						this.recallPromptHistory(this.promptHistoryIndex + 1);
+					}
+					return;
+				}
+			}
+
+			const history = this.options.getPromptHistory?.() ?? [];
+			if (
+				event.key === 'ArrowUp' &&
+				this.promptHistoryIndex === null &&
+				this.inputEl.value.length === 0 &&
+				history.length > 0
+			) {
+				event.preventDefault();
+				this.recallPromptHistory(history.length - 1);
+				return;
+			}
+
 			if (event.key !== 'Enter' || event.shiftKey) {
 				return;
 			}
@@ -352,6 +400,7 @@ export class Composer {
 		// this only ever measures and sets `height`, so `resize: none` still holds and the
 		// reader gets no drag handle.
 		component.registerDomEvent(this.inputEl, 'input', () => {
+			this.promptHistoryIndex = null;
 			this.autoGrow();
 			this.dropdown.onInput();
 		});
@@ -791,12 +840,28 @@ export class Composer {
 		if (!hasSendableContent(text, this.attachments) || this.blocked !== null) {
 			return;
 		}
-		if (this.options.onSubmit(text.trim(), this.attachments)) {
+		const trimmedText = text.trim();
+		if (this.options.onSubmit(trimmedText, this.attachments)) {
+			this.options.onPromptRecorded?.(trimmedText);
+			this.promptHistoryIndex = null;
 			this.inputEl.value = '';
 			this.autoGrow();
 			this.attachments = [];
 			this.renderChips();
 		}
+	}
+
+	private recallPromptHistory(index: number): void {
+		const history = this.options.getPromptHistory?.() ?? [];
+		const text = history[index];
+		if (text === undefined) {
+			this.promptHistoryIndex = null;
+			return;
+		}
+		this.inputEl.value = text;
+		this.inputEl.setSelectionRange(text.length, text.length);
+		this.promptHistoryIndex = index;
+		this.autoGrow();
 	}
 
 	focus(): void {
