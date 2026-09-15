@@ -1,6 +1,7 @@
 import { Component } from 'obsidian';
 import type { PermissionItem } from '../core/chat-state';
 import { type AskQuestionDef, parseAskUserQuestionInput } from '../core/ask-user-question';
+import { t } from '../i18n';
 
 
 
@@ -87,7 +88,7 @@ export class AskUserQuestionInline {
 			if (isAnswered) {
 				tab.addClass('guki-ask-answered');
 			}
-			tab.setText(q.header || `Q${i + 1}`);
+			tab.setText(q.header || t('transcript.ask.tab', { number: i + 1 }));
 			
 			tab.addEventListener('click', () => {
 				this.currentTabIndex = i;
@@ -113,8 +114,8 @@ export class AskUserQuestionInline {
 		this.contentEl.empty();
 		
 		if (this.isMalformed) {
-			this.contentEl.createDiv({ cls: 'guki-ask-question', text: 'This question from the assistant could not be read.' });
-			const denyBtn = this.contentEl.createEl('button', { text: 'Deny' });
+			this.contentEl.createDiv({ cls: 'guki-ask-question', text: t('transcript.ask.malformed') });
+			const denyBtn = this.contentEl.createEl('button', { text: t('transcript.ask.deny') });
 			denyBtn.addEventListener('click', () => this.onDecide(null));
 			return;
 		}
@@ -147,7 +148,10 @@ export class AskUserQuestionInline {
 				
 				itemEl.createSpan({ text: opt.label });
 				if (opt.description) {
-					itemEl.createSpan({ cls: 'guki-ask-description', text: ` - ${opt.description}` });
+					itemEl.createSpan({
+						cls: 'guki-ask-description',
+						text: t('transcript.ask.optionDescription', { description: opt.description }),
+					});
 				}
 				
 				const currentIndex = optionIndex;
@@ -178,7 +182,7 @@ export class AskUserQuestionInline {
 		const inputEl = otherEl.createEl('input', {
 			attr: {
 				type: 'text',
-				placeholder: 'Other…'
+				placeholder: t('transcript.ask.otherPlaceholder')
 			}
 		});
 		inputEl.value = currentText;
@@ -243,7 +247,7 @@ export class AskUserQuestionInline {
 		const isAnswered = this.isQuestionAnswered(q, this.currentTabIndex);
 		actionBtn = actionsEl.createEl('button', {
 			cls: 'guki-ask-submit-btn',
-			text: isLastQuestion ? 'Submit' : 'Next'
+			text: isLastQuestion ? t('transcript.ask.submit') : t('transcript.ask.next')
 		});
 		actionBtn.disabled = !isAnswered;
 		actionBtn.addEventListener('click', () => {

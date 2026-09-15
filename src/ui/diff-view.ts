@@ -13,6 +13,7 @@
  */
 
 import type { PriorContent } from '../core/chat-state';
+import { t } from '../i18n';
 
 export interface DiffInput {
 	/** Absent for `Write` unless prior content was supplied — see `PriorContent`. */
@@ -203,9 +204,9 @@ export function renderDiff(parent: HTMLElement, diff: DiffInput): void {
  */
 export function emptyPaneText(diff: DiffInput, side: 'before' | 'after'): string {
 	if (side === 'before' && diff.oldUnknown === true) {
-		return '(not read)';
+		return t('transcript.diff.notRead');
 	}
-	return '(empty)';
+	return t('transcript.diff.empty');
 }
 
 function renderPane(
@@ -218,7 +219,10 @@ function renderPane(
 	emptyText: string,
 ): void {
 	const pane = parent.createDiv({ cls: `guki-diff-pane guki-diff-${side}` });
-	pane.createDiv({ cls: 'guki-diff-pane-title', text: side === 'before' ? 'Before' : 'After' });
+	pane.createDiv({
+		cls: 'guki-diff-pane-title',
+		text: side === 'before' ? t('transcript.diff.before') : t('transcript.diff.after'),
+	});
 	const body = pane.createDiv({ cls: 'guki-diff-lines' });
 
 	if (leadIn.length === 0 && changed.length === 0 && leadOut.length === 0) {

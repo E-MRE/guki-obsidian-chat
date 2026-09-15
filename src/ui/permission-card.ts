@@ -21,6 +21,7 @@ import type { PermissionBehavior } from '../core/permission-broker';
 import { isFloorProtectedRequest, type VaultPaths } from '../core/permission-policy';
 import { toolIcon, toolSummary } from '../core/tool-policy';
 import { diffFromToolInput, renderDiff, type DiffInput } from './diff-view';
+import { t } from '../i18n';
 
 export interface PermissionActions {
 	decide(requestId: string, behavior: PermissionBehavior, remember?: boolean): void;
@@ -84,11 +85,13 @@ export function shortenPathForLabel(path: string, maxLen = 35): string {
 export function rememberLabelText(toolName: string, directory?: string): string {
 	if (toolName === 'Bash') {
 		if (typeof directory === 'string' && directory.trim().length > 0) {
-			return `Always allow this exact command in ${shortenPathForLabel(directory.trim())}`;
+			return t('transcript.permission.rememberCommandInDirectory', {
+				directory: shortenPathForLabel(directory.trim()),
+			});
 		}
-		return 'Always allow this exact command in this directory';
+		return t('transcript.permission.rememberCommandHere');
 	}
-	return 'Always allow this exact path';
+	return t('transcript.permission.rememberPath');
 }
 
 export function createPermissionCard(
@@ -110,7 +113,7 @@ export function createPermissionCard(
 	const actionsEl = el.createDiv({ cls: 'guki-perm-actions' });
 	// Deny first in the DOM but ordered second by CSS, so a keyboard tab lands on the safer choice
 	// first while the eye still reads Allow on the left.
-	const denyEl = actionsEl.createEl('button', { cls: 'guki-perm-deny', text: 'Deny' });
+	const denyEl = actionsEl.createEl('button', { cls: 'guki-perm-deny', text: t('transcript.permission.deny') });
 
 	let rememberEl: HTMLElement | undefined;
 	let rememberCheckbox: HTMLInputElement | undefined;
@@ -133,7 +136,7 @@ export function createPermissionCard(
 		});
 	}
 
-	const allowEl = actionsEl.createEl('button', { cls: 'guki-perm-allow', text: 'Allow' });
+	const allowEl = actionsEl.createEl('button', { cls: 'guki-perm-allow', text: t('transcript.permission.allow') });
 
 	const statusEl = el.createDiv({ cls: 'guki-perm-status' });
 
@@ -249,11 +252,11 @@ export function statusText(status: PermissionStatus): string {
 		case 'pending':
 			return '';
 		case 'allowed':
-			return 'Allowed.';
+			return t('transcript.permission.allowed');
 		case 'denied':
-			return 'Denied. The turn continues.';
+			return t('transcript.permission.deniedContinues');
 		case 'cancelled':
-			return 'Not answered — the turn ended first.';
+			return t('transcript.permission.cancelled');
 	}
 }
 
@@ -281,7 +284,7 @@ function renderBody(item: PermissionItem, body: HTMLElement): void {
 		// summary ellipsises it, and this is the surface where that is not good enough.
 		if (diff.path !== undefined) {
 			const target = body.createDiv({ cls: 'guki-perm-target' });
-			target.createSpan({ cls: 'guki-perm-target-label', text: 'File' });
+			target.createSpan({ cls: 'guki-perm-target-label', text: t('transcript.permission.file') });
 			target.createSpan({ cls: 'guki-perm-target-path', text: diff.path });
 		}
 		renderDiff(body.createDiv(), diff);
@@ -293,7 +296,7 @@ function renderBody(item: PermissionItem, body: HTMLElement): void {
 		body.createEl('pre', { cls: 'guki-perm-args' }).createEl('code', { text: args });
 		return;
 	}
-	body.createDiv({ cls: 'guki-perm-empty', text: 'No arguments.' });
+	body.createDiv({ cls: 'guki-perm-empty', text: t('transcript.permission.noArguments') });
 }
 
 /** Bash shows its command bare; everything else shows its arguments as JSON. Mirrors `tool-card`. */

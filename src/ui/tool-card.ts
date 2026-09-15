@@ -14,6 +14,7 @@ import { setIcon, type Component } from 'obsidian';
 import type { MessageBlock } from '../core/chat-state';
 import { startsExpanded, toolCategory, toolIcon, toolSummary } from '../core/tool-policy';
 import { diffFromToolInput, diffStats, renderDiff } from './diff-view';
+import { t } from '../i18n';
 
 
 
@@ -83,7 +84,7 @@ function setExpanded(card: RenderedToolCard, expanded: boolean): void {
 
 /** Returns true when it touched the DOM — the jump-to-bottom hint keys off that. */
 export function updateToolCard(block: MessageBlock, card: RenderedToolCard): boolean {
-	const name = block.toolName ?? 'Tool';
+	const name = block.toolName ?? t('transcript.tool.fallbackName');
 	const isError = block.toolIsError === true;
 	const summary = toolSummary(block.toolName, block.toolInput);
 	const status = toolStatusText(block);
@@ -157,25 +158,27 @@ export function updateToolCard(block: MessageBlock, card: RenderedToolCard): boo
  */
 export function toolStatusText(block: MessageBlock): string {
 	if (block.subagentActive === true) {
-		const label = block.subagentLabel ?? 'Subagent running';
+		const label = block.subagentLabel ?? t('transcript.tool.subagentRunning');
 		const uses = block.subagentToolUses;
-		return uses === undefined ? `${label}…` : `${label}… (${String(uses)})`;
+		return uses === undefined
+			? t('transcript.tool.subagentStatus', { label })
+			: t('transcript.tool.subagentStatusWithUses', { label, count: uses });
 	}
 	if (block.toolPending === true) {
 		// While an approval card is open the call is not "running" — it is waiting on the
 		// reader, and saying so points them at the control they have to use.
 		return block.toolPermissionRequested === true && block.toolDenied !== true
-			? 'Waiting for approval…'
-			: 'Running…';
+			? t('transcript.tool.waitingForApproval')
+			: t('transcript.tool.running');
 	}
 	// Checked before `toolIsError`, though the reducer already keeps the two mutually
 	// exclusive: if that ever drifts, the outcome the reader chose should still win over the
 	// CLI's flag.
 	if (block.toolDenied === true) {
-		return 'Denied';
+		return t('transcript.tool.denied');
 	}
 	if (block.toolIsError === true) {
-		return 'Error';
+		return t('transcript.tool.error');
 	}
 	return '';
 }
@@ -205,7 +208,7 @@ function renderBody(block: MessageBlock, card: RenderedToolCard): void {
 		const stats = diffStats(diff);
 		body.createDiv({
 			cls: 'guki-tool-diffstat',
-			text: `+${String(stats.added)} −${String(stats.removed)}`,
+			text: t('transcript.tool.diffStats', { added: stats.added, removed: stats.removed }),
 		});
 		renderDiff(body.createDiv(), diff);
 	} else if (block.toolPermissionRequested === true) {
@@ -235,7 +238,7 @@ function renderBody(block: MessageBlock, card: RenderedToolCard): void {
 	}
 
 	if (body.childElementCount === 0) {
-		body.createDiv({ cls: 'guki-tool-empty', text: 'No output.' });
+		body.createDiv({ cls: 'guki-tool-empty', text: t('transcript.tool.noOutput') });
 	}
 }
 
@@ -246,15 +249,15 @@ function renderBody(block: MessageBlock, card: RenderedToolCard): void {
 export function toolPermissionBodyText(block: MessageBlock): string {
 	if (block.toolPending === true) {
 		return block.toolName === 'AskUserQuestion'
-			? 'Waiting for your response in the composer.'
-			: 'Waiting for your approval in the composer.';
+			? t('transcript.tool.waitingForResponse')
+			: t('transcript.tool.waitingForComposerApproval');
 	}
 	if (block.toolDenied === true) {
-		return 'Denied in the composer.';
+		return t('transcript.tool.deniedInComposer');
 	}
 	return block.toolName === 'AskUserQuestion'
-		? 'Answered in the composer.'
-		: 'Handled in the composer.';
+		? t('transcript.tool.answeredInComposer')
+		: t('transcript.tool.handledInComposer');
 }
 
 /**
@@ -264,9 +267,9 @@ export function toolPermissionBodyText(block: MessageBlock): string {
  */
 export function toolResultTitle(block: MessageBlock): string {
 	if (block.toolDenied === true) {
-		return 'Denied';
+		return t('transcript.tool.denied');
 	}
-	return block.toolIsError === true ? 'Error' : 'Result';
+	return block.toolIsError === true ? t('transcript.tool.error') : t('transcript.tool.result');
 }
 
 /** Bash shows its command bare; everything else shows its arguments as JSON. */
