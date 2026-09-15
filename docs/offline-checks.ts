@@ -144,6 +144,7 @@ import { absolutePathForFile } from '../src/cli/node-api';
 import { Composer, pasteBelongsToComposer, type ComposerOptions } from '../src/ui/composer';
 import { filterVaultFiles, insertItem, type DropdownItem, type TriggerMatch } from '../src/ui/composer-dropdown';
 import {
+	buildSessionSummary,
 	extractUserPromptText,
 	isExplicitHumanUser,
 	isSyntheticUser,
@@ -13761,11 +13762,294 @@ console.log('AU. Phase 7 Task 9 Lane 3: History dropdown refresh and panel heade
 	await (view as any).onClose();
 }
 
+
+// ---------------------------------------------------------------------------
+// AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed (§8 amendment)
+// ---------------------------------------------------------------------------
+console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed');
+
+// AV1: NodeTranscriptStore.sessionTitle — reads one file, returns correct summary
+{
+	const avDir = mkdtempSync(join(tmpdir(), 'guki-av-title-'));
+
+	// AV1.1: File with ai-title — summary has title field and custom overlay is applied
+	const sessAiFile = join(avDir, 'sess-av-ai.jsonl');
+	writeFileSync(
+		sessAiFile,
+		[
+			JSON.stringify({ type: 'user', timestamp: '2026-09-15T10:00:00.000Z', message: 'Hello world' }),
+			JSON.stringify({ type: 'ai-title', aiTitle: 'CLI Generated Title' }),
+		].join('\n') + '\n',
+		'utf8',
+	);
+
+	// AV1.2: File with only a first-message (derived trim only — no ai-title)
+	const sessDerivedFile = join(avDir, 'sess-av-derived.jsonl');
+	writeFileSync(
+		sessDerivedFile,
+		JSON.stringify({ type: 'user', timestamp: '2026-09-15T10:01:00.000Z', message: 'A question with no title yet' }) + '\n',
+		'utf8',
+	);
+
+	// No custom title overlay
+	const plainStore = new NodeTranscriptStore(avDir);
+
+	const aiSummary = await plainStore.sessionTitle('sess-av-ai');
+	check('AV1.1 sessionTitle returns non-null for file with ai-title', aiSummary !== null);
+	eq('AV1.2 sessionTitle title matches ai-title', aiSummary?.title, 'CLI Generated Title');
+	eq('AV1.3 sessionTitle sessionId is correct', aiSummary?.sessionId, 'sess-av-ai');
+	eq('AV1.4 sessionTitle customTitle is absent without overlay', aiSummary?.customTitle, undefined);
+
+	// AV1.5: Derived trim only → summary returned but panelTitleFor returns null
+	const derivedSummary = await plainStore.sessionTitle('sess-av-derived');
+	check('AV1.5 sessionTitle returns non-null for derived-only file', derivedSummary !== null);
+	check('AV1.6 derived-only file has derivedTitle set', typeof derivedSummary?.derivedTitle === 'string');
+	eq('AV1.7 derived-only file has no ai-title', derivedSummary?.title, undefined);
+	eq('AV1.8 panelTitleFor returns null for derived-only summary', panelTitleFor(derivedSummary ?? null), null);
+
+	// AV1.9: Missing file → null, no throw
+	const missingSummary = await plainStore.sessionTitle('sess-av-does-not-exist');
+	eq('AV1.9 sessionTitle returns null for missing file', missingSummary, null);
+
+	// AV1.10: Custom title overlay — store has a custom name
+	const titleStore = new ConversationTitleStore(
+		{ 'sess-av-ai': { title: 'User Custom Override', updatedAt: 9999 } },
+		async () => {},
+	);
+	const overlayStore = new NodeTranscriptStore(avDir, titleStore);
+	const overlaySummary = await overlayStore.sessionTitle('sess-av-ai');
+	eq('AV1.10 sessionTitle applies custom-title overlay', overlaySummary?.customTitle, 'User Custom Override');
+	eq('AV1.11 panelTitleFor returns custom name when overlay is applied', panelTitleFor(overlaySummary ?? null), 'User Custom Override');
+
+	rmSync(avDir, { recursive: true, force: true });
+}
+
+// AV2: ChatView.handleTurnEnd with dropdown CLOSED — header reflects ai-title, scan count = 0
+// This is the main acceptance criterion from amendment §8. The view must NOT use
+// setCurrentSessionSummary — it must fetch the title itself via sessionTitle.
+{
+	const avDir2 = mkdtempSync(join(tmpdir(), 'guki-av-view-'));
+
+	// Write a transcript file with an ai-title for the "current" session
+	const sessFile = join(avDir2, 'sess-av-current.jsonl');
+	writeFileSync(
+		sessFile,
+		[
+			JSON.stringify({ type: 'user', timestamp: '2026-09-15T10:00:00.000Z', message: 'First message' }),
+			JSON.stringify({ type: 'ai-title', aiTitle: 'My Conversation Title' }),
+		].join('\n') + '\n',
+		'utf8',
+	);
+
+	const leafContainer = new FakeElement() as any;
+	const leafContent = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App() as any, leafContainer, leafContent);
+
+	let scanCount = 0;
+	const mockReducer = { onTurnEnd: null as (() => void) | null };
+
+	const session = {
+		state: new ChatState(),
+		reducer: mockReducer,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: avDir2, outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	// mockStore counts directory scans but delegates sessionTitle to the real NodeTranscriptStore
+	const realStore = new NodeTranscriptStore(avDir2);
+	const mockStore = {
+		listSessions: async () => {
+			scanCount++;
+			return await realStore.listSessions(avDir2);
+		},
+		readSession: async () => Object.assign([], { hasMoreBefore: false, loadBefore: async () => [] }) as any,
+		resumeArgs: () => [],
+		sessionTitle: async (sessionId: string, vaultPath?: string) => {
+			// Deliberately NOT incrementing scanCount — this is a single-file read, not a scan.
+			return await realStore.sessionTitle(sessionId, vaultPath);
+		},
+	} as unknown as TranscriptStore;
+
+	const view = new ChatView(leaf as any, session as any, mockStore as any);
+	await (view as any).onOpen();
+
+	// Set the current session id directly (simulates a session started from the CLI)
+	(view as any).currentSessionId = 'sess-av-current';
+
+	check('AV2.0 dropdown is closed initially', !(view.getHistoryDropdown()?.isOpen()));
+	check('AV2.1 view attached a turn-end handler', typeof mockReducer.onTurnEnd === 'function');
+
+	// Baseline: header is GuKi Chat before turn ends
+	eq('AV2.2 header is GuKi Chat before turn ends', view.getDisplayText(), 'GuKi Chat');
+
+	// Reset scan counter AFTER open (open may have triggered no scan since dropdown is closed)
+	scanCount = 0;
+	const headerUpdatesBefore = (leaf as any).headerUpdates ?? 0;
+
+	// Fire turn-end via the reducer hook (NOT via setCurrentSessionSummary)
+	mockReducer.onTurnEnd!();
+	// Allow any microtasks / async callbacks to settle
+	await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+	eq('AV2.3 scan count stays exactly zero with dropdown closed', scanCount, 0);
+	eq('AV2.4 header shows ai-title after turn ends with dropdown closed', view.getDisplayText(), 'My Conversation Title');
+	check('AV2.5 leaf header was updated after turn ends', ((leaf as any).headerUpdates ?? 0) > headerUpdatesBefore);
+
+	await (view as any).onClose();
+	rmSync(avDir2, { recursive: true, force: true });
+}
+
+// AV3: ChatView.handleTurnEnd with dropdown CLOSED and file has only derived trim — header stays GuKi Chat
+{
+	const avDir3 = mkdtempSync(join(tmpdir(), 'guki-av-derived-'));
+
+	const sessFile = join(avDir3, 'sess-av-derived2.jsonl');
+	writeFileSync(
+		sessFile,
+		JSON.stringify({ type: 'user', timestamp: '2026-09-15T10:00:00.000Z', message: 'A question with no title' }) + '\n',
+		'utf8',
+	);
+
+	const leafContainer = new FakeElement() as any;
+	const leafContent = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App() as any, leafContainer, leafContent);
+
+	const mockReducer = { onTurnEnd: null as (() => void) | null };
+	const session = {
+		state: new ChatState(),
+		reducer: mockReducer,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: avDir3, outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const realStore3 = new NodeTranscriptStore(avDir3);
+	const view = new ChatView(leaf as any, session as any, realStore3 as any);
+	await (view as any).onOpen();
+	(view as any).currentSessionId = 'sess-av-derived2';
+
+	check('AV3.1 dropdown is closed', !(view.getHistoryDropdown()?.isOpen()));
+	mockReducer.onTurnEnd!();
+	await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+	eq('AV3.2 header stays GuKi Chat for derived-only session', view.getDisplayText(), 'GuKi Chat');
+
+	await (view as any).onClose();
+	rmSync(avDir3, { recursive: true, force: true });
+}
+
+// AV4: ChatView.handleTurnEnd with dropdown CLOSED and file does not exist yet — no throw, header stays GuKi Chat
+{
+	const avDir4 = mkdtempSync(join(tmpdir(), 'guki-av-missing-'));
+
+	const leafContainer = new FakeElement() as any;
+	const leafContent = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App() as any, leafContainer, leafContent);
+
+	const mockReducer = { onTurnEnd: null as (() => void) | null };
+	const session = {
+		state: new ChatState(),
+		reducer: mockReducer,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: avDir4, outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const realStore4 = new NodeTranscriptStore(avDir4);
+	const view = new ChatView(leaf as any, session as any, realStore4 as any);
+	await (view as any).onOpen();
+	// Point to a session file that doesn't exist yet
+	(view as any).currentSessionId = 'sess-av-not-on-disk-yet';
+
+	let threw = false;
+	try {
+		mockReducer.onTurnEnd!();
+		await new Promise<void>((resolve) => setTimeout(resolve, 20));
+	} catch {
+		threw = true;
+	}
+
+	check('AV4.1 turn-end does not throw when file does not exist', !threw);
+	eq('AV4.2 header stays GuKi Chat when file does not exist', view.getDisplayText(), 'GuKi Chat');
+
+	await (view as any).onClose();
+	rmSync(avDir4, { recursive: true, force: true });
+}
+
+// AV5: Custom title overlay wins over ai-title in the closed-list path
+{
+	const avDir5 = mkdtempSync(join(tmpdir(), 'guki-av-custom-'));
+
+	const sessFile = join(avDir5, 'sess-av-cust.jsonl');
+	writeFileSync(
+		sessFile,
+		[
+			JSON.stringify({ type: 'user', timestamp: '2026-09-15T10:00:00.000Z', message: 'Hello' }),
+			JSON.stringify({ type: 'ai-title', aiTitle: 'CLI Title' }),
+		].join('\n') + '\n',
+		'utf8',
+	);
+
+	const leafContainer = new FakeElement() as any;
+	const leafContent = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App() as any, leafContainer, leafContent);
+
+	const titleStore5 = new ConversationTitleStore(
+		{ 'sess-av-cust': { title: 'Stored Custom Name', updatedAt: 9999 } },
+		async () => {},
+	);
+
+	const mockReducer = { onTurnEnd: null as (() => void) | null };
+	const session = {
+		state: new ChatState(),
+		reducer: mockReducer,
+		busy: false,
+		blocked: false,
+		vaultPaths: async () => ({ root: avDir5, outside: '/fake/outside' }),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const realStore5 = new NodeTranscriptStore(avDir5, titleStore5);
+	const view = new ChatView(leaf as any, session as any, realStore5 as any, titleStore5);
+	await (view as any).onOpen();
+	(view as any).currentSessionId = 'sess-av-cust';
+
+	check('AV5.1 dropdown is closed', !(view.getHistoryDropdown()?.isOpen()));
+	mockReducer.onTurnEnd!();
+	await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+	eq('AV5.2 custom title wins over ai-title in closed-list path', view.getDisplayText(), 'Stored Custom Name');
+
+	await (view as any).onClose();
+	rmSync(avDir5, { recursive: true, force: true });
+}
+
 // Clean up temporary test files
 rmSync(TRANSCRIPT_TEST_DIR, { recursive: true, force: true });
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
+
 
 
 

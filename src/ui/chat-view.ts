@@ -140,6 +140,13 @@ export class ChatView extends ItemView {
 					this.currentSessionSummary = { ...updated };
 				}
 			}
+		} else if (this.currentSessionId) {
+			// Dropdown is closed: read only the current session's own file — no directory scan.
+			const paths = await this.session.vaultPaths().catch(() => undefined);
+			const summary = await this.transcriptStore.sessionTitle(this.currentSessionId, paths?.root);
+			if (summary) {
+				this.currentSessionSummary = summary;
+			}
 		}
 		this.updateHeader();
 	}
