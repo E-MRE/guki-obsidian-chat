@@ -97,6 +97,7 @@ import { clearRememberedDecisions, DEFAULT_SETTINGS, formatRememberedDecision, r
 import GukiChatPlugin from '../src/main';
 import { ChatView, currentStatus, HISTORY_PAGE_SIZE } from '../src/ui/chat-view';
 import { renderQuotaBar } from '../src/ui/composer';
+import { appendPromptHistory, PROMPT_HISTORY_CAP } from '../src/core/prompt-history';
 import { formatTurnMeta, MessageList, withTurnMeta } from '../src/ui/message-list';
 import {
 	buildRememberedDecision,
@@ -159,6 +160,7 @@ import {
 	type TitleSource,
 } from '../src/data/session-index';
 import { ConversationTitleStore, type ConversationTitleMap } from '../src/data/conversation-titles';
+import { PromptHistoryStore } from '../src/data/prompt-history';
 import {
 	formatSessionDate,
 	HistoryDropdown,
@@ -8188,6 +8190,26 @@ console.log('AB13. Multi-question card: tab bar contains only question tabs and 
 
 // --- AC. Composer dropdown: slash commands and mentions -------------------
 
+console.log('\nAC0. Prompt history data layer');
+{
+	const first = appendPromptHistory([], 'first prompt', PROMPT_HISTORY_CAP);
+	check('AC0.1: append to an empty prompt history creates one entry', first.length === 1 && first[0] === 'first prompt');
+
+	const whitespace = appendPromptHistory(['kept'], '   ', PROMPT_HISTORY_CAP);
+	check('AC0.2: whitespace-only prompt leaves history unchanged', whitespace.length === 1 && whitespace[0] === 'kept');
+
+	const duplicate = appendPromptHistory(['kept'], 'kept', PROMPT_HISTORY_CAP);
+	check('AC0.3: newest duplicate prompt leaves history unchanged', duplicate.length === 1 && duplicate[0] === 'kept');
+
+	const nonAdjacentDuplicate = appendPromptHistory(['repeat', 'other'], 'repeat', PROMPT_HISTORY_CAP);
+	check('AC0.4: non-adjacent duplicate prompt is recorded', nonAdjacentDuplicate.join('|') === 'repeat|other|repeat');
+
+	const fullHistory = Array.from({ length: PROMPT_HISTORY_CAP }, (_, index) => `prompt-${String(index)}`);
+	const capped = appendPromptHistory(fullHistory, 'newest', PROMPT_HISTORY_CAP);
+	check('AC0.5: prompt history cap drops oldest and keeps newest',
+		capped.length === PROMPT_HISTORY_CAP && capped[0] === 'prompt-1' && capped[capped.length - 1] === 'newest');
+}
+
 console.log('\nAC1. Mandatory end-to-end chain check (simulated keystrokes on real composer input path)');
 {
 	if (typeof (globalThis as any).ResizeObserver === 'undefined') {
@@ -8223,6 +8245,7 @@ console.log('\nAC1. Mandatory end-to-end chain check (simulated keystrokes on re
 	const slashCommands = ['clear', 'help', 'orchestrate'];
 	let submittedText = '';
 	let submitCallCount = 0;
+	let promptHistory = ['older prompt', 'newest prompt'];
 
 	const container = new FakeElement() as any;
 	const panel = new FakeElement() as any;
@@ -8236,6 +8259,10 @@ console.log('\nAC1. Mandatory end-to-end chain check (simulated keystrokes on re
 		app: testApp,
 		getSlashCommands: () => slashCommands,
 		getVaultPaths: () => Promise.resolve(vaultPaths),
+		getPromptHistory: () => promptHistory,
+		onPromptRecorded: (text: string) => {
+			promptHistory = appendPromptHistory(promptHistory, text, PROMPT_HISTORY_CAP);
+		},
 		onSubmit: (text: string) => {
 			submittedText = text;
 			submitCallCount++;
@@ -8373,6 +8400,103 @@ console.log('\nAC1. Mandatory end-to-end chain check (simulated keystrokes on re
 	const dropdownEl = container.querySelector('.guki-composer-dropdown');
 	const badItem = dropdownEl ? dropdownEl.querySelectorAll('.guki-composer-dropdown-item').find((el: any) => el.text.includes('bad"quote')) : null;
 	check('AC1.5: file with quotes returning null from attachmentReference is not in dropdown', badItem === null || badItem === undefined);
+
+	// Prompt history navigation uses this same real Composer instance and its real key handler.
+	promptHistory = ['older prompt', 'newest prompt'];
+	simulateInput('');
+	const historyFixtureDown = simulateKeydown('ArrowDown');
+	if (
+		promptHistory.length !== 2 ||
+		promptHistory[0] !== 'older prompt' ||
+		promptHistory[1] !== 'newest prompt' ||
+		inputEl.value !== '' ||
+		historyFixtureDown.defaultPrevented
+	) {
+		throw new Error('AC1 prompt history fixture must start inactive with exactly older and newest prompts');
+	}
+	const historyUp = simulateKeydown('ArrowUp');
+	check('AC1.6: empty box plus Up recalls the newest submitted prompt',
+		historyUp.defaultPrevented && inputEl.value === 'newest prompt');
+
+	simulateInput('x');
+	const nonEmptyUp = simulateKeydown('ArrowUp');
+	check('AC1.7: non-empty box plus Up leaves text and default behavior alone',
+		!nonEmptyUp.defaultPrevented && inputEl.value === 'x');
+
+	simulateInput('');
+	const inactiveDown = simulateKeydown('ArrowDown');
+	check('AC1.8: empty box plus inactive Down is not intercepted',
+		!inactiveDown.defaultPrevented && inputEl.value === '');
+
+	simulateInput('');
+	simulateKeydown('ArrowUp');
+	const secondHistoryUp = simulateKeydown('ArrowUp');
+	check('AC1.9: second Up while navigating recalls the older prompt',
+		secondHistoryUp.defaultPrevented && inputEl.value === 'older prompt');
+
+	const oldestUp = simulateKeydown('ArrowUp');
+	check('AC1.10: Up at the oldest prompt leaves it unchanged',
+		oldestUp.defaultPrevented && inputEl.value === 'older prompt');
+
+	simulateKeydown('ArrowDown');
+	simulateKeydown('ArrowDown');
+	const afterNewestDown = simulateKeydown('ArrowDown');
+	check('AC1.11: Down past newest clears and deactivates prompt navigation',
+		inputEl.value === '' && !afterNewestDown.defaultPrevented);
+
+	simulateKeydown('ArrowUp');
+	simulateInput('edited recalled prompt');
+	const editedUp = simulateKeydown('ArrowUp');
+	check('AC1.12: typing while navigating returns Up to the empty-box gate',
+		!editedUp.defaultPrevented && inputEl.value === 'edited recalled prompt');
+
+	promptHistory = ['older prompt', 'multi\nline prompt'];
+	simulateInput('');
+	simulateKeydown('ArrowUp');
+	inputEl.selectionStart = inputEl.value.length;
+	inputEl.selectionEnd = inputEl.value.length;
+	const multilineLastLineUp = simulateKeydown('ArrowUp');
+	check('AC1.13: Up on a recalled multi-line prompt last line is ordinary caret movement',
+		!multilineLastLineUp.defaultPrevented && inputEl.value === 'multi\nline prompt');
+
+	inputEl.selectionStart = 0;
+	inputEl.selectionEnd = 0;
+	const multilineFirstLineUp = simulateKeydown('ArrowUp');
+	check('AC1.14: Up on a recalled multi-line prompt first line recalls older history',
+		multilineFirstLineUp.defaultPrevented && inputEl.value === 'older prompt');
+
+	simulateInput('/');
+	simulateKeydown('ArrowDown');
+	const selectedBeforeHistoryGuard = container.querySelector('.guki-selected');
+	const dropdownUp = simulateKeydown('ArrowUp');
+	const selectedAfterHistoryGuard = container.querySelector('.guki-selected');
+	check('AC1.15: slash dropdown owns Up before prompt history can handle it',
+		dropdownUp.defaultPrevented && selectedBeforeHistoryGuard !== selectedAfterHistoryGuard && inputEl.value === '/');
+
+	promptHistory = ['older prompt'];
+	simulateInput('just submitted');
+	simulateKeydown('Enter');
+	const submittedHistoryUp = simulateKeydown('ArrowUp');
+	check('AC1.16: submit resets navigation so Up recalls the prompt just submitted',
+		submittedHistoryUp.defaultPrevented && inputEl.value === 'just submitted');
+}
+
+console.log('\nAC1b. Prompt history persistence store');
+{
+	const nonArrayStore = new PromptHistoryStore('not an array' as any, async () => {});
+	const filteredStore = new PromptHistoryStore(['kept', '', 3 as any], async () => {});
+	check('AC1b.17: prompt history store rejects non-array initial data and invalid array entries',
+		nonArrayStore.list().length === 0 && filteredStore.list().length === 1 && filteredStore.list()[0] === 'kept');
+
+	const savedLists: string[][] = [];
+	const store = new PromptHistoryStore([], async (list) => {
+		savedLists.push(list);
+	});
+	await store.record('saved prompt');
+	const snapshot = store.snapshot();
+	snapshot.push('tampered');
+	check('AC1b.18: record saves and snapshot mutation cannot corrupt prompt history',
+		savedLists.length === 1 && store.list().length === 1 && store.list()[0] === 'saved prompt');
 }
 
 console.log('\nAC2. Slash command catalogue plumbing and behavior');
@@ -14353,8 +14477,6 @@ console.log('\nAX. L7 — New-conversation control');
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
-
-
 
 
 
