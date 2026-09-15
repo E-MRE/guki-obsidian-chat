@@ -221,7 +221,7 @@ export function projectSlug(vaultPath: string): string {
  * compaction summary, not synthetic, and not metadata). Once an acceptable first message is found,
  * later messages cannot replace it.
  */
-async function buildSessionSummary(filePath: string, sessionId: string): Promise<SessionSummary | null> {
+export async function buildSessionSummary(filePath: string, sessionId: string): Promise<SessionSummary | null> {
 	const fs = await nodeFs();
 	const content = await fs.promises.readFile(filePath, 'utf8');
 
