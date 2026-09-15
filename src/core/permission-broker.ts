@@ -25,6 +25,7 @@
 import type { App } from 'obsidian';
 import { normalizePath } from 'obsidian';
 import { resolveNodeBinary } from '../cli/binary-resolver';
+import { t } from '../i18n';
 import {
 	nodeFs,
 	nodeKill,
@@ -375,7 +376,7 @@ export class PermissionBroker {
 
 		const item = this.state.addPermissionRequest({
 			requestId: id,
-			toolName: typeof message.tool_name === 'string' ? message.tool_name : 'Unknown tool',
+			toolName: typeof message.tool_name === 'string' ? message.tool_name : t('core.permission.unknownTool'),
 			input: message.input,
 			cwd: rawCwd,
 			toolUseId: typeof message.tool_use_id === 'string' ? message.tool_use_id : undefined,

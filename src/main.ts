@@ -1,3 +1,4 @@
+import * as Obsidian from 'obsidian';
 import { Plugin, WorkspaceLeaf } from 'obsidian';
 import { CHAT_VIEW_ICON, CHAT_VIEW_TITLE, VIEW_TYPE_GUKI_CHAT } from './constants';
 import { SessionManager } from './core/session-manager';
@@ -7,14 +8,19 @@ import { PromptHistoryStore } from './data/prompt-history';
 import { DEFAULT_SEND_KEY } from './core/send-key';
 import { ChatView } from './ui/chat-view';
 import { DEFAULT_SETTINGS, GukiSettingTab, type GukiChatSettings } from './ui/settings-tab';
+import { getLocale, setLocale, t, type Lang } from './i18n';
+
+const OPEN_CHAT_COMMAND_ID = 'open-chat';
 
 export default class GukiChatPlugin extends Plugin {
 	private session: SessionManager | null = null;
 	private titleStore: ConversationTitleStore | null = null;
+	private automaticLocale: Lang = 'en';
 	settings: GukiChatSettings = DEFAULT_SETTINGS;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
+		await this.applyLanguageSetting(true);
 
 		const titleStore = new ConversationTitleStore(
 			this.settings.conversationTitles,
@@ -84,16 +90,6 @@ export default class GukiChatPlugin extends Plugin {
 			}),
 		);
 
-		this.addCommand({
-			id: 'open-chat',
-			// Obsidian already prefixes the palette entry with "GuKi Chat: ".
-			name: 'Open chat',
-			// No default hotkey by design; the command palette is the only entry point.
-			callback: () => {
-				void this.activateView();
-			},
-		});
-
 		// Opening a leaf before the layout is ready puts it in the wrong place.
 		this.app.workspace.onLayoutReady(() => {
 			void this.activateView();
@@ -138,6 +134,7 @@ export default class GukiChatPlugin extends Plugin {
 				? data.conversationTitles
 				: {},
 			sendKey: data?.sendKey === 'mod-enter' ? 'mod-enter' : DEFAULT_SEND_KEY,
+			language: data?.language === 'en' || data?.language === 'tr' ? data.language : 'auto',
 		};
 	}
 
@@ -146,10 +143,59 @@ export default class GukiChatPlugin extends Plugin {
 		await this.saveData(this.settings);
 		this.session?.setClaudeBinaryOverride(this.settings.claudeBinaryPath);
 		this.session?.setPermissionSettings(this.settings);
+		await this.applyLanguageSetting();
 		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_GUKI_CHAT)) {
 			if (leaf.view instanceof ChatView) {
 				leaf.view.refreshComposerPlaceholder();
 			}
+		}
+	}
+
+	/** The one production door for initial locale setup and live language changes. */
+	private async applyLanguageSetting(initialize = false): Promise<void> {
+		if (initialize) {
+			const languageKey: keyof typeof Obsidian = 'getLanguage';
+			const getLanguage = Obsidian[languageKey] as (() => string) | undefined;
+			// ponytail: Obsidian has no public language-change event, so automatic language is
+			// sampled at plugin load and remains fixed until the plugin is loaded again.
+			this.automaticLocale = getLanguage?.() === 'tr' ? 'tr' : 'en';
+		}
+
+		const configured = this.settings.language;
+		const effective: Lang = configured === 'en' || configured === 'tr'
+			? configured
+			: this.automaticLocale;
+		const changed = getLocale() !== effective;
+		setLocale(effective);
+
+		if (changed) {
+			for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_GUKI_CHAT)) {
+				if (!(leaf.view instanceof ChatView)) {
+					continue;
+				}
+				const viewState = leaf.getViewState();
+				const draft = leaf.view.captureDraft();
+				await leaf.setViewState({ type: 'empty' });
+				await leaf.setViewState(viewState);
+				if (leaf.view instanceof ChatView) {
+					leaf.view.restoreDraft(draft);
+				}
+			}
+		}
+
+		if (initialize || changed) {
+			if (typeof this.removeCommand === 'function') {
+				this.removeCommand(OPEN_CHAT_COMMAND_ID);
+			}
+			this.addCommand({
+				id: OPEN_CHAT_COMMAND_ID,
+				// Obsidian already prefixes the palette entry with "GuKi Chat: ".
+				name: t('host.command.openChat'),
+				// No default hotkey by design; the command palette is the only entry point.
+				callback: () => {
+					void this.activateView();
+				},
+			});
 		}
 	}
 

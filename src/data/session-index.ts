@@ -10,6 +10,7 @@
  * single unparsable line rather than the file it came from.
  */
 import { nodeFs, nodePath } from '../cli/node-api';
+import { t } from '../i18n';
 
 export interface SessionSummary {
 	/** Taken from the filename, not parsed — RESEARCH §D and this task's own measurement agree the
@@ -174,7 +175,7 @@ export function resolveSessionTitle(s: SessionSummary): { text: string; source: 
 	if (typeof s.derivedTitle === 'string' && s.derivedTitle.trim().length > 0) {
 		return { text: s.derivedTitle, source: 'derived' };
 	}
-	return { text: 'Untitled session', source: 'none' };
+	return { text: t('core.sessionIndex.untitledSession'), source: 'none' };
 }
 
 /**

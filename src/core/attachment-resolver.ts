@@ -22,6 +22,7 @@
  */
 import { FileSystemAdapter, TFile, type App } from 'obsidian';
 import { absolutePathForFile, nodeFs } from '../cli/node-api';
+import { t } from '../i18n';
 import {
 	encodeBase64,
 	isImageMediaType,
@@ -152,7 +153,6 @@ export function externalFilePaths(files: ArrayLike<File> | null | undefined): Ex
  * replaced by a label that at least says where it came from. The thumbnail carries the identity.
  */
 const CLIPBOARD_GENERIC_NAME = 'image.png';
-const PASTED_IMAGE_LABEL = 'Pasted image';
 
 /** Ids for image chips. A counter, not a hash of the bytes: two pastes of one screenshot are two. */
 let imageSequence = 0;
@@ -270,7 +270,8 @@ export async function readImageAttachment(file: File): Promise<ImageAttachment |
 function imageDisplayName(file: File): string {
 	const name = file.name;
 	if (name.length === 0 || name === CLIPBOARD_GENERIC_NAME) {
-		return PASTED_IMAGE_LABEL;
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		return t('core.attachmentResolver.pastedImage');
 	}
 	return name;
 }

@@ -11,6 +11,7 @@
  *    `.zshrc`, so it returns the file path — but it stays a last resort.
  */
 import { nodeChildProcess, nodeFs, nodeOs, nodePath } from './node-api';
+import { t } from '../i18n';
 
 export interface BinaryResolution {
 	path: string;
@@ -130,7 +131,7 @@ export async function resolveClaudeBinary(override?: string): Promise<BinaryReso
 
 	const trimmedOverride = override?.trim();
 	if (trimmedOverride) {
-		attempts.push(`setting: ${trimmedOverride}`);
+		attempts.push(t('core.binaryResolver.settingAttempt', { path: trimmedOverride }));
 		if (await isExecutableFile(trimmedOverride)) {
 			return { path: trimmedOverride, source: 'setting' };
 		}

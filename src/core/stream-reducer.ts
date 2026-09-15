@@ -47,6 +47,7 @@ import {
 	type ToolResultBlock,
 	type UserEvent,
 } from '../cli/events';
+import { t } from '../i18n';
 import { toolResultText } from './tool-policy';
 import { hasRenderableContent, type AssistantItem, type BlockKind, type ChatState, type MessageBlock } from './chat-state';
 
@@ -452,7 +453,7 @@ export class StreamReducer {
 			this.active = null;
 		}
 
-		this.state.addDivider(uuid ?? `divider-${boundaryNow}`, 'Conversation compacted');
+		this.state.addDivider(uuid ?? `divider-${boundaryNow}`, t('core.conversation.compacted'));
 	}
 
 	private ensureActiveItem(): AssistantItem {
@@ -941,7 +942,7 @@ export class StreamReducer {
 				terminalItem.errorText =
 					typeof event.result === 'string' && event.result.length > 0
 						? event.result
-						: `The turn ended with ${event.subtype}.`;
+						: t('core.stream.turnEndedWith', { subtype: event.subtype });
 			} else {
 				// A denied tool is not a failed turn: subtype 'success', is_error false, and the denial
 				// shows up only in permission_denials[] (RESEARCH B5). Nothing to render as an error.

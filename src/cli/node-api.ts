@@ -23,6 +23,7 @@
  * prefix, and Electron's `require` accepts either form.
  */
 import { Platform } from 'obsidian';
+import { t } from '../i18n';
 
 type ChildProcessModule = typeof import('child_process');
 type FsModule = typeof import('fs');
@@ -31,8 +32,6 @@ type OsModule = typeof import('os');
 type PathModule = typeof import('path');
 type ProcessModule = typeof import('process');
 type ReadlineModule = typeof import('readline');
-
-const DESKTOP_ONLY = 'GuKi Chat runs the Claude Code CLI as a subprocess, which is desktop only.';
 
 /**
  * Electron exposes Node's `require` on `window` in the renderer. Typed narrowly as
@@ -49,14 +48,16 @@ function loadNodeModule(id: string): unknown {
 
 export function nodeChildProcess(): Promise<ChildProcessModule> {
 	if (!Platform.isDesktop) {
-		throw new Error(DESKTOP_ONLY);
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		throw new Error(t('core.nodeApi.desktopOnly'));
 	}
 	return Promise.resolve(loadNodeModule('child_process') as ChildProcessModule);
 }
 
 export function nodeFs(): Promise<FsModule> {
 	if (!Platform.isDesktop) {
-		throw new Error(DESKTOP_ONLY);
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		throw new Error(t('core.nodeApi.desktopOnly'));
 	}
 	return Promise.resolve(loadNodeModule('fs') as FsModule);
 }
@@ -68,28 +69,32 @@ export function nodeFs(): Promise<FsModule> {
  */
 export function nodeNet(): Promise<NetModule> {
 	if (!Platform.isDesktop) {
-		throw new Error(DESKTOP_ONLY);
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		throw new Error(t('core.nodeApi.desktopOnly'));
 	}
 	return Promise.resolve(loadNodeModule('net') as NetModule);
 }
 
 export function nodeOs(): Promise<OsModule> {
 	if (!Platform.isDesktop) {
-		throw new Error(DESKTOP_ONLY);
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		throw new Error(t('core.nodeApi.desktopOnly'));
 	}
 	return Promise.resolve(loadNodeModule('os') as OsModule);
 }
 
 export function nodePath(): Promise<PathModule> {
 	if (!Platform.isDesktop) {
-		throw new Error(DESKTOP_ONLY);
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		throw new Error(t('core.nodeApi.desktopOnly'));
 	}
 	return Promise.resolve(loadNodeModule('path') as PathModule);
 }
 
 export function nodeReadline(): Promise<ReadlineModule> {
 	if (!Platform.isDesktop) {
-		throw new Error(DESKTOP_ONLY);
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		throw new Error(t('core.nodeApi.desktopOnly'));
 	}
 	return Promise.resolve(loadNodeModule('readline') as ReadlineModule);
 }
@@ -103,7 +108,8 @@ export function nodeReadline(): Promise<ReadlineModule> {
  */
 export function nodeEnv(): Record<string, string | undefined> {
 	if (!Platform.isDesktop) {
-		throw new Error(DESKTOP_ONLY);
+		// Translate at use time: a module-scope value would freeze the locale active during import.
+		throw new Error(t('core.nodeApi.desktopOnly'));
 	}
 	return (loadNodeModule('process') as ProcessModule).env;
 }

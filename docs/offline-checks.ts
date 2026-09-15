@@ -92,9 +92,14 @@ import {
 import { startsExpanded, toolCategory, toolResultText, toolSummary } from '../src/core/tool-policy';
 import { diffFromToolInput, diffStats, emptyPaneText } from '../src/ui/diff-view';
 import { toolPermissionBodyText, toolResultTitle, toolStatusText } from '../src/ui/tool-card';
-import { canRememberPermission, createPermissionCard, permissionDiff, rememberLabelText, shortenPathForLabel, type PermissionActions } from '../src/ui/permission-card';
-import { clearRememberedDecisions, DEFAULT_SETTINGS, formatRememberedDecision, removeRememberedDecision } from '../src/ui/settings-tab';
+import { canRememberPermission, createPermissionCard, permissionDiff, rememberLabelText, shortenPathForLabel, updatePermissionCard, type PermissionActions } from '../src/ui/permission-card';
+import { clearRememberedDecisions, DEFAULT_SETTINGS, formatRememberedDecision, GukiSettingTab, removeRememberedDecision } from '../src/ui/settings-tab';
 import GukiChatPlugin from '../src/main';
+import { getLocale, setLocale, t } from '../src/i18n';
+import { settingsStrings } from '../src/i18n/keys/settings';
+import { chatStrings } from '../src/i18n/keys/chat';
+import { transcriptStrings } from '../src/i18n/keys/transcript';
+import { coreStrings } from '../src/i18n/keys/core';
 import { ChatView, currentStatus, HISTORY_PAGE_SIZE } from '../src/ui/chat-view';
 import { renderQuotaBar } from '../src/ui/composer';
 import { appendPromptHistory, PROMPT_HISTORY_CAP } from '../src/core/prompt-history';
@@ -141,7 +146,7 @@ import {
 	resolveVaultFile,
 	triageImageFiles,
 } from '../src/core/attachment-resolver';
-import { absolutePathForFile } from '../src/cli/node-api';
+import { absolutePathForFile, nodeFs } from '../src/cli/node-api';
 import { Composer, pasteBelongsToComposer, type ComposerOptions } from '../src/ui/composer';
 import { DEFAULT_SEND_KEY, shouldSend } from '../src/core/send-key';
 import { filterVaultFiles, insertItem, type DropdownItem, type TriggerMatch } from '../src/ui/composer-dropdown';
@@ -169,7 +174,8 @@ import {
 	type HistoryRowItem,
 } from '../src/ui/history-dropdown';
 import { NodeTranscriptStore } from '../src/data/transcript-store';
-import { App, FileSystemAdapter, TFile, WorkspaceLeaf } from 'obsidian';
+import * as Obsidian from 'obsidian';
+import { App, FileSystemAdapter, Platform, Setting, TFile, WorkspaceLeaf } from 'obsidian';
 import { parseAskUserQuestionInput, decideAskUserQuestion, formatAskUserQuestionSummary, parseAskUserQuestionAnswers } from '../src/core/ask-user-question';
 import { AskUserQuestionInline } from '../src/ui/ask-user-question';
 import { DiskTranscriptLoader, resolveTranscriptBranch } from '../src/data/disk-transcript-loader';
@@ -12210,7 +12216,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	const session = {
 		state,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
 		getSlashCommands: () => ['clear', 'help'],
 		send: () => {},
@@ -12321,7 +12327,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	const session = {
 		state,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
 		getSlashCommands: () => ['clear', 'help'],
 		send: () => {},
@@ -12419,7 +12425,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 		const realSession = {
 			state: new ChatState(),
 			busy: false,
-			blocked: false,
+			blocked: null,
 			vaultPaths: async () => ({ root: '/Users/emregultekir/Documents/otherprojects/guki-obsidian-chat', outside: '/fake/outside' }),
 			getSlashCommands: () => ['clear', 'help'],
 			send: () => {},
@@ -12450,7 +12456,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	const session = {
 		state,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
 		getSlashCommands: () => ['clear', 'help'],
 		send: () => {},
@@ -12628,7 +12634,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	const session = {
 		state,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
 		getSlashCommands: () => ['clear', 'help'],
 		send: () => {},
@@ -12820,7 +12826,7 @@ function countHistoryControls(container: any): number {
 	const session = {
 		state,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: TRANSCRIPT_TEST_DIR, outside: '/fake/outside' }),
 		getSlashCommands: () => ['clear', 'help'],
 		send: () => {},
@@ -13479,7 +13485,7 @@ function countHistoryControls(container: any): number {
 	const session = {
 		state: new ChatState(),
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
 		getSlashCommands: () => ['clear', 'help'],
 		send: () => {},
@@ -13602,7 +13608,7 @@ console.log('AU. Phase 7 Task 9 Lane 3: History dropdown refresh and panel heade
 		state: new ChatState(),
 		reducer: mockReducer,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: '/fake/vault', outside: '/fake/outside' }),
 		getSlashCommands: () => [],
 		send: () => {},
@@ -13998,7 +14004,7 @@ console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed
 		state: new ChatState(),
 		reducer: mockReducer,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: avDir2, outside: '/fake/outside' }),
 		getSlashCommands: () => [],
 		send: () => {},
@@ -14071,7 +14077,7 @@ console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed
 		state: new ChatState(),
 		reducer: mockReducer,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: avDir3, outside: '/fake/outside' }),
 		getSlashCommands: () => [],
 		send: () => {},
@@ -14108,7 +14114,7 @@ console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed
 		state: new ChatState(),
 		reducer: mockReducer,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: avDir4, outside: '/fake/outside' }),
 		getSlashCommands: () => [],
 		send: () => {},
@@ -14166,7 +14172,7 @@ console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed
 		state: new ChatState(),
 		reducer: mockReducer,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: avDir5, outside: '/fake/outside' }),
 		getSlashCommands: () => [],
 		send: () => {},
@@ -14228,7 +14234,7 @@ console.log('AV. Phase 7 Task 9 Lane 5: Panel header when history list is closed
 		state: new ChatState(),
 		reducer: awReducer,
 		busy: false,
-		blocked: false,
+		blocked: null,
 		vaultPaths: async () => ({ root: awDir, outside: '/fake/outside' }),
 		getSlashCommands: () => [],
 		send: () => {},
@@ -14641,7 +14647,7 @@ console.log('\nAY. Görev 13 — Send message with preference');
 	}
 	{
 		const fixture = makeSendKeyComposer('mod-enter');
-		fixture.composer.setBlocked('...');
+		fixture.composer.setBlocked('core.session.vaultUnsupported');
 		fixture.composer.setBlocked(null);
 		const value = placeholder(fixture.input);
 		check('AY5.4 unblocking mod-enter restores mod-enter placeholder', value.includes('Cmd/Ctrl+Enter to send') && !value.includes('(Enter to send'));
@@ -14720,6 +14726,524 @@ console.log('\nAY. Görev 13 — Send message with preference');
 		await (view as any).onClose();
 	}
 }
+
+// --- AZ. i18n foundation -------------------------------------------------
+
+console.log('\nAZ. i18n foundation');
+
+const i18nSlices = [settingsStrings, chatStrings, transcriptStrings, coreStrings] as const;
+const i18nAll = {
+	...settingsStrings,
+	...chatStrings,
+	...transcriptStrings,
+	...coreStrings,
+};
+const placeholderNames = (value: string): string[] =>
+	[...value.matchAll(/\{([^{}]+)\}/g)].map((match) => match[1] ?? '').sort();
+
+check('AZ1. placeholder parity holds for every merged dictionary key',
+	Object.values(i18nAll).every((message) =>
+		JSON.stringify(placeholderNames(message.en)) === JSON.stringify(placeholderNames(message.tr))),
+);
+
+check('AZ2. merged dictionary has no overwritten keys or empty Turkish values',
+	Object.keys(i18nAll).length === i18nSlices.reduce((sum, slice) => sum + Object.keys(slice).length, 0) &&
+		Object.values(i18nAll).every((message) => message.tr.length > 0),
+);
+
+setLocale('en');
+const englishInterpolated = t('settings.remembered.count.one', { count: 2 });
+const missingPlaceholder = t('settings.remembered.count.one');
+setLocale('tr');
+const turkishInterpolated = t('settings.remembered.count.one', { count: 2 });
+check('AZ3. translator switches locales, interpolates, and preserves missing placeholders',
+	englishInterpolated === '2 remembered decision.' &&
+		turkishInterpolated === '2 hatırlanan karar.' &&
+		missingPlaceholder === '{count} remembered decision.' &&
+		getLocale() === 'tr',
+);
+
+{
+	const container = new FakeElement() as any;
+	const app = new App();
+	(app.vault as any).configDir = '.obsidian';
+	const plugin = new GukiChatPlugin(app as any, { dir: 'plugins/guki-chat' } as any);
+	plugin.settings = { ...DEFAULT_SETTINGS, rememberedDecisions: [] };
+	const tab = new GukiSettingTab(app as any, plugin);
+	(tab as any).app = app;
+	(tab as any).containerEl = container;
+
+	const settingPrototype = Setting.prototype as any;
+	const originalMethods = {
+		setName: settingPrototype.setName,
+		setDesc: settingPrototype.setDesc,
+		setHeading: settingPrototype.setHeading,
+		addText: settingPrototype.addText,
+		addDropdown: settingPrototype.addDropdown,
+		addToggle: settingPrototype.addToggle,
+		addButton: settingPrototype.addButton,
+	};
+	const addText = (value: string) => container.createSpan({ text: value });
+	settingPrototype.setName = function(value: string) { addText(value); return this; };
+	settingPrototype.setDesc = function(value: string) { addText(value); return this; };
+	settingPrototype.setHeading = function() { return this; };
+	settingPrototype.addText = function(callback: (control: any) => void) {
+		const control = {
+			setPlaceholder: (value: string) => { addText(value); return control; },
+			setValue: () => control,
+			onChange: () => control,
+		};
+		callback(control);
+		return this;
+	};
+	settingPrototype.addDropdown = function(callback: (control: any) => void) {
+		const control = {
+			addOption: (_value: string, label: string) => { addText(label); return control; },
+			setValue: () => control,
+			onChange: () => control,
+		};
+		callback(control);
+		return this;
+	};
+	settingPrototype.addToggle = function(callback: (control: any) => void) {
+		const control = { setValue: () => control, onChange: () => control };
+		callback(control);
+		return this;
+	};
+	settingPrototype.addButton = function(callback: (control: any) => void) {
+		const control = {
+			setButtonText: (value: string) => { addText(value); return control; },
+			setWarning: () => control,
+			onClick: () => control,
+		};
+		callback(control);
+		return this;
+	};
+
+	setLocale('tr');
+	tab.display();
+	Object.assign(settingPrototype, originalMethods);
+	check('AZ4. real settings tab renders specific Turkish strings',
+		container.text.includes('Dil') &&
+			container.text.includes('İngilizce') &&
+			container.text.includes('Claude code ikili dosya yolu') &&
+			container.text.includes('Kasa dışındaki izinler') &&
+			container.text.includes('Her şeye izin ver (yüksek risk)') &&
+			container.text.includes('Hatırlanan izin yok.'),
+	);
+}
+
+{
+	setLocale('en');
+	const app = new App();
+	const container = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(app, container);
+	const plugin = new GukiChatPlugin(app as any, { dir: 'plugins/guki-chat' } as any);
+	plugin.settings = { ...DEFAULT_SETTINGS, language: 'en' };
+	plugin.saveData = async () => {};
+	const session = {
+		state: new ChatState(),
+		busy: false,
+		blocked: null,
+		vaultPaths: async () => ({
+			root: '/fake/vault',
+			resolve: (raw: string) => raw,
+			isInside: () => true,
+		}),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+	} as unknown as SessionManager;
+	const factory = plugin.createChatViewFactory(session);
+	const originalView = factory(leaf);
+	await leaf.open(originalView);
+	// Driven through the production draft door, not the DOM: a chip lives only in the composer's
+	// own array, so it is the half a textarea-level rescue silently loses. The operator's manual
+	// round found a pasted screenshot and an attached note both disappearing on a language change.
+	originalView.restoreDraft({
+		text: 'Taslak mesajım kaybolmasın',
+		attachments: [{ kind: 'file', path: 'Notlar/ek.md', label: 'ek.md' } as never],
+	});
+	const attachedBefore = originalView.captureDraft()?.attachments.length ?? 0;
+
+	let localeDuringRebuild = '';
+	let rebuiltView: ChatView | null = null;
+	const removedCommands: string[] = [];
+	const addedCommands: Array<{ id: string; name: string }> = [];
+	(app.workspace as any).getLeavesOfType = (type: string) => type === 'guki-chat-view' ? [leaf] : [];
+	(leaf as any).getViewState = () => ({ type: 'guki-chat-view', active: true });
+	(leaf as any).setViewState = async (viewState: { type: string }) => {
+		if (viewState.type === 'empty') {
+			await (leaf.view as any).onClose();
+			return;
+		}
+		localeDuringRebuild = getLocale();
+		rebuiltView = factory(leaf);
+		await leaf.open(rebuiltView);
+	};
+	(plugin as any).removeCommand = (id: string) => removedCommands.push(id);
+	(plugin as any).addCommand = (command: { id: string; name: string }) => addedCommands.push(command);
+
+	plugin.settings.language = 'tr';
+	await plugin.saveSettings();
+	const rebuiltInput = required(container.querySelector('textarea'), 'AZ5 rebuilt composer textarea');
+	const attachedAfter = rebuiltView?.captureDraft()?.attachments.length ?? 0;
+	check('AZ5. production language door rebuilds the panel in Turkish and preserves the draft',
+		rebuiltView !== null && rebuiltView !== originalView &&
+			localeDuringRebuild === 'tr' && getLocale() === 'tr' &&
+			rebuiltInput.value === 'Taslak mesajım kaybolmasın' &&
+			attachedBefore === 1 && attachedAfter === attachedBefore &&
+			removedCommands.includes('open-chat') &&
+			addedCommands.some((command) => command.id === 'open-chat' && command.name === 'Sohbeti aç'),
+	);
+	await (leaf.view as any).onClose();
+}
+
+setLocale('en');
+check('AZ6. locale is restored to English after i18n checks', getLocale() === 'en');
+
+// These producers are imported while English is active. Switching before invoking them proves
+// their translated values are evaluated per call rather than frozen during module evaluation.
+{
+	setLocale('tr');
+	const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+	const pasted = await readImageAttachment({
+		name: 'image.png',
+		type: 'image/png',
+		arrayBuffer: () => Promise.resolve(png.buffer),
+	} as unknown as File);
+	eq('AZ7. pasted-image label follows a live Turkish locale', pasted?.displayName, 'Yapıştırılan görüntü');
+
+	const originalIsDesktop = Platform.isDesktop;
+	let desktopOnlyMessage = '';
+	try {
+		(Platform as { isDesktop: boolean }).isDesktop = false;
+		nodeFs();
+	} catch (error) {
+		desktopOnlyMessage = error instanceof Error ? error.message : String(error);
+	} finally {
+		(Platform as { isDesktop: boolean }).isDesktop = originalIsDesktop;
+	}
+	eq('AZ8. desktop-only detail follows a live Turkish locale', desktopOnlyMessage,
+		'GuKi Chat, Claude Code CLI’ı bir alt işlem olarak çalıştırır; bu yalnızca masaüstünde kullanılabilir.');
+	setLocale('en');
+}
+
+// Drive the production feature-detection door against live namespace bindings from the stub.
+{
+	const languageStub = Obsidian as unknown as {
+		setGetLanguageForChecks: (reader: (() => string) | undefined) => void;
+	};
+	const app = new App();
+	(app.workspace as any).getLeavesOfType = () => [];
+	const plugin = new GukiChatPlugin(app as any, { dir: 'plugins/guki-chat' } as any);
+	plugin.settings = { ...DEFAULT_SETTINGS, language: 'auto' };
+	const applyLanguageSetting = () => (plugin as any).applyLanguageSetting(true) as Promise<void>;
+
+	languageStub.setGetLanguageForChecks(() => 'tr');
+	await applyLanguageSetting();
+	eq('AZ9. auto language selects Turkish through production applyLanguageSetting', getLocale(), 'tr');
+
+	const nonTurkishResults: string[] = [];
+	for (const language of ['en', 'de', 'not-a-language']) {
+		languageStub.setGetLanguageForChecks(() => language);
+		await applyLanguageSetting();
+		nonTurkishResults.push(getLocale());
+	}
+	check('AZ10. auto language defaults English, German, and garbage to English through production applyLanguageSetting',
+		nonTurkishResults.every((locale) => locale === 'en'));
+
+	languageStub.setGetLanguageForChecks(undefined);
+	let absentGetLanguageThrew = false;
+	try {
+		await applyLanguageSetting();
+	} catch {
+		absentGetLanguageThrew = true;
+	}
+	check('AZ11. auto language without getLanguage defaults to English without throwing through production applyLanguageSetting',
+		!absentGetLanguageThrew && getLocale() === 'en');
+
+	languageStub.setGetLanguageForChecks(undefined);
+	setLocale('en');
+}
+
+check('AZ12. locale is English after added i18n coverage', getLocale() === 'en');
+
+// --- BA. i18n production gates ------------------------------------------
+
+console.log('\nBA. i18n production gates');
+
+// G1: The public plugin factory is the panel's production construction door. The assertions use
+// handwritten Turkish so a broken call site cannot be hidden by asking the translator what to expect.
+{
+	setLocale('tr');
+	const app = new App();
+	const container = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(app, container);
+	const plugin = new GukiChatPlugin(app as any, { dir: 'plugins/guki-chat' } as any);
+	plugin.settings = { ...DEFAULT_SETTINGS, language: 'tr', sendKey: 'enter' };
+	const session = {
+		state: new ChatState(),
+		busy: false,
+		blocked: null,
+		vaultPaths: async () => ({
+			root: '/fake/vault',
+			resolve: (raw: string) => raw,
+			isInside: () => true,
+		}),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+		rememberPermission: async () => {},
+	} as unknown as SessionManager;
+
+	const view = plugin.createChatViewFactory(session)(leaf);
+	await (view as any).onOpen();
+	const input = required(container.querySelector('textarea'), 'BA G1 composer textarea');
+	const attachButtons = container.querySelectorAll('.guki-composer-attach');
+	const historyButton = required(view.getHistoryTriggerEl(), 'BA G1 history control');
+	const newConversationButton = required(view.getNewConvTriggerEl(), 'BA G1 new-conversation control');
+
+	eq('BA G1.1 real panel composer renders the handwritten Turkish placeholder',
+		input.getAttribute('placeholder'),
+		"GuKi'ye mesaj yazın… (Göndermek için Enter, yeni satır için Shift+Enter)");
+	check('BA G1.2 real panel composer renders Turkish attachment chrome',
+		attachButtons.some((button: any) => button.getAttribute('aria-label') === 'Diskten dosya ekle') &&
+			attachButtons.some((button: any) => button.getAttribute('aria-label') === 'Etkin notu ekle'));
+	eq('BA G1.3 real panel history control renders handwritten Turkish chrome',
+		historyButton.getAttribute('aria-label'), 'Konuşma geçmişi');
+	eq('BA G1.4 real panel new-conversation control renders handwritten Turkish chrome',
+		newConversationButton.getAttribute('aria-label'), 'Yeni konuşma');
+	await (view as any).onClose();
+}
+
+// G2: Render real ChatState items through MessageList/tool-card and the actionable permission-card.
+{
+	setLocale('tr');
+	const component = {
+		registerDomEvent: (el: any, event: string, callback: any) => el.addEventListener(event, callback),
+	} as any;
+	const state = new ChatState();
+	const wrapper = new FakeElement() as any;
+	const list = new MessageList({} as any, wrapper, component, { decide: () => {} } as any);
+	const turn = state.addAssistantMessage();
+	turn.status = 'streaming';
+	turn.blocks.set(0, {
+		index: 0,
+		kind: 'tool_use',
+		text: '',
+		final: false,
+		toolUseId: 'ba-tool-bash',
+		toolName: 'Bash',
+		toolInput: { command: 'npm test' },
+		toolPending: true,
+		toolPermissionRequested: true,
+	});
+	list.sync(state.items);
+
+	eq('BA G2.1 real message-list tool card renders handwritten Turkish status',
+		required(wrapper.querySelector('.guki-tool-status'), 'BA G2 tool status').text,
+		'Onay bekleniyor…');
+	eq('BA G2.2 real message-list tool body renders handwritten Turkish copy',
+		required(wrapper.querySelector('.guki-tool-empty'), 'BA G2 tool body').text,
+		'Oluşturucudaki onayınız bekleniyor.');
+
+	const permission = state.addPermissionRequest({
+		requestId: 'ba-permission-bash',
+		toolName: 'Bash',
+		input: { command: 'npm test' },
+	});
+	const permissionParent = new FakeElement() as any;
+	const permissionCard = createPermissionCard(
+		permissionParent,
+		component,
+		permission,
+		{ decide: () => {} },
+	);
+	updatePermissionCard(permission, permissionCard);
+	check('BA G2.3 real permission card renders handwritten Turkish actions',
+		permissionCard.denyEl.text === 'Reddet' &&
+			permissionCard.allowEl.text === 'İzin ver' &&
+			permissionParent.text.includes('Bu komuta bu dizinde her zaman izin ver'));
+
+	permission.status = 'allowed';
+	list.sync(state.items);
+	const permissionSummary = required(wrapper.querySelector('.guki-perm-summary-block'), 'BA G2 permission summary');
+	check('BA G2.4 real message-list permission summary renders handwritten Turkish copy',
+		permissionSummary.text.includes('Onay: Bash: npm test → İzin verildi') &&
+			permissionSummary.text.includes('Araç:') &&
+			permissionSummary.text.includes('Karar:') &&
+			permissionSummary.text.includes('İzin verildi.'));
+}
+
+// G3: Core and data producers are called directly at their real exported entry points.
+{
+	setLocale('tr');
+	eq('BA G3.1 core AskUserQuestion producer emits handwritten Turkish',
+		formatAskUserQuestionSummary([{ question: 'Değişiklik uygulansın mı?' }], {}, 'denied'),
+		'Soru: Değişiklik uygulansın mı? → Reddedildi');
+	eq('BA G3.2 data session-title producer emits handwritten Turkish',
+		resolveSessionTitle({ sessionId: 'ba-untitled', startedAt: '' }).text,
+		'Adsız oturum');
+	const imageItems = await translateTranscriptRecords([{
+		type: 'user',
+		uuid: 'ba-image-user',
+		message: {
+			role: 'user',
+			content: [{
+				type: 'image',
+				source: { type: 'base64', media_type: 'image/png', data: 'AAAA' },
+			}],
+		},
+	}]);
+	const imageUser = imageItems.find((candidate): candidate is UserItem => candidate.kind === 'user');
+	eq('BA G3.3 data transcript producer emits handwritten Turkish image name',
+		imageUser?.images?.[0]?.displayName, 'görüntü-1.png');
+}
+
+// G4: These strings are protocol/dispatch data, not localisable UI copy.
+{
+	setLocale('tr');
+	const component = {
+		registerDomEvent: (el: any, event: string, callback: any) => el.addEventListener(event, callback),
+	} as any;
+	const permission: PermissionItem = {
+		kind: 'permission',
+		id: 'ba-protocol-permission',
+		requestId: 'ba-protocol-request',
+		toolName: 'Bash',
+		input: { command: 'pwd' },
+		status: 'pending',
+	};
+	const permissionParent = new FakeElement() as any;
+	const permissionCard = createPermissionCard(permissionParent, component, permission, { decide: () => {} });
+	updatePermissionCard(permission, permissionCard);
+	eq('BA G4.1 rendered permission tool name stays byte-identical under Turkish locale',
+		permissionCard.titleEl.text, 'Bash');
+
+	const questionInput = {
+		questions: [{
+			question: 'Choose a wire value',
+			options: [{ label: 'Keep EXACT Wire Label' }],
+		}],
+	};
+	let wireDecision: ReturnType<typeof decideAskUserQuestion> | null = null;
+	const askParent = new FakeElement() as any;
+	new AskUserQuestionInline(
+		askParent,
+		component,
+		{ ...permission, id: 'ba-ask-protocol', toolName: 'AskUserQuestion', input: questionInput } as PermissionItem,
+		(answers) => { wireDecision = decideAskUserQuestion(questionInput, answers); },
+	);
+	required(askParent.querySelector('.guki-ask-item'), 'BA G4 AskUserQuestion option').click();
+	eq('BA G4.2 AskUserQuestion option label reaches the wire byte-identical under Turkish locale',
+		(wireDecision?.updatedInput as any)?.answers?.['Choose a wire value'],
+		'Keep EXACT Wire Label');
+
+	const interruptedItems = await translateTranscriptRecords([
+		{
+			type: 'assistant',
+			uuid: 'ba-interrupted-assistant',
+			message: {
+				role: 'assistant',
+				content: [{ type: 'tool_use', id: 'ba-interrupted-tool', name: 'Bash', input: { command: 'sleep 10' } }],
+			},
+		},
+		{
+			type: 'user',
+			uuid: 'ba-interruption-marker',
+			message: { role: 'user', content: '[Request interrupted by user]' },
+		},
+	]);
+	const interruptedAssistant = interruptedItems.find(
+		(candidate): candidate is AssistantItem => candidate.kind === 'assistant',
+	);
+	eq('BA G4.3 transcript parser recognises the byte-identical interruption marker under Turkish locale',
+		interruptedAssistant?.status, 'stopped');
+
+	const persisted = parsePersistedOutput(
+		'<persisted-output>\nFull output saved to: /tmp/ba-output.txt\nPreview:\nkept preview\n</persisted-output>',
+	);
+	eq('BA G4.4 transcript parser recognises the byte-identical sidecar marker under Turkish locale',
+		persisted?.filePath, '/tmp/ba-output.txt');
+}
+
+// G5: Application-owned history is translated when recorded, then treated as immutable content.
+{
+	setLocale('en');
+	const state = new ChatState();
+	const recordedDivider = state.addDivider('ba-recorded-divider');
+	setLocale('tr');
+	const wrapper = new FakeElement() as any;
+	const list = new MessageList(
+		{} as any,
+		wrapper,
+		{ registerDomEvent: (el: any, event: string, callback: any) => el.addEventListener(event, callback) } as any,
+		{ decide: () => {} } as any,
+	);
+	list.sync(state.items);
+	eq('BA G5. history keeps the English language recorded before a Turkish re-render',
+		`${recordedDivider.text}|${required(wrapper.querySelector('.guki-divider-label'), 'BA G5 divider label').text}`,
+		'Conversation compacted|Conversation compacted');
+}
+
+// G6: The state default, live stream reducer and disk translator must stay on one shared key.
+{
+	setLocale('tr');
+	const directState = new ChatState();
+	const directDivider = directState.addDivider('ba-direct-divider');
+
+	const liveState = new ChatState();
+	const liveReducer = new StreamReducer(liveState);
+	const liveEvent = parseStreamJsonLine(
+		'{"type":"system","subtype":"compact_boundary","uuid":"ba-live-divider","compact_metadata":{"trigger":"auto"}}',
+	);
+	if (liveEvent) {
+		liveReducer.apply(liveEvent);
+	}
+	const liveDivider = liveState.items.find((candidate): candidate is DividerItem => candidate.kind === 'divider');
+
+	const diskItems = await translateTranscriptRecords([{
+		type: 'system',
+		subtype: 'compact_boundary',
+		uuid: 'ba-disk-divider',
+	}]);
+	const diskDivider = diskItems.find((candidate): candidate is DividerItem => candidate.kind === 'divider');
+	eq('BA G6. live state reducer and reconstructed history share the handwritten Turkish compaction text',
+		`${directDivider.text}|${liveDivider?.text}|${diskDivider?.text}`,
+		'Konuşma sıkıştırıldı|Konuşma sıkıştırıldı|Konuşma sıkıştırıldı');
+}
+
+// G8: both halves of the language rule, pinned against each other in one scenario. The block is
+// CURRENT STATE — the vault is still unsupported — so its placeholder must follow a later locale.
+// The notice beside it RECORDS THAT IT HAPPENED, so it is history and keeps the English wording it
+// was written with. Raise the block under English, render the real view under Turkish, and assert
+// the placeholder moved while the notice did not. Expected strings are handwritten, so a broken
+// storage path cannot make the translator agree with its own output.
+{
+	setLocale('en');
+	const manager = new SessionManager({ vault: { adapter: {} } } as never);
+	(manager as unknown as { vaultPaths(): ReturnType<typeof createVaultPaths> }).vaultPaths =
+		async () => createVaultPaths('/fake/vault');
+	const container = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(new App(), container);
+
+	setLocale('tr');
+	const view = new ChatView(leaf, manager);
+	await (view as any).onOpen();
+	const input = required(container.querySelector('textarea'), 'BA G8 blocked composer textarea');
+	const detail = required(container.querySelector('.guki-message-meta'), 'BA G8 blocked notice detail');
+	eq('BA G8. blocked placeholder follows a live Turkish locale while its notice keeps English',
+		`${input.placeholder ?? input.getAttribute('placeholder')}|${detail.text}`,
+		'Bu kasa türü desteklenmediği için sohbet devre dışı bırakıldı.|The CLI needs a real filesystem path, and this vault\'s adapter does not provide one.');
+	await (view as any).onClose();
+	manager.dispose();
+}
+
+setLocale('en');
+check('BA G7. locale is restored to English after production i18n gates', getLocale() === 'en');
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;

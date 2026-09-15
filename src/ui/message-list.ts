@@ -33,6 +33,7 @@ import {
 import { toolSummary } from '../core/tool-policy';
 import { formatAskUserQuestionSummary } from '../core/ask-user-question';
 import { createToolCard, updateToolCard, type RenderedToolCard } from './tool-card';
+import { t } from '../i18n';
 
 /** Treat the view as "at the bottom" within this many pixels, so new content keeps following. */
 const STICKY_BOTTOM_SLACK_PX = 48;
@@ -120,7 +121,7 @@ export class MessageList {
 		// that lands while they are scrolled up leaves no sign at all that it arrived.
 		this.jumpEl = wrapperEl.createEl('button', {
 			cls: 'guki-jump',
-			text: 'Jump to latest',
+			text: t('transcript.jump.latest'),
 		});
 		this.jumpEl.hide();
 
@@ -288,7 +289,7 @@ export class MessageList {
 	private createCopyButton(el: HTMLElement, item: UserItem | AssistantItem): HTMLButtonElement {
 		const copyEl = el.createEl('button', {
 			cls: 'guki-message-copy',
-			attr: { 'aria-label': 'Copy message' },
+			attr: { 'aria-label': t('transcript.message.copy') },
 		});
 		setIcon(copyEl, 'copy');
 
@@ -387,22 +388,22 @@ export class MessageList {
 
 		switch (item.status) {
 			case 'pending':
-				entry.metaEl.setText('Working…');
+				entry.metaEl.setText(t('transcript.turn.working'));
 				break;
 			case 'streaming':
 				// Deferred item D1: blanking this while nothing is on screen yet read as "no reply
 				// is coming". The thinking header fills that gap, and since Phase 4 a tool card
 				// does too — `hasRenderableContent` counts one, so a turn that opens with a tool
 				// call drops "Working…" as soon as the card appears rather than holding it.
-				entry.metaEl.setText(hasRenderableContent(item) ? '' : 'Working…');
+				entry.metaEl.setText(hasRenderableContent(item) ? '' : t('transcript.turn.working'));
 				break;
 			case 'stopped':
-				entry.metaEl.setText(withTurnMeta('Stopped.', item));
+				entry.metaEl.setText(withTurnMeta(t('transcript.turn.stopped'), item));
 				break;
 			case 'error':
 				// Trap 3: an errored turn still cost money. `withTurnMeta` appends the badge to the
 				// error text exactly as the `stopped` case does above.
-				entry.metaEl.setText(withTurnMeta(item.errorText ?? 'Something went wrong.', item));
+				entry.metaEl.setText(withTurnMeta(item.errorText ?? t('transcript.turn.errorFallback'), item));
 				break;
 			case 'complete':
 				entry.metaEl.setText(formatTurnMeta(item));
@@ -768,13 +769,17 @@ export class MessageList {
 			const targetStr = target.length > 0 ? `: ${target}` : '';
 			let decisionStr = '';
 			if (item.status === 'allowed') {
-				decisionStr = 'Allowed';
+				decisionStr = t('transcript.approval.allowed');
 			} else if (item.status === 'denied') {
-				decisionStr = 'Denied';
+				decisionStr = t('transcript.approval.denied');
 			} else {
-				decisionStr = 'Not answered (turn ended)';
+				decisionStr = t('transcript.approval.unanswered');
 			}
-			headerText = `Approval: ${item.toolName}${targetStr} → ${decisionStr}`;
+			headerText = t('transcript.approval.summary', {
+				tool: item.toolName,
+				target: targetStr,
+				decision: decisionStr,
+			});
 		}
 
 		headerEl.setText(headerText);
@@ -800,8 +805,10 @@ export class MessageList {
 				item.askQuestions.forEach((q, idx) => {
 					const qEl = contentEl.createDiv({ cls: 'guki-perm-summary-question' });
 					const qTitleEl = qEl.createDiv({ cls: 'guki-perm-summary-qtitle' });
-					const qLabel = item.askQuestions!.length > 1 ? `Question ${idx + 1}: ${q.question}` : q.question;
-					qTitleEl.setText(q.header ? `${q.header}: ${qLabel}` : qLabel);
+					const qLabel = item.askQuestions!.length > 1
+						? t('transcript.question.numbered', { number: idx + 1, question: q.question })
+						: q.question;
+					qTitleEl.setText(q.header ? t('transcript.question.withHeader', { header: q.header, question: qLabel }) : qLabel);
 
 					const optionsListEl = qEl.createDiv({ cls: 'guki-perm-summary-qoptions' });
 					const answerVal = item.answers
@@ -821,8 +828,15 @@ export class MessageList {
 								(chosenArr.includes(opt.value) || chosenArr.includes(opt.label));
 							optEl.toggleClass('is-selected', isChosen);
 							const prefix = isChosen ? '✓ ' : '○ ';
-							const desc = opt.description ? ` — ${opt.description}` : '';
-							optEl.setText(`${prefix}${opt.label}${desc}`);
+							optEl.setText(
+								opt.description
+									? t('transcript.question.optionWithDescription', {
+											prefix,
+											label: opt.label,
+											description: opt.description,
+										})
+									: t('transcript.question.option', { prefix, label: opt.label }),
+							);
 						}
 					}
 
@@ -832,10 +846,10 @@ export class MessageList {
 						const otherEl = optionsListEl.createDiv({ cls: 'guki-perm-summary-option' });
 						if (customAnswers.length > 0 && item.status === 'allowed') {
 							otherEl.addClass('is-selected');
-							otherEl.setText(`✓ Other: "${customAnswers.join(', ')}"`);
+							otherEl.setText(t('transcript.question.customAnswer', { answers: customAnswers.join(', ') }));
 						} else {
 							const bullet = '○ ';
-							otherEl.setText(`${bullet}Other`);
+							otherEl.setText(t('transcript.question.otherOption', { bullet }));
 						}
 					}
 
@@ -846,7 +860,7 @@ export class MessageList {
 				});
 			} else {
 				const malformedEl = contentEl.createDiv({ cls: 'guki-perm-summary-malformed' });
-				malformedEl.setText('Question details unavailable.');
+				malformedEl.setText(t('transcript.question.detailsUnavailable'));
 				const outcomeEl = contentEl.createDiv({ cls: 'guki-perm-summary-outcome' });
 				outcomeEl.setText(statusText(item.status));
 			}
@@ -854,13 +868,13 @@ export class MessageList {
 			const detailEl = contentEl.createDiv({ cls: 'guki-perm-summary-details' });
 
 			const toolRow = detailEl.createDiv({ cls: 'guki-perm-summary-detail-row' });
-			toolRow.createSpan({ cls: 'guki-perm-summary-detail-label', text: 'Tool:' });
+			toolRow.createSpan({ cls: 'guki-perm-summary-detail-label', text: t('transcript.detail.tool') });
 			toolRow.createSpan({ cls: 'guki-perm-summary-detail-value', text: item.toolName });
 
 			const target = toolSummary(item.toolName, item.input);
 			if (target.length > 0) {
 				const targetRow = detailEl.createDiv({ cls: 'guki-perm-summary-detail-row' });
-				targetRow.createSpan({ cls: 'guki-perm-summary-detail-label', text: 'Target:' });
+				targetRow.createSpan({ cls: 'guki-perm-summary-detail-label', text: t('transcript.detail.target') });
 				targetRow.createSpan({ cls: 'guki-perm-summary-detail-value', text: target });
 			}
 
@@ -869,13 +883,13 @@ export class MessageList {
 				const fullTarget = inputObj.file_path ?? inputObj.path ?? inputObj.command;
 				if (typeof fullTarget === 'string' && fullTarget !== target) {
 					const fullRow = detailEl.createDiv({ cls: 'guki-perm-summary-detail-row' });
-					fullRow.createSpan({ cls: 'guki-perm-summary-detail-label', text: 'Full target:' });
+					fullRow.createSpan({ cls: 'guki-perm-summary-detail-label', text: t('transcript.detail.fullTarget') });
 					fullRow.createSpan({ cls: 'guki-perm-summary-detail-value', text: fullTarget });
 				}
 			}
 
 			const decisionRow = detailEl.createDiv({ cls: 'guki-perm-summary-detail-row' });
-			decisionRow.createSpan({ cls: 'guki-perm-summary-detail-label', text: 'Decision:' });
+			decisionRow.createSpan({ cls: 'guki-perm-summary-detail-label', text: t('transcript.detail.decision') });
 			decisionRow.createSpan({ cls: 'guki-perm-summary-detail-value', text: statusText(item.status) });
 		}
 
@@ -917,7 +931,7 @@ export class MessageList {
 		}
 		this.jumpEl.show();
 		this.jumpEl.toggleClass('guki-jump-new', this.missedContent);
-		this.jumpEl.setText(this.missedContent ? 'New reply ↓' : 'Jump to latest ↓');
+		this.jumpEl.setText(this.missedContent ? t('transcript.jump.newReply') : t('transcript.jump.latestDown'));
 	}
 
 	getScrollEl(): HTMLElement {
@@ -941,12 +955,14 @@ function thinkingHeaderText(block: MessageBlock): string {
 			: null;
 
 	if (block.final) {
-		return seconds === null ? 'Thought' : `Thought for ${seconds.toFixed(1)} s`;
+		return seconds === null
+			? t('transcript.thinking.thought')
+			: t('transcript.thinking.thoughtFor', { seconds: seconds.toFixed(1) });
 	}
 	// The token counter is what makes a long silent stretch legible as progress.
 	return block.thinkingTokens === undefined
-		? 'Thinking…'
-		: `Thinking… ${String(block.thinkingTokens)} tokens`;
+		? t('transcript.thinking.thinking')
+		: t('transcript.thinking.withTokens', { count: block.thinkingTokens });
 }
 
 /**
@@ -961,7 +977,7 @@ function thinkingHeaderText(block: MessageBlock): string {
 export function formatTurnMeta(item: AssistantItem): string {
 	const parts: string[] = [];
 	if (item.meta?.durationMs !== undefined) {
-		parts.push(`${(item.meta.durationMs / 1000).toFixed(1)} s`);
+		parts.push(t('transcript.turn.duration', { duration: (item.meta.durationMs / 1000).toFixed(1) }));
 	}
 	if (item.meta?.costUsd !== undefined) {
 		const turnCost = `$${item.meta.costUsd.toFixed(4)}`;
@@ -969,7 +985,7 @@ export function formatTurnMeta(item: AssistantItem): string {
 		if (item.meta.sessionCostUsd !== undefined) {
 			const total = `$${item.meta.sessionCostUsd.toFixed(4)}`;
 			if (total !== turnCost) {
-				parts.push(`${total} total`);
+				parts.push(t('transcript.turn.total', { total }));
 			}
 		}
 	}
@@ -984,7 +1000,7 @@ export function formatTurnMeta(item: AssistantItem): string {
  */
 export function withTurnMeta(prefix: string, item: AssistantItem): string {
 	const meta = formatTurnMeta(item);
-	return meta.length > 0 ? `${prefix} ${meta}` : prefix;
+	return meta.length > 0 ? t('transcript.turn.withMeta', { message: prefix, meta }) : prefix;
 }
 
 /**
@@ -994,11 +1010,12 @@ export function withTurnMeta(prefix: string, item: AssistantItem): string {
  */
 export function formatWorkDuration(durationMs?: number): string {
 	if (durationMs === undefined || typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 0) {
-		return 'Worked';
+		return t('transcript.work.worked');
 	}
 	const totalSeconds = Math.floor(durationMs / 1000);
 	const minutes = Math.floor(totalSeconds / 60);
 	const seconds = totalSeconds % 60;
-	return `Worked for ${minutes}:${String(seconds).padStart(2, '0')}`;
+	return t('transcript.work.workedFor', {
+		duration: `${minutes}:${String(seconds).padStart(2, '0')}`,
+	});
 }
-

@@ -21,6 +21,7 @@
  * every branch has to be drivable from a fixture (`docs/offline-checks.ts` §O). The impure half (a
  * `TFile` or a `File` to a verified attachment) is `attachment-resolver.ts`.
  */
+import { t } from '../i18n';
 
 /**
  * Which side of the vault boundary the file is on. **This is the discriminant the `@` decision is
@@ -281,6 +282,12 @@ export function imageDataUrl(attachment: ImageAttachment): string {
  */
 export function imageSummary(attachment: ImageAttachment): string {
 	const kb = attachment.byteLength / 1024;
-	const size = kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(kb)).toString()} KB`;
-	return `${attachment.displayName} — ${attachment.mediaType.replace('image/', '').toUpperCase()}, ${size}`;
+	const size = kb >= 1024
+		? t('core.attachments.megabytes', { size: (kb / 1024).toFixed(1) })
+		: t('core.attachments.kilobytes', { size: Math.max(1, Math.round(kb)).toString() });
+	return t('core.attachments.imageSummary', {
+		name: attachment.displayName,
+		type: attachment.mediaType.replace('image/', '').toUpperCase(),
+		size,
+	});
 }

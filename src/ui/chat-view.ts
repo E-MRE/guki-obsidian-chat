@@ -21,7 +21,7 @@ import type { ChatState } from '../core/chat-state';
 import { formatModelName } from '../cli/events';
 import { decideAskUserQuestion } from '../core/ask-user-question';
 import type { SessionManager } from '../core/session-manager';
-import { Composer, type ComposerStatus } from './composer';
+import { Composer, type ComposerStatus, type ComposerDraft } from './composer';
 import type { SendKeyMode } from '../core/send-key';
 import { HistoryDropdown } from './history-dropdown';
 import { NodeTranscriptStore, type SessionPage, type TranscriptStore } from '../data/transcript-store';
@@ -29,6 +29,7 @@ import type { ConversationTitleStore } from '../data/conversation-titles';
 import type { PromptHistoryStore } from '../data/prompt-history';
 import { panelTitleFor, type SessionSummary } from '../data/session-index';
 import { MessageList } from './message-list';
+import { t } from '../i18n';
 
 /** Page size for historical conversation paging (UI layer policy, Görev 8). */
 export const HISTORY_PAGE_SIZE = 50;
@@ -286,7 +287,7 @@ export class ChatView extends ItemView {
 				}
 				// Dragging a tab header lands here, and so does dragged text or a link — there is
 				// no file in any of them. Saying so beats doing nothing, which reads as a bug.
-				new Notice('Nothing to attach — that drop contained no file.');
+				new Notice(t('chat.attachment.empty-drop'));
 			},
 			// Returns whether the paste was taken, which is what suppresses the textarea's own
 			// handling. A file copied in Finder arrives exactly as a dropped one does.
@@ -319,7 +320,7 @@ export class ChatView extends ItemView {
 			onAttachActiveNote: () => {
 				const file = activeVaultFile(this.app);
 				if (!file) {
-					new Notice('No active note to attach.');
+					new Notice(t('chat.attachment.no-active-note'));
 					return;
 				}
 				void this.attachFiles([file]);
@@ -332,7 +333,7 @@ export class ChatView extends ItemView {
 					// clipboard image — it can only be the path resolution failing, and a button
 					// that does nothing is the failure mode this project keeps finding by hand.
 					if (files && files.length > 0) {
-						new Notice('Could not read a filesystem path for the chosen file.');
+						new Notice(t('chat.attachment.no-filesystem-path'));
 					}
 					return;
 				}
@@ -436,7 +437,7 @@ export class ChatView extends ItemView {
 			this.currentPage = page;
 			if (page.length === 0) {
 				this.session.state.setItems([]);
-				this.session.state.addNotice('info', 'This conversation has no messages to display.');
+				this.session.state.addNotice('info', t('chat.conversation.empty'));
 			} else {
 				this.session.state.setItems(page);
 			}
@@ -474,7 +475,7 @@ export class ChatView extends ItemView {
 			this.currentPage = null;
 			this.updateLoadOlderControl();
 			const msg = err instanceof Error ? err.message : String(err);
-			this.session.state.addNotice('error', 'Could not load conversation.', msg);
+			this.session.state.addNotice('error', t('chat.conversation.load-failed'), msg);
 			this.currentSessionId = sessionId;
 			this.currentSessionSummary = null;
 			this.updateHeader();
@@ -497,7 +498,7 @@ export class ChatView extends ItemView {
 			if (!this.loadOlderEl) {
 				this.loadOlderEl = scrollEl.createEl('button', {
 					cls: 'guki-load-older',
-					text: 'Load older messages',
+					text: t('chat.conversation.load-older'),
 				});
 				this.registerDomEvent(this.loadOlderEl, 'click', () => {
 					void this.handleLoadOlder();
@@ -548,7 +549,7 @@ export class ChatView extends ItemView {
 			this.updateLoadOlderControl();
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
-			this.session.state.addNotice('error', 'Could not load older messages.', msg);
+			this.session.state.addNotice('error', t('chat.conversation.load-older-failed'), msg);
 		}
 	}
 
@@ -608,9 +609,7 @@ export class ChatView extends ItemView {
 		}
 
 		if (refused.length > 0) {
-			new Notice(
-				`Could not attach ${refused.join(', ')} — it does not resolve inside the vault.`,
-			);
+			new Notice(t('chat.attachment.outside-vault', { files: refused.join(', ') }));
 		}
 	}
 
@@ -645,12 +644,10 @@ export class ChatView extends ItemView {
 		}
 
 		if (folders.length > 0) {
-			new Notice(
-				`Cannot attach the folder ${folders.join(', ')} — attach the files inside it.`,
-			);
+			new Notice(t('chat.attachment.folder', { folders: folders.join(', ') }));
 		}
 		if (lost.length > 0) {
-			new Notice(`Could not attach ${lost.join(', ')} — that path no longer resolves.`);
+			new Notice(t('chat.attachment.path-missing', { files: lost.join(', ') }));
 		}
 	}
 
@@ -685,12 +682,25 @@ export class ChatView extends ItemView {
 			const named = triage.unsupported
 				.map((image) => `${image.displayName} (${image.mediaType})`)
 				.join(', ');
-			new Notice(
-				`Cannot attach ${named} — only PNG, JPEG, GIF and WebP images can be sent.`,
-			);
+			new Notice(t('chat.attachment.unsupported-images', { images: named }));
 		}
 		if (unreadable.length > 0) {
-			new Notice(`Could not read ${unreadable.join(', ')} — the image data was unavailable.`);
+			new Notice(t('chat.attachment.image-data-unavailable', { files: unreadable.join(', ') }));
+		}
+	}
+
+	/**
+	 * The two halves of surviving a rebuild. A language change replaces this view wholesale, so
+	 * whatever the reader had in the composer — typed text and attachment chips alike — is carried
+	 * over these methods or it is lost.
+	 */
+	captureDraft(): ComposerDraft | null {
+		return this.composer?.getDraft() ?? null;
+	}
+
+	restoreDraft(draft: ComposerDraft | null): void {
+		if (draft) {
+			this.composer?.setDraft(draft);
 		}
 	}
 
@@ -835,12 +845,12 @@ export class ChatView extends ItemView {
 				this.newConvTriggerEl = null;
 			}
 			if (!this.viewActionEl) {
-				this.viewActionEl = this.addAction('history', 'Conversation history', () => {
+				this.viewActionEl = this.addAction('history', t('chat.header.history'), () => {
 					void this.historyDropdown?.toggle();
 				});
 			}
 			if (!this.newConvActionEl) {
-				this.newConvActionEl = this.addAction('square-pen', 'New conversation', () => {
+				this.newConvActionEl = this.addAction('square-pen', t('chat.header.new-conversation'), () => {
 					this.handleNewConversation();
 				});
 			}
@@ -865,7 +875,7 @@ export class ChatView extends ItemView {
 				this.historyTriggerEl = header.createEl('button', {
 					cls: 'clickable-icon guki-header-history-btn',
 					attr: {
-						'aria-label': 'Conversation history',
+						'aria-label': t('chat.header.history'),
 						'type': 'button',
 					},
 				});
@@ -877,7 +887,7 @@ export class ChatView extends ItemView {
 				this.newConvTriggerEl = header.createEl('button', {
 					cls: 'clickable-icon guki-header-newconv-btn',
 					attr: {
-						'aria-label': 'New conversation',
+						'aria-label': t('chat.header.new-conversation'),
 						'type': 'button',
 					},
 				});

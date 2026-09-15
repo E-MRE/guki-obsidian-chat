@@ -30,6 +30,8 @@ import {
 } from './permission-card';
 import type { PermissionItem } from '../core/chat-state';
 import { DEFAULT_SEND_KEY, shouldSend, type SendKeyMode } from '../core/send-key';
+import type { BlockedReasonKey } from '../core/session-manager';
+import { t } from '../i18n';
 
 /**
  * The live status line's data. Every field `null` means "not known yet" — before the first
@@ -89,9 +91,6 @@ export interface ComposerOptions {
 	/** Current send-key preference, supplied by the view so the DOM layer owns no persistence. */
 	getSendKey?(): SendKeyMode;
 }
-
-const DEFAULT_PLACEHOLDER = 'Message GuKi… (Enter to send, Shift+Enter for a new line)';
-const MOD_ENTER_PLACEHOLDER = 'Message GuKi… (Cmd/Ctrl+Enter to send, Enter for a new line)';
 
 /**
  * Whether a `paste` dispatched anywhere in the document belongs to this composer.
@@ -165,6 +164,12 @@ export function pasteBelongsToComposer(
 	return target.contains(formEl) && pointerInPanel && panelShown;
 }
 
+/** What a panel rebuild has to carry across: see `Composer.getDraft`. */
+export interface ComposerDraft {
+	text: string;
+	attachments: readonly Attachment[];
+}
+
 export class Composer {
 	private readonly chipsEl: HTMLElement;
 	private readonly inputEl: HTMLTextAreaElement;
@@ -183,7 +188,7 @@ export class Composer {
 	private pendingStatusMeasure: number | null = null;
 	private busy = false;
 	/** Non-null when the panel is refusing input; the text is shown in place of the placeholder. */
-	private blocked: string | null = null;
+	private blocked: BlockedReasonKey | null = null;
 	private attachments: Attachment[] = [];
 	/**
 	 * Nested `dragenter`/`dragleave` pairs fire as the pointer crosses child elements, so a plain
@@ -265,13 +270,13 @@ export class Composer {
 		 */
 		this.pickEl = toolbar.createEl('button', {
 			cls: 'guki-composer-attach',
-			attr: { 'aria-label': 'Attach files from disk' },
+			attr: { 'aria-label': t('chat.composer.attach-files') },
 		});
 		setIcon(this.pickEl, 'paperclip');
 
 		this.attachEl = toolbar.createEl('button', {
 			cls: 'guki-composer-attach',
-			attr: { 'aria-label': 'Attach the active note' },
+			attr: { 'aria-label': t('chat.composer.attach-active-note') },
 		});
 		setIcon(this.attachEl, 'file-plus');
 
@@ -281,7 +286,7 @@ export class Composer {
 		// icon choice.
 		this.actionEl = toolbar.createEl('button', {
 			cls: 'guki-composer-send',
-			attr: { 'aria-label': 'Send the message' },
+			attr: { 'aria-label': t('chat.composer.send') },
 		});
 		setIcon(this.actionEl, 'arrow-up');
 
@@ -638,6 +643,23 @@ export class Composer {
 	}
 
 	/**
+	 * Everything the reader would lose if the panel were rebuilt under them. The typed text lives
+	 * in the textarea, but the chips live only in this array — a language change destroys the view,
+	 * so both have to be carried across by hand or a pasted screenshot silently disappears.
+	 */
+	getDraft(): ComposerDraft {
+		return { text: this.inputEl.value, attachments: [...this.attachments] };
+	}
+
+	/** The other half of `getDraft`, applied to the rebuilt composer. */
+	setDraft(draft: ComposerDraft): void {
+		this.inputEl.value = draft.text;
+		for (const attachment of draft.attachments) {
+			this.attach(attachment);
+		}
+	}
+
+	/**
 	 * Adds a chip. Idempotent per path — dragging the same note twice is one attachment, which is
 	 * also what stops the `dragManager` source and the `dataTransfer` fallback from double-adding.
 	 */
@@ -690,7 +712,7 @@ export class Composer {
 
 			const removeEl = chip.createEl('button', {
 				cls: 'guki-composer-chip-remove',
-				attr: { 'aria-label': `Remove ${attachment.displayName}` },
+				attr: { 'aria-label': t('chat.composer.remove', { name: attachment.displayName }) },
 			});
 			setIcon(removeEl, 'x');
 			// Plain `addEventListener`, where the rest of the UI uses `component.registerDomEvent`
@@ -723,7 +745,10 @@ export class Composer {
 		this.busy = busy;
 		setIcon(this.actionEl, busy ? 'square' : 'arrow-up');
 		this.actionEl.toggleClass('guki-composer-stop', busy);
-		this.actionEl.setAttr('aria-label', busy ? 'Stop the current reply' : 'Send the message');
+		this.actionEl.setAttr(
+			'aria-label',
+			busy ? t('chat.composer.stop') : t('chat.composer.send'),
+		);
 	}
 
 	/**
@@ -739,19 +764,25 @@ export class Composer {
 	setStatusLine(status: ComposerStatus): void {
 		const parts: string[] = [];
 		if (status.compacting) {
-			parts.push('Compacting conversation…');
+			parts.push(t('chat.composer.compacting'));
 		}
 		if (status.model !== null) {
 			parts.push(status.model);
 		}
 		if (status.contextPercent !== null) {
-			parts.push(`Context ${String(status.contextPercent)}%`);
+			parts.push(t('chat.composer.context', { percent: String(status.contextPercent) }));
 		}
 		if (status.fiveHourPercent !== null) {
-			parts.push(`5h ${renderQuotaBar(status.fiveHourPercent)} ${String(status.fiveHourPercent)}%`);
+			parts.push(t('chat.composer.quota.five-hour', {
+				bar: renderQuotaBar(status.fiveHourPercent),
+				percent: String(status.fiveHourPercent),
+			}));
 		}
 		if (status.sevenDayPercent !== null) {
-			parts.push(`7d ${renderQuotaBar(status.sevenDayPercent)} ${String(status.sevenDayPercent)}%`);
+			parts.push(t('chat.composer.quota.seven-day', {
+				bar: renderQuotaBar(status.sevenDayPercent),
+				percent: String(status.sevenDayPercent),
+			}));
 		}
 		this.statusParts = parts;
 		this.renderStatus();
@@ -823,7 +854,7 @@ export class Composer {
 	 * reachable quietly — so the control is genuinely disabled, not merely styled as such.
 	 * Idempotent; called on every state change.
 	 */
-	setBlocked(reason: string | null): void {
+	setBlocked(reason: BlockedReasonKey | null): void {
 		if (reason === this.blocked) {
 			return;
 		}
@@ -836,7 +867,8 @@ export class Composer {
 		// same mistake as letting text be typed.
 		this.attachEl.disabled = isBlocked;
 		this.pickEl.disabled = isBlocked;
-		this.inputEl.placeholder = reason ?? this.placeholderText();
+		// Translated here, not where the block was raised, so a language change reaches it.
+		this.inputEl.placeholder = reason ? t(reason) : this.placeholderText();
 		this.actionEl.toggleClass('guki-composer-blocked', isBlocked);
 	}
 
@@ -848,8 +880,8 @@ export class Composer {
 
 	private placeholderText(): string {
 		return (this.options.getSendKey?.() ?? DEFAULT_SEND_KEY) === 'mod-enter'
-			? MOD_ENTER_PLACEHOLDER
-			: DEFAULT_PLACEHOLDER;
+			? t('chat.composer.placeholder.mod-enter')
+			: t('chat.composer.placeholder.enter');
 	}
 
 	private submit(): void {
