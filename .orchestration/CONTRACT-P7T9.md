@@ -125,3 +125,36 @@ evidence and the lane will be sent back.
 Checks assert the mechanism, not only the rendered text, wherever the requirement is a mechanism
 (for example: "the list did not rescan" must be measured with a scan counter, not inferred from
 the screen).
+
+
+## 8. AMENDMENT (orchestrator, 2026-09-15, after the operator's manual round)
+
+The manual round found F3 dead in its main case: in a fresh conversation with the history list
+closed, the panel header never leaves `GuKi Chat`. Root cause: `ChatView.handleTurnEnd()` only
+refreshes `currentSessionSummary` when the dropdown is open, so with the list closed the view never
+learns the conversation's title. The offline checks missed it because they inject the summary
+directly instead of letting the view fetch it.
+
+The cause is a defect in §6 of this contract, not in the lane that followed it. "No polling and no
+scan when the list is closed" was written for cost, and it made the feature impossible.
+
+**Amended rule.** When a turn ends and the history list is CLOSED:
+- a full directory scan (`scanSessionsDir` / `listSessions`, which reads every `.jsonl` in the
+  project directory) is still forbidden;
+- reading **the current conversation's own transcript file** to learn its title is REQUIRED. One
+  file, not the directory.
+
+The data layer gains one function for this, alongside the existing seam:
+
+```ts
+// src/data/transcript-store.ts
+sessionTitle(sessionId: string, vaultPath?: string): Promise<SessionSummary | null>
+```
+
+It resolves the one file (`resolveSessionFilePath` already exists), reads its `ai-title` and
+derived-trim exactly as `scanSessionsDir` does for a single file, applies the stored custom title
+overlay from §3, and returns a `SessionSummary` — or `null` when the file is not there yet.
+Precedence stays in `resolveSessionTitle` (§4): no new decision logic.
+
+**Check that must exist and must be red first:** with the dropdown CLOSED, a turn ending makes the
+panel header show the conversation's name, and the directory scan counter stays at zero.
