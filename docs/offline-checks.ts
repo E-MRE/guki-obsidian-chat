@@ -143,6 +143,7 @@ import {
 } from '../src/core/attachment-resolver';
 import { absolutePathForFile } from '../src/cli/node-api';
 import { Composer, pasteBelongsToComposer, type ComposerOptions } from '../src/ui/composer';
+import { DEFAULT_SEND_KEY, shouldSend } from '../src/core/send-key';
 import { filterVaultFiles, insertItem, type DropdownItem, type TriggerMatch } from '../src/ui/composer-dropdown';
 import {
 	buildSessionSummary,
@@ -8291,11 +8292,13 @@ console.log('\nAC1. Mandatory end-to-end chain check (simulated keystrokes on re
 		inputEl.listeners['input']?.();
 	}
 
-	function simulateKeydown(key: string, opts: { shiftKey?: boolean; isComposing?: boolean } = {}) {
+	function simulateKeydown(key: string, opts: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean; isComposing?: boolean } = {}) {
 		let prevented = false;
 		const event = {
 			key,
 			shiftKey: !!opts.shiftKey,
+			metaKey: !!opts.metaKey,
+			ctrlKey: !!opts.ctrlKey,
 			isComposing: !!opts.isComposing,
 			preventDefault: () => { prevented = true; },
 		};
@@ -14480,9 +14483,243 @@ console.log('\nAX. L7 — New-conversation control');
 	eq('AX6.4 new-conv control is torn down on close', newConvElAfterClose ?? null, null);
 }
 
+console.log('\nAY. Görev 13 — Send message with preference');
+{
+	if (typeof (globalThis as any).ResizeObserver === 'undefined') {
+		(globalThis as any).ResizeObserver = class {
+			observe() {}
+			disconnect() {}
+		};
+	}
+
+	// AY1: the seven-row decision table stays DOM-free.
+	check('AY1.1 enter + Enter sends', shouldSend('enter', { key: 'Enter', shiftKey: false, metaKey: false, ctrlKey: false }));
+	check('AY1.2 enter + Shift+Enter does not send', !shouldSend('enter', { key: 'Enter', shiftKey: true, metaKey: false, ctrlKey: false }));
+	check('AY1.3 enter + Cmd+Enter sends', shouldSend('enter', { key: 'Enter', shiftKey: false, metaKey: true, ctrlKey: false }));
+	check('AY1.4 mod-enter + Enter does not send', !shouldSend('mod-enter', { key: 'Enter', shiftKey: false, metaKey: false, ctrlKey: false }));
+	check('AY1.5 mod-enter + Shift+Enter does not send', !shouldSend('mod-enter', { key: 'Enter', shiftKey: true, metaKey: false, ctrlKey: false }));
+	check('AY1.6 mod-enter + Cmd+Enter sends', shouldSend('mod-enter', { key: 'Enter', shiftKey: false, metaKey: true, ctrlKey: false }));
+	check('AY1.7 mod-enter + Ctrl+Enter sends', shouldSend('mod-enter', { key: 'Enter', shiftKey: false, metaKey: false, ctrlKey: true }));
+	check('AY1.8 both modes reject a, Tab, and ArrowUp',
+		(['enter', 'mod-enter'] as const).every((mode) =>
+			['a', 'Tab', 'ArrowUp'].every((key) => !shouldSend(mode, { key, shiftKey: false, metaKey: false, ctrlKey: false }))),
+	);
+
+	function makeSendKeyComposer(mode: 'enter' | 'mod-enter' | (() => 'enter' | 'mod-enter'), history: readonly string[] = [], commands: readonly string[] = []) {
+		let submitted = 0;
+		const container = new FakeElement() as any;
+		const panel = new FakeElement() as any;
+		const composer = new Composer(container, panel, {
+			registerDomEvent: (el: any, event: string, callback: any) => el.addEventListener(event, callback),
+		} as any, {
+			getSendKey: () => typeof mode === 'function' ? mode() : mode,
+			getPromptHistory: () => history,
+			getSlashCommands: () => commands,
+			onSubmit: () => {
+				submitted++;
+				return true;
+			},
+			onStop: () => {},
+			onDropped: () => {},
+			onPasted: () => false,
+			onAttachActiveNote: () => {},
+			onPickedFiles: () => {},
+		});
+		const input = required(container.querySelector('textarea'), 'AY composer textarea');
+		const simulateKeydown = (key: string, opts: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean; isComposing?: boolean } = {}) => {
+			let prevented = false;
+			input.listeners['keydown']?.({
+				key,
+				shiftKey: !!opts.shiftKey,
+				metaKey: !!opts.metaKey,
+				ctrlKey: !!opts.ctrlKey,
+				isComposing: !!opts.isComposing,
+				preventDefault: () => { prevented = true; },
+			});
+			return { defaultPrevented: prevented, submitted };
+		};
+		const inputText = (value: string) => {
+			input.value = value;
+			input.selectionStart = value.length;
+			input.selectionEnd = value.length;
+			input.listeners['input']?.();
+		};
+		return { composer, input, inputText, simulateKeydown, submitted: () => submitted };
+	}
+
+	// AY2: real Composer keydown path, including both sides of every mode.
+	{
+		const fixture = makeSendKeyComposer('enter');
+		fixture.inputText('send');
+		const result = fixture.simulateKeydown('Enter');
+		check('AY2.1 enter mode + Enter submits and prevents default', result.submitted === 1 && result.defaultPrevented);
+	}
+	{
+		const fixture = makeSendKeyComposer('enter');
+		fixture.inputText('line');
+		const result = fixture.simulateKeydown('Enter', { shiftKey: true });
+		check('AY2.2 enter mode + Shift+Enter does not submit or prevent default', result.submitted === 0 && !result.defaultPrevented);
+	}
+	{
+		const fixture = makeSendKeyComposer('mod-enter');
+		fixture.inputText('line');
+		const result = fixture.simulateKeydown('Enter');
+		check('AY2.3 mod-enter mode + Enter does not submit or prevent default', result.submitted === 0 && !result.defaultPrevented);
+	}
+	{
+		const fixture = makeSendKeyComposer('mod-enter');
+		fixture.inputText('send');
+		const result = fixture.simulateKeydown('Enter', { metaKey: true });
+		check('AY2.4 mod-enter mode + Cmd+Enter submits and prevents default', result.submitted === 1 && result.defaultPrevented);
+	}
+	{
+		const fixture = makeSendKeyComposer('mod-enter');
+		fixture.inputText('send');
+		const result = fixture.simulateKeydown('Enter', { ctrlKey: true });
+		check('AY2.5 mod-enter mode + Ctrl+Enter submits and prevents default', result.submitted === 1 && result.defaultPrevented);
+	}
+	{
+		const fixture = makeSendKeyComposer('mod-enter');
+		fixture.inputText('ime');
+		const result = fixture.simulateKeydown('Enter', { metaKey: true, isComposing: true });
+		check('AY2.6 composing Cmd+Enter does not submit', result.submitted === 0);
+	}
+
+	// AY3: the dropdown and prompt-history gates remain ahead of the final Enter decision.
+	{
+		const fixture = makeSendKeyComposer('mod-enter', ['older prompt', 'newest prompt'], ['orchestrate']);
+		fixture.inputText('/or');
+		const menuEnter = fixture.simulateKeydown('Enter');
+		check('AY3.1 open slash menu owns plain Enter in mod-enter mode',
+			fixture.input.value === '/orchestrate ' && menuEnter.submitted === 0 && menuEnter.defaultPrevented);
+
+		fixture.inputText('');
+		const historyUp = fixture.simulateKeydown('ArrowUp');
+		check('AY3.2 mod-enter empty box + ArrowUp recalls newest prompt',
+			fixture.input.value === 'newest prompt' && historyUp.defaultPrevented);
+
+		fixture.inputText('filled');
+		const filledUp = fixture.simulateKeydown('ArrowUp');
+		check('AY3.3 mod-enter filled box + ArrowUp leaves default behavior alone', !filledUp.defaultPrevented);
+	}
+
+	// AY4: persisted input is narrowed to the only non-default valid value.
+	check('AY4.1 DEFAULT_SETTINGS.sendKey is enter', DEFAULT_SETTINGS.sendKey === DEFAULT_SEND_KEY);
+	async function loadSendKey(data: unknown): Promise<unknown> {
+		const plugin = new GukiChatPlugin(createMockPluginApp() as any, { dir: 'plugins/guki-chat' } as any);
+		plugin.loadData = async () => data as any;
+		await (plugin as any).loadSettings();
+		return plugin.settings.sendKey;
+	}
+	eq('AY4.2 persisted mod-enter is retained', await loadSendKey({ sendKey: 'mod-enter' }), 'mod-enter');
+	check('AY4.3 garbage, number, null, and absent sendKey fall back to enter',
+		(await Promise.all([
+			loadSendKey({ sendKey: 'garbage' }),
+			loadSendKey({ sendKey: 42 }),
+			loadSendKey({ sendKey: null }),
+			loadSendKey({}),
+		])).every((mode) => mode === DEFAULT_SEND_KEY),
+	);
+
+	// AY5: every visible placeholder follows the live preference, including unblock.
+	const placeholder = (input: any): string => input.placeholder ?? input.getAttribute('placeholder') ?? '';
+	{
+		const fixture = makeSendKeyComposer('enter');
+		check('AY5.1 enter composer placeholder says Enter to send', placeholder(fixture.input).includes('Enter to send'));
+	}
+	{
+		const fixture = makeSendKeyComposer('mod-enter');
+		const value = placeholder(fixture.input);
+		check('AY5.2 mod-enter placeholder says Cmd/Ctrl+Enter and not Enter to send', value.includes('Cmd/Ctrl+Enter to send') && !value.includes('(Enter to send'));
+	}
+	{
+		let mode: 'enter' | 'mod-enter' = 'enter';
+		const fixture = makeSendKeyComposer(() => mode);
+		mode = 'mod-enter';
+		fixture.composer.refreshPlaceholder();
+		check('AY5.3 refreshPlaceholder updates an open composer to mod-enter text', placeholder(fixture.input).includes('Cmd/Ctrl+Enter to send'));
+	}
+	{
+		const fixture = makeSendKeyComposer('mod-enter');
+		fixture.composer.setBlocked('...');
+		fixture.composer.setBlocked(null);
+		const value = placeholder(fixture.input);
+		check('AY5.4 unblocking mod-enter restores mod-enter placeholder', value.includes('Cmd/Ctrl+Enter to send') && !value.includes('(Enter to send'));
+	}
+
+	// AY6: the preference travels through the view factory and refreshes existing views.
+	{
+		let submitted = 0;
+		const app = new App();
+		const container = new FakeElement() as any;
+		const leaf = new WorkspaceLeaf(app, container);
+		const plugin = new GukiChatPlugin(app as any, { dir: 'plugins/guki-chat' } as any);
+		plugin.settings = { ...plugin.settings, sendKey: 'mod-enter' };
+		const session = {
+			state: new ChatState(),
+			busy: false,
+			blocked: null,
+			vaultPaths: async () => ({
+				root: '/fake/vault',
+				resolve: (raw: string) => raw,
+				isInside: () => true,
+			}),
+			getSlashCommands: () => [],
+			send: () => { submitted++; },
+			interrupt: () => {},
+			decidePermission: () => {},
+		} as unknown as SessionManager;
+		const view = plugin.createChatViewFactory(session)(leaf);
+		await (view as any).onOpen();
+		const input = required(container.querySelector('textarea'), 'AY6.1 ChatView composer textarea');
+		const keydown = (metaKey: boolean) => {
+			let defaultPrevented = false;
+			input.listeners['keydown']?.({
+				key: 'Enter', shiftKey: false, metaKey, ctrlKey: false, isComposing: false,
+				preventDefault: () => { defaultPrevented = true; },
+			});
+			return defaultPrevented;
+		};
+		input.value = 'plain Enter';
+		const plainPrevented = keydown(false);
+		input.value = 'Cmd Enter';
+		const commandPrevented = keydown(true);
+		check('AY6.1 ChatView passes its mod-enter preference to the real Composer',
+			submitted === 1 && !plainPrevented && commandPrevented && placeholder(input).includes('Cmd/Ctrl+Enter to send'));
+		await (view as any).onClose();
+	}
+	{
+		const app = new App();
+		const container = new FakeElement() as any;
+		const leaf = new WorkspaceLeaf(app, container);
+		(app.workspace as any).getLeavesOfType = (type: string) => type === 'guki-chat-view' ? [leaf] : [];
+		const plugin = new GukiChatPlugin(app as any, { dir: 'plugins/guki-chat' } as any);
+		plugin.saveData = async () => {};
+		const session = {
+			state: new ChatState(),
+			busy: false,
+			blocked: null,
+			vaultPaths: async () => ({
+				root: '/fake/vault',
+				resolve: (raw: string) => raw,
+				isInside: () => true,
+			}),
+			getSlashCommands: () => [],
+			send: () => {},
+			interrupt: () => {},
+			decidePermission: () => {},
+		} as unknown as SessionManager;
+		const view = plugin.createChatViewFactory(session)(leaf);
+		await (view as any).onOpen();
+		const input = required(container.querySelector('textarea'), 'AY6.2 open ChatView composer textarea');
+		const before = placeholder(input);
+		plugin.settings = { ...plugin.settings, sendKey: 'mod-enter' };
+		await plugin.saveSettings();
+		check('AY6.2 saveSettings refreshes an open real ChatView composer placeholder',
+			before.includes('Enter to send') && placeholder(input).includes('Cmd/Ctrl+Enter to send'));
+		await (view as any).onClose();
+	}
+}
+
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;
-
-
-
-
