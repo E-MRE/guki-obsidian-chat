@@ -8204,6 +8204,11 @@ console.log('\nAC0. Prompt history data layer');
 	const nonAdjacentDuplicate = appendPromptHistory(['repeat', 'other'], 'repeat', PROMPT_HISTORY_CAP);
 	check('AC0.4: non-adjacent duplicate prompt is recorded', nonAdjacentDuplicate.join('|') === 'repeat|other|repeat');
 
+	// The stored value is the trimmed one, so a padded repeat of the newest entry is still a
+	// duplicate. Without the trim it would be stored a second time, padding and all.
+	const paddedDuplicate = appendPromptHistory(['kept'], '  kept  ', PROMPT_HISTORY_CAP);
+	check('AC0.4b: padded repeat of the newest prompt is still a duplicate', paddedDuplicate.length === 1 && paddedDuplicate[0] === 'kept');
+
 	const fullHistory = Array.from({ length: PROMPT_HISTORY_CAP }, (_, index) => `prompt-${String(index)}`);
 	const capped = appendPromptHistory(fullHistory, 'newest', PROMPT_HISTORY_CAP);
 	check('AC0.5: prompt history cap drops oldest and keeps newest',
