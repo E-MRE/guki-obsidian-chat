@@ -6026,6 +6026,30 @@ console.log('V8. Allow everything mode: programmatic allows, .obsidian floor, an
 	rmSync(outsideNote, { force: true });
 }
 
+console.log("V8b. 'auto-allow-unsafe' is the only setting that lifts the Bash metacharacter veto");
+{
+	const pipedCommand = { command: 'ls /tmp | grep -i review' };
+	const pluginJs = join(POLICY_VAULT.root, '.obsidian', 'plugins', 'x', 'main.js');
+
+	const alwaysAsk: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS };
+	const autoAllow: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, runCommands: 'auto-allow' };
+	const autoAllowUnsafe: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, runCommands: 'auto-allow-unsafe' };
+	const allowEverything: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, allowEverything: true };
+
+	eq('always ask: a piped command prompts', permissionVerdict('Bash', pipedCommand, vaultPaths, alwaysAsk), 'ask');
+	eq('auto-allow: a piped command still prompts (unchanged by this feature)', permissionVerdict('Bash', pipedCommand, vaultPaths, autoAllow), 'ask');
+	eq('allow everything: a piped command still prompts (unaffected by this feature)', permissionVerdict('Bash', pipedCommand, vaultPaths, allowEverything), 'ask');
+	eq('auto-allow-unsafe: a piped command is allowed', permissionVerdict('Bash', pipedCommand, vaultPaths, autoAllowUnsafe), 'allow');
+
+	// Protected-segment floor (Step 3 of validateBashFloor) survives the metacharacter veto being
+	// lifted — this setting only widens the metacharacter check, nothing else.
+	eq(
+		'auto-allow-unsafe: a command naming .obsidian still prompts',
+		permissionVerdict('Bash', { command: `cat ${pluginJs}` }, vaultPaths, autoAllowUnsafe),
+		'ask',
+	);
+}
+
 console.log('V9. buildRememberedDecision constructor and PermissionBroker integration');
 {
 	const outsideNote = join(tmpdir(), 'guki-v9-outside-note.md');

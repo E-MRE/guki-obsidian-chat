@@ -232,6 +232,7 @@ export function validateBashFloor(
 	command: unknown,
 	rawCwd?: unknown,
 	paths?: VaultPaths,
+	skipMetacharacterVeto = false,
 ): string[] | null {
 	if (typeof command !== 'string') {
 		return null;
@@ -256,7 +257,9 @@ export function validateBashFloor(
 	}
 
 	// Step 1: Metacharacter veto — on the raw string, before anything is interpreted.
-	if (BASH_METACHARACTERS.some((meta) => raw.includes(meta))) {
+	// Skippable only by the explicit 'auto-allow-unsafe' setting (permission-policy.ts); every
+	// other caller, including a remembered-decision candidate, still goes through this.
+	if (!skipMetacharacterVeto && BASH_METACHARACTERS.some((meta) => raw.includes(meta))) {
 		return null;
 	}
 
@@ -296,7 +299,7 @@ export function evaluateBashCandidate(
 		return 'ask';
 	}
 
-	if (settings?.allowEverything || settings?.runCommands === 'auto-allow') {
+	if (settings?.allowEverything || settings?.runCommands === 'auto-allow' || settings?.runCommands === 'auto-allow-unsafe') {
 		return 'allow';
 	}
 

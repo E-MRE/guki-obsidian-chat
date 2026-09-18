@@ -28,6 +28,15 @@ export type PermissionVerdict = 'allow' | 'ask';
 
 export type CategorySetting = 'always ask' | 'auto-allow';
 
+/**
+ * 'auto-allow-unsafe' is 'auto-allow' plus one thing: it lifts the metacharacter veto
+ * (bash-whitelist.ts's BASH_METACHARACTERS) at the structural floor, so a piped or chained
+ * command (`ls | grep`, `a && b`) is allowed without a prompt too. An explicit opt-in, separate
+ * from `allowEverything` — picking this does not relax anything else (protected segments, edit
+ * floors, or any other tool stay exactly as strict as before).
+ */
+export type RunCommandsSetting = CategorySetting | 'auto-allow-unsafe';
+
 export type PermissionCategory = 'read' | 'write' | 'command';
 
 export interface RememberedDecision {
@@ -44,7 +53,7 @@ export interface RememberedDecision {
 export interface PermissionSettings {
 	readOutsideVault: CategorySetting;
 	writeOutsideVault: CategorySetting;
-	runCommands: CategorySetting;
+	runCommands: RunCommandsSetting;
 	allowEverything: boolean;
 	rememberedDecisions: RememberedDecision[];
 }
@@ -71,8 +80,8 @@ export function normalizePermissionSettings(raw: unknown): PermissionSettings {
 		r.readOutsideVault === 'auto-allow' ? 'auto-allow' : 'always ask';
 	const writeOutsideVault: CategorySetting =
 		r.writeOutsideVault === 'auto-allow' ? 'auto-allow' : 'always ask';
-	const runCommands: CategorySetting =
-		r.runCommands === 'auto-allow' ? 'auto-allow' : 'always ask';
+	const runCommands: RunCommandsSetting =
+		r.runCommands === 'auto-allow-unsafe' ? 'auto-allow-unsafe' : r.runCommands === 'auto-allow' ? 'auto-allow' : 'always ask';
 	const allowEverything = r.allowEverything === true;
 
 	const rememberedDecisions: RememberedDecision[] = [];
@@ -607,13 +616,15 @@ export function enforceFloor(
 	toolName: unknown,
 	input: unknown,
 	paths: VaultPaths,
+	settings: PermissionSettings = DEFAULT_PERMISSION_SETTINGS,
 ): PermissionVerdict {
 	if (candidate !== 'allow') {
 		return 'ask';
 	}
 
 	if (toolName === 'Bash') {
-		return validateBashFloor(field(input, 'command'), field(input, 'cwd'), paths) !== null
+		const skipMetacharacterVeto = settings.runCommands === 'auto-allow-unsafe';
+		return validateBashFloor(field(input, 'command'), field(input, 'cwd'), paths, skipMetacharacterVeto) !== null
 			? 'allow'
 			: 'ask';
 	}
@@ -648,5 +659,5 @@ export function permissionVerdict(
 	settings: PermissionSettings = DEFAULT_PERMISSION_SETTINGS,
 ): PermissionVerdict {
 	const candidate = evaluateCandidateVerdict(toolName, input, paths, settings);
-	return enforceFloor(candidate, toolName, input, paths);
+	return enforceFloor(candidate, toolName, input, paths, settings);
 }

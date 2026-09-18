@@ -8,6 +8,7 @@ import {
 	type CategorySetting,
 	type PermissionSettings,
 	type RememberedDecision,
+	type RunCommandsSetting,
 } from '../core/permission-policy';
 import { DEFAULT_SEND_KEY, type SendKeyMode } from '../core/send-key';
 import type { ConversationTitleMap } from '../data/conversation-titles';
@@ -166,9 +167,10 @@ export class GukiSettingTab extends PluginSettingTab {
 				dropdown
 					.addOption('always ask', t('settings.permissions.option.alwaysAsk'))
 					.addOption('auto-allow', t('settings.permissions.option.autoAllow'))
+					.addOption('auto-allow-unsafe', t('settings.permissions.option.autoAllowUnsafe'))
 					.setValue(this.plugin.settings.runCommands)
 					.onChange(async (value) => {
-						this.plugin.settings.runCommands = value as CategorySetting;
+						this.plugin.settings.runCommands = value as RunCommandsSetting;
 						await this.plugin.saveSettings();
 					}),
 			);

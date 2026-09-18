@@ -38,6 +38,10 @@ export const settingsStrings = {
 	},
 	'settings.permissions.option.alwaysAsk': { en: 'Always ask', tr: 'Her zaman sor' },
 	'settings.permissions.option.autoAllow': { en: 'Auto-allow', tr: 'Otomatik izin ver' },
+	'settings.permissions.option.autoAllowUnsafe': {
+		en: 'Auto-allow, including piped commands (unsafe)',
+		tr: 'Otomatik izin ver, pipe içeren komutlar dahil (güvensiz)',
+	},
 	'settings.allowEverything.heading': { en: 'Allow everything mode', tr: 'Her şeye izin verme modu' },
 	'settings.allowEverything.name': { en: 'Allow everything (high risk)', tr: 'Her şeye izin ver (yüksek risk)' },
 	'settings.allowEverything.desc': {
