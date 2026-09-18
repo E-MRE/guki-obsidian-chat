@@ -34,6 +34,25 @@ import { t } from '../i18n';
 /** Page size for historical conversation paging (UI layer policy, Görev 8). */
 export const HISTORY_PAGE_SIZE = 50;
 
+/**
+ * Ponytails measured in Obsidian's shipping app but absent from its public typings. Keeping the
+ * casts at these two narrow boundaries prevents `any` from spreading through the view logic.
+ */
+interface WorkspaceLeafPonytail {
+	view?: ItemView;
+	updateHeader?: () => void;
+}
+
+interface TurnEndReducerPonytail {
+	readonly currentSessionId?: unknown;
+	onTurnEnd: (() => void) | null;
+}
+
+interface SessionManagerPonytail {
+	readonly reducer?: TurnEndReducerPonytail;
+	onTurnEnd?: (() => void) | null;
+}
+
 export class ChatView extends ItemView {
 	private rootEl: HTMLElement | null = null;
 	private headerEl: HTMLElement | null = null;
@@ -81,8 +100,9 @@ export class ChatView extends ItemView {
 		this.titleStore = conversationTitles;
 		this.promptHistory = promptHistory;
 		this.transcriptStore = transcriptStore ?? new NodeTranscriptStore(undefined, conversationTitles);
-		if (this.leaf && !(this.leaf as any).view) {
-			(this.leaf as any).view = this;
+		const leafPonytail = this.leaf as unknown as WorkspaceLeafPonytail;
+		if (!leafPonytail.view) {
+			leafPonytail.view = this;
 		}
 	}
 
@@ -132,8 +152,9 @@ export class ChatView extends ItemView {
 		// updating: no error, no log, the title just freezes at whatever it last said. Upgrade path
 		// if that day comes: re-set the view state through a public API, or show the conversation
 		// name inside the panel body instead of the leaf header.
-		if (this.leaf && typeof (this.leaf as any).updateHeader === 'function') {
-			(this.leaf as any).updateHeader();
+		const leafPonytail = this.leaf as unknown as WorkspaceLeafPonytail;
+		if (typeof leafPonytail.updateHeader === 'function') {
+			leafPonytail.updateHeader();
 		}
 	}
 
@@ -144,7 +165,7 @@ export class ChatView extends ItemView {
 			// `getSessionId()` method that exists nowhere: optional chaining turned that into
 			// `undefined`, so a fresh conversation never learned its id and the panel header stayed
 			// on the fallback. Checks AW1.3/AW2.3 keep that from coming back.
-			const sid = (this.session as any)?.reducer?.currentSessionId ?? null;
+			const sid = (this.session as unknown as SessionManagerPonytail).reducer?.currentSessionId ?? null;
 			if (typeof sid === 'string' && sid.length > 0) {
 				this.currentSessionId = sid;
 			}
@@ -169,8 +190,9 @@ export class ChatView extends ItemView {
 	}
 
 	private attachTurnEndHandler(): void {
-		const reducer = (this.session as any)?.reducer;
-		if (reducer && typeof reducer === 'object') {
+		const session = this.session as unknown as SessionManagerPonytail;
+		const reducer = session.reducer;
+		if (reducer) {
 			const prevTurnEnd = reducer.onTurnEnd;
 			reducer.onTurnEnd = () => {
 				prevTurnEnd?.();
@@ -179,14 +201,14 @@ export class ChatView extends ItemView {
 			this.turnEndCleanup = () => {
 				reducer.onTurnEnd = prevTurnEnd;
 			};
-		} else if ((this.session as any) && typeof (this.session as any).onTurnEnd !== 'undefined') {
-			const prevTurnEnd = (this.session as any).onTurnEnd;
-			(this.session as any).onTurnEnd = () => {
+		} else if (typeof session.onTurnEnd !== 'undefined') {
+			const prevTurnEnd = session.onTurnEnd;
+			session.onTurnEnd = () => {
 				prevTurnEnd?.();
 				void this.handleTurnEnd();
 			};
 			this.turnEndCleanup = () => {
-				(this.session as any).onTurnEnd = prevTurnEnd;
+				session.onTurnEnd = prevTurnEnd;
 			};
 		}
 	}
