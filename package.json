@@ -1,6 +1,6 @@
 {
 	"name": "guki-chat",
-	"version": "0.2.0",
+	"version": "1.0.0",
 	"description": "Chat with Claude Code inside your vault",
 	"main": "main.js",
 	"type": "module",
