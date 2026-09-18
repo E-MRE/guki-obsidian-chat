@@ -4876,11 +4876,16 @@ rmSync(POLICY_VAULT.base, { recursive: true, force: true });
  * keeps growing, including from this very session (trap 4).
  */
 
-console.log("S1. projectSlug: every '/' in the vault path becomes '-'");
+console.log("S1. projectSlug: every non-alphanumeric char in the vault path becomes '-'");
 eq(
 	'a real vault path, the real directory name it maps to (verified 2026-09-03)',
 	projectSlug('/Users/you/Documents/YourVault'),
 	'-Users-you-Documents-YourVault',
+);
+eq(
+	'a path segment containing a dot must slugify the same way the CLI does (regression 2026-09-18: dots were left unconverted, breaking history for any username with a dot in it)',
+	projectSlug('/Users/first.last/Documents/SomeVault'),
+	'-Users-first-last-Documents-SomeVault',
 );
 
 console.log('S2. resumeArgs: trivial, but the interface shape is worth pinning');

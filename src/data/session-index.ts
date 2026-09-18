@@ -207,9 +207,14 @@ export function sessionDisplayTitle(summary: SessionSummary): { text: string; is
 	return { text: resolved.text, isDerived: resolved.source === 'derived' };
 }
 
-/** In the absolute vault path, every `/` becomes `-` (verified against the real directory name). */
+/**
+ * Mirrors the Claude Code CLI's own project-directory naming: every character that
+ * isn't a letter or digit becomes `-`, not just `/`. A vault path containing `.` or `_`
+ * (e.g. a username like `enes.ileri`) previously produced a slug that never matched the
+ * CLI's real directory name, so history silently showed empty for those users.
+ */
 export function projectSlug(vaultPath: string): string {
-	return vaultPath.replace(/\//g, '-');
+	return vaultPath.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 /**
