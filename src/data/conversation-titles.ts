@@ -18,14 +18,14 @@ export class ConversationTitleStore {
 					typeof entry === 'object' &&
 					entry !== null &&
 					!Array.isArray(entry) &&
-					typeof (entry as StoredTitle).title === 'string'
+					typeof entry.title === 'string'
 				) {
-					const trimmed = (entry as StoredTitle).title.trim();
+					const trimmed = entry.title.trim();
 					if (trimmed.length > 0) {
 						this.titles.set(id, {
 							title: trimmed,
-							updatedAt: typeof (entry as StoredTitle).updatedAt === 'number'
-								? (entry as StoredTitle).updatedAt
+							updatedAt: typeof entry.updatedAt === 'number'
+								? entry.updatedAt
 								: Date.now(),
 						});
 					}
