@@ -75,6 +75,7 @@ export class ChatView extends ItemView {
 		conversationTitles?: ConversationTitleStore,
 		promptHistory?: PromptHistoryStore,
 		private readonly getSendKey?: () => SendKeyMode,
+		private readonly getShowRateLimitUsage?: () => boolean,
 	) {
 		super(leaf);
 		this.titleStore = conversationTitles;
@@ -757,7 +758,12 @@ export class ChatView extends ItemView {
 	 * nothing more.
 	 */
 	private currentStatus(): ComposerStatus {
-		return currentStatus(this.session.state);
+		return currentStatus(this.session.state, this.getShowRateLimitUsage?.() ?? false);
+	}
+
+	/** Called by the plugin after a settings change — the toggle applies to the open panel immediately. */
+	refreshComposerStatusLine(): void {
+		this.composer?.setStatusLine(this.currentStatus());
 	}
 
 	/**
@@ -961,9 +967,13 @@ export class ChatView extends ItemView {
  * Folds task 5's quota strip into the composer's status line (task 7) — one place for "model ·
  * context % · 5h · 7d" rather than two elements both reporting on the session. Also carries the
  * transient "Compacting conversation…" indicator when compaction is active (SPEC §2 F1, §3 R1).
+ *
+ * `showRateLimitUsage` is the settings toggle, off by default — the quota fields are reported as
+ * unset rather than parsed differently, so `Composer.setStatusLine`'s existing right-to-left crop
+ * on width still applies unchanged to whatever fields remain.
  */
-export function currentStatus(state: ChatState): ComposerStatus {
-	const quota = state.quotaSnapshot;
+export function currentStatus(state: ChatState, showRateLimitUsage = false): ComposerStatus {
+	const quota = showRateLimitUsage ? state.quotaSnapshot : null;
 	return {
 		compacting: state.compacting,
 		model: state.model !== null ? formatModelName(state.model) : null,

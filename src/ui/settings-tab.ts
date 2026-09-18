@@ -22,6 +22,8 @@ export interface GukiChatSettings extends PermissionSettings {
 	conversationTitles?: ConversationTitleMap;
 	promptHistory?: string[];
 	language?: 'auto' | 'en' | 'tr';
+	/** The 5h/7d quota bars in the composer's status line. Off by default — most readers never ask. */
+	showRateLimitUsage?: boolean;
 }
 
 export const DEFAULT_SETTINGS: GukiChatSettings = {
@@ -30,6 +32,7 @@ export const DEFAULT_SETTINGS: GukiChatSettings = {
 	slashCommands: [],
 	promptHistory: [],
 	language: 'auto',
+	showRateLimitUsage: false,
 	...DEFAULT_PERMISSION_SETTINGS,
 };
 
@@ -126,6 +129,18 @@ export class GukiSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.sendKey ?? DEFAULT_SEND_KEY)
 					.onChange(async (value) => {
 						this.plugin.settings.sendKey = value as SendKeyMode;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName(t('settings.showRateLimitUsage.name'))
+			.setDesc(t('settings.showRateLimitUsage.desc'))
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.showRateLimitUsage ?? false)
+					.onChange(async (value) => {
+						this.plugin.settings.showRateLimitUsage = value;
 						await this.plugin.saveSettings();
 					}),
 			);

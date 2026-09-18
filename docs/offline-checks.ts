@@ -15302,5 +15302,82 @@ console.log('\nBA. i18n production gates');
 setLocale('en');
 check('BA G7. locale is restored to English after production i18n gates', getLocale() === 'en');
 
+// --- BB. Rate-limit usage status-line preference --------------------------
+//
+// The 5h/7d quota bars are off by default (README ask: most readers never look at them, and the
+// panel narrowing already has to crop fields — starting with fewer of them is one less thing to
+// crop). `currentStatus`'s own flag decides this by reporting the quota as unset, not by adding a
+// second code path in `Composer.setStatusLine` — so the existing right-to-left width crop (K1)
+// keeps working unchanged on whatever fields are actually present.
+
+console.log('\nBB. Rate-limit usage status-line preference');
+
+check('BB1. DEFAULT_SETTINGS.showRateLimitUsage is false', DEFAULT_SETTINGS.showRateLimitUsage === false);
+
+{
+	const quotaState = new ChatState();
+	quotaState.setQuotaSnapshot({ fiveHourUtilization: 0.61, sevenDayUtilization: 0.94 });
+	check('BB2.1 currentStatus omits quota fields when the flag is off',
+		currentStatus(quotaState).fiveHourPercent === null && currentStatus(quotaState).sevenDayPercent === null);
+	check('BB2.2 currentStatus reports quota fields when the flag is on',
+		currentStatus(quotaState, true).fiveHourPercent === 61 && currentStatus(quotaState, true).sevenDayPercent === 94);
+}
+
+async function loadShowRateLimitUsage(data: unknown): Promise<unknown> {
+	const plugin = new GukiChatPlugin(createMockPluginApp() as any, { dir: 'plugins/guki-chat' } as any);
+	plugin.loadData = async () => data as any;
+	await (plugin as any).loadSettings();
+	return plugin.settings.showRateLimitUsage;
+}
+eq('BB3.1 persisted true is retained', await loadShowRateLimitUsage({ showRateLimitUsage: true }), true);
+check('BB3.2 garbage, number, null, and absent fall back to false',
+	(await Promise.all([
+		loadShowRateLimitUsage({ showRateLimitUsage: 'yes' }),
+		loadShowRateLimitUsage({ showRateLimitUsage: 1 }),
+		loadShowRateLimitUsage({ showRateLimitUsage: null }),
+		loadShowRateLimitUsage({}),
+	])).every((value) => value === false),
+);
+
+{
+	const app = new App();
+	const container = new FakeElement() as any;
+	const leaf = new WorkspaceLeaf(app, container);
+	(app.workspace as any).getLeavesOfType = (type: string) => type === 'guki-chat-view' ? [leaf] : [];
+	const plugin = new GukiChatPlugin(app as any, { dir: 'plugins/guki-chat' } as any);
+	plugin.saveData = async () => {};
+	const session = {
+		state: new ChatState(),
+		busy: false,
+		blocked: null,
+		vaultPaths: async () => ({
+			root: '/fake/vault',
+			resolve: (raw: string) => raw,
+			isInside: () => true,
+		}),
+		getSlashCommands: () => [],
+		send: () => {},
+		interrupt: () => {},
+		decidePermission: () => {},
+	} as unknown as SessionManager;
+	session.state.setQuotaSnapshot({ fiveHourUtilization: 0.61, sevenDayUtilization: 0.94 });
+	const view = plugin.createChatViewFactory(session)(leaf);
+	await (view as any).onOpen();
+	const statusEl = required(container.querySelector('.guki-composer-status'), 'BB4 status element');
+	// FakeElement has no real layout, so `scrollWidth`/`clientWidth` are undefined and the
+	// production crop (`renderStatus`, K1) would otherwise always collapse to one field — stubbed
+	// wide open here because BB4 is about the toggle, not the crop (that is K1's job).
+	(statusEl as any).scrollWidth = 0;
+	(statusEl as any).clientWidth = 9999;
+	(view as any).refreshComposerStatusLine();
+	const before = statusEl.text?.trim() ?? '';
+	plugin.settings = { ...plugin.settings, showRateLimitUsage: true };
+	await plugin.saveSettings();
+	const after = statusEl.text?.trim() ?? '';
+	check('BB4. saveSettings toggles the quota bars on an open real ChatView status line',
+		!before.includes('5h') && !before.includes('7d') && after.includes('5h') && after.includes('7d'));
+	await (view as any).onClose();
+}
+
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${String(failures)} CHECK(S) FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;

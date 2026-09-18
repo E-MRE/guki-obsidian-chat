@@ -105,6 +105,7 @@ export default class GukiChatPlugin extends Plugin {
 			titleStore,
 			promptHistory,
 			() => this.settings.sendKey ?? DEFAULT_SEND_KEY,
+			() => this.settings.showRateLimitUsage ?? false,
 		);
 	}
 
@@ -132,6 +133,7 @@ export default class GukiChatPlugin extends Plugin {
 				: {},
 			sendKey: data?.sendKey === 'mod-enter' ? 'mod-enter' : DEFAULT_SEND_KEY,
 			language: data?.language === 'en' || data?.language === 'tr' ? data.language : 'auto',
+			showRateLimitUsage: data?.showRateLimitUsage === true,
 		};
 	}
 
@@ -144,6 +146,7 @@ export default class GukiChatPlugin extends Plugin {
 		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_GUKI_CHAT)) {
 			if (leaf.view instanceof ChatView) {
 				leaf.view.refreshComposerPlaceholder();
+				leaf.view.refreshComposerStatusLine();
 			}
 		}
 	}
