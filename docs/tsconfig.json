@@ -29,7 +29,7 @@
 		"module": "ESNext",
 		"moduleResolution": "bundler",
 		"noEmit": true,
-		// `obsidian` is aliased to `obsidian-stub.mjs` at bundle time; TS resolves it to the real
+		// `obsidian` is aliased to `obsidian-stub.js` at bundle time; TS resolves it to the real
 		// package's types, which is what we want — the stub exists to be checked against them.
 		"allowJs": true
 	},

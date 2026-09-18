@@ -23,8 +23,8 @@
  * and it is deliberate — the bridge and the decision engine were verified separately.
  */
 import type { App } from 'obsidian';
-import { normalizePath } from 'obsidian';
 import { resolveNodeBinary } from '../cli/binary-resolver';
+import permissionServerSource from '../cli/mcp-permission-server.mjs';
 import { t } from '../i18n';
 import {
 	nodeFs,
@@ -35,7 +35,7 @@ import {
 	type NodeSocket,
 	type NodeSocketServer,
 } from '../cli/node-api';
-import { MCP_SERVER_NAME, PERMISSION_PROMPT_TOOL, PERMISSION_SERVER_FILE, PLUGIN_ID } from '../constants';
+import { MCP_SERVER_NAME, PERMISSION_PROMPT_TOOL, PERMISSION_SERVER_FILE } from '../constants';
 import type { ChatState, PermissionItem, PermissionStatus, PriorContent } from './chat-state';
 import {
 	buildRememberedDecision,
@@ -143,11 +143,6 @@ export class PermissionBroker {
 		 * deriving it twice would let the two drift apart silently. `createVaultPaths` resolves it.
 		 */
 		private readonly vaultRoot: string,
-		/**
-		 * `PluginManifest.dir` — the vault-relative path to this plugin's folder. Optional in the
-		 * API, so it is optional here; `readServerSource` falls back to rebuilding it.
-		 */
-		private readonly pluginDir?: string,
 		initialSettings: PermissionSettings = DEFAULT_PERMISSION_SETTINGS,
 	) {
 		this.settings = {
@@ -197,13 +192,14 @@ export class PermissionBroker {
 		this.configPath = path.join(dir, 'mcp.json');
 		this.token = randomToken();
 
-		// The server script is read through Obsidian's own adapter rather than by rebuilding a
-		// filesystem path: `manifest.dir` is vault-relative (obsidian.d.ts:4946) and the config
-		// directory is not always `.obsidian`. Copied into the temp dir so everything the CLI
-		// touches is in one place we own and can delete.
-		const source = await this.readServerSource();
+		// The server script is bundled into `main.js` at build time (esbuild's `text` loader) rather
+		// than read from the installed plugin folder: Obsidian's Community Plugins installer only
+		// ever fetches `main.js`, `manifest.json` and `styles.css` — a fourth file sitting next to
+		// them is never downloaded, which left every non-manual install with no permission server
+		// to spawn. Copied into the temp dir so everything the CLI touches is in one place we own
+		// and can delete.
 		const serverPath = path.join(dir, PERMISSION_SERVER_FILE);
-		await fs.promises.writeFile(serverPath, source, 'utf8');
+		await fs.promises.writeFile(serverPath, permissionServerSource, 'utf8');
 
 		// An **absolute** interpreter path. A bare `node` fails silently — the stdio server never
 		// spawns and never appears in the tool list, with no error of its own (RESEARCH B5, trap 7).
@@ -237,20 +233,6 @@ export class PermissionBroker {
 		server.on('error', (error: Error) => {
 			console.warn('GuKi Chat: permission socket error', error);
 		});
-	}
-
-	/**
-	 * Reads the server script through Obsidian's own adapter rather than by rebuilding a filesystem
-	 * path: `manifest.dir` is already vault-relative, which is what `DataAdapter.read` wants, and
-	 * the config directory is not always `.obsidian`.
-	 *
-	 * The fallback exists because `manifest.dir` is optional in the API (obsidian.d.ts:4946). It
-	 * hardcodes both the config dir and the plugin id, so it is strictly a guess — good enough to
-	 * keep the panel working, not good enough to prefer.
-	 */
-	private async readServerSource(): Promise<string> {
-		const pluginDir = this.pluginDir ?? `${this.app.vault.configDir}/plugins/${PLUGIN_ID}`;
-		return this.app.vault.adapter.read(normalizePath(`${pluginDir}/${PERMISSION_SERVER_FILE}`));
 	}
 
 	/** The flags the CLI is spawned with. Empty until `start()` has run. */

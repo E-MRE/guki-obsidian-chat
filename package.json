@@ -1,6 +1,6 @@
 {
 	"name": "guki-chat",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"description": "Chat with Claude Code inside your vault",
 	"main": "main.js",
 	"type": "module",
@@ -9,7 +9,7 @@
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
 		"version": "node version-bump.mjs && git add manifest.json versions.json",
 		"lint": "eslint .",
-		"check:offline": "npx esbuild docs/offline-checks.ts --bundle --platform=node --format=esm --alias:obsidian=./docs/obsidian-stub.mjs --outfile=/tmp/guki-checks.mjs && node /tmp/guki-checks.mjs",
+		"check:offline": "npx esbuild docs/offline-checks.ts --bundle --platform=node --format=esm --alias:obsidian=./docs/obsidian-stub.js --loader:.mjs=text --outfile=/tmp/guki-checks.mjs && node /tmp/guki-checks.mjs",
 		"check:capture": "python3 docs/scrub-capture.py --check docs/capture-*.jsonl",
 		"check:docs": "python3 docs/scrub-capture.py --check docs/*.md",
 		"check": "npm run check:capture && npm run check:docs && npm run check:offline",

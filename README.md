@@ -22,8 +22,8 @@ not a separate assistant with its own, weaker context.
 
 Not on the Community Plugins list yet — install manually:
 
-1. Download `main.js`, `manifest.json`, `styles.css` and `mcp-permission-server.mjs`
-   from the [latest release](https://github.com/E-MRE/guki-obsidian-chat/releases/latest)
+1. Download `main.js`, `manifest.json` and `styles.css` from the
+   [latest release](https://github.com/E-MRE/guki-obsidian-chat/releases/latest)
    (or build them from this repo — see below).
 2. Put those files in `<your-vault>/.obsidian/plugins/guki-chat/`.
 3. In Obsidian: Settings → Community plugins → turn off Restricted mode if this is your
@@ -104,7 +104,7 @@ the plugin adds a permission-card UI on top, it doesn't sandbox the CLI itself.
 
 ```sh
 npm install
-npm run build   # tsc + esbuild, produces main.js and mcp-permission-server.mjs
+npm run build   # tsc + esbuild, produces main.js (the permission server ships embedded inside it)
 npm run lint
 ```
 

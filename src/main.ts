@@ -45,11 +45,8 @@ export default class GukiChatPlugin extends Plugin {
 		);
 
 		// The session outlives any single view; the view only subscribes to its state.
-		// `manifest.dir` is how the permission server's own source is located at runtime; it is
-		// optional in the API, and the broker falls back to rebuilding the path when it is absent.
 		const session = new SessionManager(
 			this.app,
-			this.manifest.dir,
 			this.settings.claudeBinaryPath,
 			this.settings,
 			this.settings.slashCommands ?? [],

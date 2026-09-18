@@ -1,9 +1,9 @@
 {
 	"id": "guki-chat",
 	"name": "GuKi Chat",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"minAppVersion": "1.13.0",
-	"description": "Chat with Claude Code inside your vault",
+	"description": "Chat with Claude Code inside your vault.",
 	"author": "Emre Gültekir",
 	"isDesktopOnly": true
 }

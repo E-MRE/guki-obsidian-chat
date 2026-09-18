@@ -94,8 +94,6 @@ export class SessionManager {
 
 	constructor(
 		private readonly app: App,
-		/** `PluginManifest.dir`, passed straight through to the broker. Optional in the API. */
-		pluginDir?: string,
 		claudeBinaryOverride = '',
 		permissionSettings?: PermissionSettings,
 		initialSlashCommands: string[] = [],
@@ -107,13 +105,7 @@ export class SessionManager {
 		// adapter is unsupported, `resolveVaultPath` has already blocked input; the broker gets an
 		// inert placeholder because `start()` on it is now unreachable — `send` refuses before any
 		// turn can reach `ensureProcess`.
-		this.broker = new PermissionBroker(
-			app,
-			this.state,
-			this.resolveVaultPath() ?? '',
-			pluginDir,
-			permissionSettings,
-		);
+		this.broker = new PermissionBroker(app, this.state, this.resolveVaultPath() ?? '', permissionSettings);
 		// The broker knows requests and verdicts; the reducer knows blocks. Joining them here is
 		// what keeps a denial from painting the tool card red — the wire reports our own denial as
 		// `is_error: true`, indistinguishable from a tool that really failed.

@@ -24,13 +24,5 @@ export const MCP_SERVER_NAME = 'guki-perm';
 
 export const PERMISSION_PROMPT_TOOL = `mcp__${MCP_SERVER_NAME}__permission_prompt`;
 
-/** The server script, copied next to `main.js` by esbuild and into a temp dir by the broker. */
+/** The server script, bundled into `main.js` at build time and written into a temp dir by the broker. */
 export const PERMISSION_SERVER_FILE = 'mcp-permission-server.mjs';
-
-/**
- * Must match `manifest.json`'s `id`. Only a fallback: the authoritative answer is
- * `PluginManifest.dir` (obsidian.d.ts:4946), which the plugin hands to the session at startup.
- * That field is optional, and the config directory is not always `.obsidian`, so both halves of
- * the fallback path are guesses — which is exactly why the real value is preferred.
- */
-export const PLUGIN_ID = 'guki-chat';

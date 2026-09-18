@@ -2,7 +2,7 @@
  * Offline checks, Phases 3 and 4. Run from the repo root:
  *
  *   npx esbuild docs/offline-checks.ts --bundle --platform=node --format=esm \
- *     --alias:obsidian=./docs/obsidian-stub.mjs --outfile=/tmp/guki-checks.mjs && node /tmp/guki-checks.mjs
+ *     --alias:obsidian=./docs/obsidian-stub.js --loader:.mjs=text --outfile=/tmp/guki-checks.mjs && node /tmp/guki-checks.mjs
  *
  * Every section drives the **real** production classes — no re-implementation of the logic under
  * test — and asserts on the **content** each slot ended up holding, never merely on where blocks
@@ -1490,11 +1490,19 @@ console.log('K1. The generated mcp.json is the one PLAN Phase 5 task 3 specifies
 {
 	const bridge = await startBridge();
 
-	// No `manifest.dir` was given, so this is the reconstructed fallback.
+	// The server script is bundled into main.js (esbuild's `text` loader) rather than read from the
+	// installed plugin folder — Obsidian's Community Plugins installer only ever fetches main.js,
+	// manifest.json and styles.css, so a file sitting next to them on disk is never downloaded.
+	const entryArgs = bridge.broker.cliArgs;
+	const configPath = entryArgs[1] ?? '';
+	const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+	const serverPath = (
+		(config.mcpServers as Record<string, { args: string[] }>)['guki-perm'] ?? { args: [] }
+	).args[0];
 	eq(
-		'with no manifest.dir, the path is rebuilt from the config dir and the plugin id',
-		bridge.readPaths[0],
-		'.obsidian/plugins/guki-chat/mcp-permission-server.mjs',
+		'the written server script is byte-for-byte the real source',
+		readFileSync(serverPath ?? '', 'utf8'),
+		readFileSync(join(process.cwd(), 'src', 'cli', 'mcp-permission-server.mjs'), 'utf8'),
 	);
 
 	const args = bridge.broker.cliArgs;
@@ -1524,31 +1532,6 @@ console.log('K1. The generated mcp.json is the one PLAN Phase 5 task 3 specifies
 	check('...and so is the token', (entry.env.GUKI_PERM_TOKEN ?? '').length > 0);
 
 	bridge.stop();
-}
-
-console.log("K1b. manifest.dir wins over the reconstructed path");
-{
-	// `manifest.dir` is what Obsidian actually knows; the fallback hardcodes both the config
-	// directory and the plugin id and is only there because the field is optional. If the two ever
-	// disagree — a renamed plugin folder, a non-default config dir — the real one has to be used,
-	// and the failure is silent: the wrong path just fails to read and the gate never starts.
-	//
-	// No server is spawned here: the broker only writes files and listens, and the *CLI* is what
-	// spawns the server. So this costs a socket, not a process.
-	const readPaths: string[] = [];
-	const broker = new PermissionBroker(
-		brokerApp(readPaths),
-		new ChatState(),
-		POLICY_VAULT.root,
-		'Config/plugins/renamed-guki',
-	);
-	await broker.start();
-	eq(
-		'the supplied plugin folder is the one read from',
-		readPaths[0],
-		'Config/plugins/renamed-guki/mcp-permission-server.mjs',
-	);
-	broker.dispose();
 }
 
 console.log('K2. The MCP handshake, against the real server process');
@@ -4345,7 +4328,7 @@ console.log('O11. which paste is the composer\'s — the ownership predicate');
 	 * that claims a target outside the panel takes a note's paste away from the note, silently.
 	 *
 	 * **There is no DOM in this harness.** Node has no `document` (checked: `typeof document ===
-	 * 'undefined'`), the project has no jsdom, and `docs/obsidian-stub.mjs` is classes and two
+	 * 'undefined'`), the project has no jsdom, and `docs/obsidian-stub.js` is classes and two
 	 * functions — it has never had a DOM. So the tree below is built out of plain objects with a
 	 * real `contains`, walking real parent links, and cast to `Node` at the boundary. That is the
 	 * same idiom §O10 uses for its `File` stubs, and it is not a weakened test: `contains` is the
@@ -6219,7 +6202,6 @@ console.log('X2. Exact match key stored on remember (not broader)');
 		brokerApp([]),
 		state,
 		POLICY_VAULT.root,
-		undefined,
 		mockSettings,
 	);
 	broker.setSettings(mockSettings);
@@ -12795,7 +12777,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 
 	const container = new FakeElement() as any;
 	const leaf = new WorkspaceLeaf(app, container);
-	const session = new SessionManager(app, undefined, process.execPath);
+	const session = new SessionManager(app, process.execPath);
 	const store = new NodeTranscriptStore(TRANSCRIPT_TEST_DIR);
 	const view = new ChatView(leaf, session, store);
 	await (view as any).onOpen();
@@ -12856,7 +12838,7 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	// (c) A fresh conversation with no selection spawns with NO --resume anywhere in argv
 	const freshContainer = new FakeElement() as any;
 	const freshLeaf = new WorkspaceLeaf(app, freshContainer);
-	const freshSession = new SessionManager(app, undefined, process.execPath);
+	const freshSession = new SessionManager(app, process.execPath);
 	const freshView = new ChatView(freshLeaf, freshSession, store);
 	await (freshView as any).onOpen();
 
