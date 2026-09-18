@@ -12197,6 +12197,28 @@ console.log('\nAK. Görev 8: On-disk transcript to ChatItem translation, sidecar
 	const items = await translateTranscriptRecords([notifRec, humanPrompt]);
 	eq('AK10.1 task-notification record omitted yielding single human item', items.length, 1);
 	eq('AK10.2 retained item is genuine human user prompt', (items[0] as UserItem)?.text, 'Invented genuine human prompt');
+
+	// Regression 2026-09-18: the notification branch omitted the record but never sealed the
+	// assistant turn that preceded it (every other branch here does). An assistant reply that
+	// arrives before a background-agent notification, and another that arrives after, used to
+	// get merged into one item — the second reply's text was still present as extra blocks on
+	// the first item, but a client keying its UI off item identity never noticed the old item
+	// had changed, so the reply silently never appeared on screen.
+	const beforeNotif = {
+		type: 'assistant',
+		uuid: 'a-before-notif',
+		message: { role: 'assistant', content: 'Invented reply before the notification' },
+	};
+	const afterNotif = {
+		type: 'assistant',
+		uuid: 'a-after-notif',
+		message: { role: 'assistant', content: 'Invented reply after the notification' },
+	};
+	const splitItems = await translateTranscriptRecords([beforeNotif, notifRec, afterNotif]);
+	const splitAssistants = splitItems.filter((it): it is AssistantItem => it.kind === 'assistant');
+	eq('AK10.3 a notification between two assistant replies seals the first turn, yielding two items', splitAssistants.length, 2);
+	eq('AK10.4 the reply before the notification keeps its own text', splitAssistants[0]?.blocks.get(0)?.text, 'Invented reply before the notification');
+	eq('AK10.5 the reply after the notification is a fresh item, not merged into the first', splitAssistants[1]?.blocks.get(0)?.text, 'Invented reply after the notification');
 }
 
 // AK11: Defect 5 - AssistantItem string content handling

@@ -320,6 +320,12 @@ export async function translateTranscriptRecords(
 				? (r.origin as Record<string, unknown>).kind
 				: undefined;
 			if (originKind === 'task-notification' || originKind === 'auto-continuation') {
+				// Seal the turn that preceded the notification. Without this, the assistant reply
+				// that follows the notification gets merged into the already-rendered prior turn
+				// instead of starting a fresh one — its text is still present in the data (appended
+				// as new blocks on the old item), but a client keying its UI off item identity can
+				// fail to notice the old item changed, so the reply silently never appears to show.
+				sealAssistant();
 				continue;
 			}
 			if (isInterruptionRecord(r)) {
