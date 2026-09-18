@@ -6162,7 +6162,16 @@ console.log('X1. Gating predicate for AskUserQuestion vs ordinary tools');
 	eq('AskUserQuestion does not offer remember affordance', canRememberPermission({ toolName: 'AskUserQuestion', id: '1', kind: 'permission', turnId: 't1', requestId: 'r1', status: 'pending', input: {} }), false);
 	eq('Read offers remember affordance', canRememberPermission({ toolName: 'Read', id: '2', kind: 'permission', turnId: 't1', requestId: 'r2', status: 'pending', input: {} }), true);
 	eq('Write offers remember affordance', canRememberPermission({ toolName: 'Write', id: '3', kind: 'permission', turnId: 't1', requestId: 'r3', status: 'pending', input: {} }), true);
-	eq('Bash offers remember affordance', canRememberPermission({ toolName: 'Bash', id: '4', kind: 'permission', turnId: 't1', requestId: 'r4', status: 'pending', input: {} }), true);
+	eq('Bash with a plain command offers remember affordance', canRememberPermission({ toolName: 'Bash', id: '4', kind: 'permission', turnId: 't1', requestId: 'r4', status: 'pending', input: { command: 'ls' } }), true);
+	// Regression 2026-09-18: canRememberPermission used to say yes for any Bash request, so the
+	// checkbox appeared for a piped command, the user checked it and hit Allow, and the decision
+	// silently failed to persist (buildRememberedDecision vetoes metacharacters). The checkbox
+	// must not offer a promise the broker cannot keep.
+	eq(
+		'Bash with a piped command does not offer remember affordance (broker can never persist it)',
+		canRememberPermission({ toolName: 'Bash', id: '5', kind: 'permission', turnId: 't1', requestId: 'r5', status: 'pending', input: { command: 'ls /tmp | grep -i review' } }),
+		false,
+	);
 }
 
 console.log('X2. Exact match key stored on remember (not broader)');

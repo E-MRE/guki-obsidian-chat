@@ -19,6 +19,7 @@ import { setIcon, type Component } from 'obsidian';
 import type { PermissionItem, PermissionStatus } from '../core/chat-state';
 import type { PermissionBehavior } from '../core/permission-broker';
 import { isFloorProtectedRequest, type VaultPaths } from '../core/permission-policy';
+import { validateBashFloor } from '../core/bash-whitelist';
 import { toolIcon, toolSummary } from '../core/tool-policy';
 import { diffFromToolInput, renderDiff, type DiffInput } from './diff-view';
 import { t } from '../i18n';
@@ -48,6 +49,11 @@ export interface RenderedPermissionCard {
 /**
  * Gating predicate: only ordinary tool permission requests offer "don't ask again".
  * AskUserQuestion must NEVER offer it because questions cannot be meaningfully pre-answered.
+ *
+ * For Bash this must mirror `buildRememberedDecision`'s metacharacter veto (bash-whitelist.ts):
+ * a command with a pipe, `&&`, etc. can never be turned into a remembered rule, so the checkbox
+ * used to show anyway, the user would check it and hit Allow, and the decision would silently
+ * fail to persist — no error, no explanation, just "always allow" that never sticks.
  */
 export function canRememberPermission(item: PermissionItem, paths?: VaultPaths): boolean {
 	if (item.toolName === 'AskUserQuestion') {
@@ -55,6 +61,12 @@ export function canRememberPermission(item: PermissionItem, paths?: VaultPaths):
 	}
 	if (isFloorProtectedRequest(item.toolName, item.input, paths)) {
 		return false;
+	}
+	if (item.toolName === 'Bash') {
+		const command = (item.input as Record<string, unknown> | null)?.command;
+		if (validateBashFloor(command, item.cwd, paths) === null) {
+			return false;
+		}
 	}
 	return true;
 }
