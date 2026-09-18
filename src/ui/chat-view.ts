@@ -863,6 +863,7 @@ export class ChatView extends ItemView {
 
 		if (this.shouldUseViewAction()) {
 			// Docked in main editor area and wide -> Obsidian view action, NO in-panel header strip
+			this.rootEl.addClass('guki-history-view-action');
 			if (this.headerEl) {
 				this.headerEl.remove();
 				this.headerEl = null;
@@ -885,6 +886,7 @@ export class ChatView extends ItemView {
 			this.historyDropdown.setTriggerEl(this.viewActionEl);
 		} else {
 			// Docked in side panel or cramped main editor (trap 1) -> in-panel header button, NO view action
+			this.rootEl.removeClass('guki-history-view-action');
 			if (this.viewActionEl) {
 				this.viewActionEl.remove();
 				this.viewActionEl = null;

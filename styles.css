@@ -1479,8 +1479,10 @@
 
 /* --- ask user question --------------------------------------------------- */
 
-.guki-hidden {
-	display: none !important;
+/* Doubled utility selector outranks each component's single-class display rule without
+   `!important`, while keeping one shared hide/show class for all transient UI. */
+.guki-hidden.guki-hidden {
+	display: none;
 }
 
 .guki-ask-question-inline {
@@ -1833,7 +1835,7 @@
 	flex-direction: column;
 }
 
-.guki-root:not(:has(.guki-header)) .guki-history-dropdown {
+.guki-root.guki-history-view-action .guki-history-dropdown {
 	top: var(--size-4-2);
 }
 
@@ -1938,6 +1940,5 @@
 	outline: none;
 	box-shadow: 0 0 0 1px var(--interactive-accent);
 }
-
 
 

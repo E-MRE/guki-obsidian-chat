@@ -12945,6 +12945,7 @@ function countHistoryControls(container: any): number {
 		check('AQ.a2 in-panel header strip present in side panel', headerEl !== null);
 		check('AQ.a3 no view action registered in side panel', viewActionEl === null);
 		check('AQ.a4 exactly one control in side panel', inPanelBtn !== null && viewActionEl === null);
+		check('AQ.a5 side panel uses header-relative dropdown positioning', !container.querySelector('.guki-root')?.hasClass('guki-history-view-action'));
 
 		await (view as any).onClose();
 	}
@@ -12965,6 +12966,7 @@ function countHistoryControls(container: any): number {
 		check('AQ.b2 no in-panel header strip in DOM in main area', headerEl === null);
 		check('AQ.b3 no in-panel button in main area', inPanelBtn === null);
 		check('AQ.b4 exactly one control in main area', viewActionEl !== null && inPanelBtn === null);
+		check('AQ.b5 main area marks dropdown for view-action positioning', container.querySelector('.guki-root')?.hasClass('guki-history-view-action') === true);
 
 		await (view as any).onClose();
 	}
@@ -13032,6 +13034,7 @@ function countHistoryControls(container: any): number {
 		eq('AQ.d2 move sidebar to main leaves exactly one control (old control torn down)', controlsCountAfterMoveToMain, 1);
 		check('AQ.d3 move sidebar to main has view action and no in-panel header', mainAction !== null && mainBtn === null && mainHeader === null);
 		check('AQ.d4 dropdown trigger updated to view action after move to main', dropdown?.getTriggerEl() === mainAction && activeTriggerAfterMoveToMain === mainAction);
+		check('AQ.d4b moving to main enables view-action positioning', container.querySelector('.guki-root')?.hasClass('guki-history-view-action') === true);
 
 		// Move back to sidebar
 		(leaf as any).setRoot((app.workspace as any).rightSplit);
@@ -13046,6 +13049,7 @@ function countHistoryControls(container: any): number {
 		eq('AQ.d5 move main back to sidebar leaves exactly one control (view action torn down)', controlsCountAfterReturn, 1);
 		check('AQ.d6 move main back to sidebar has in-panel button and no view action', returnBtn !== null && returnHeader !== null && returnAction === null);
 		check('AQ.d7 dropdown trigger updated to in-panel button after return', dropdown?.getTriggerEl() === returnBtn && activeTriggerAfterReturn === returnBtn);
+		check('AQ.d7b returning to sidebar restores header-relative positioning', !container.querySelector('.guki-root')?.hasClass('guki-history-view-action'));
 
 		await (view as any).onClose();
 	}
