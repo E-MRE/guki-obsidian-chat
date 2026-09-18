@@ -72,6 +72,25 @@ Settings → Community plugins → the gear icon next to **GuKi Chat**.
 - Drag-and-drop, clipboard paste, and a file picker for attaching images and files.
 - A status line with live cost, duration, and context-window usage.
 
+## Security
+
+This plugin does not bring its own execution engine — it spawns the `claude` CLI you
+already installed and trust, and renders its output. Everything the CLI can do on your
+machine (read/write files, run shell commands, reach the network) it can still do here;
+the plugin adds a permission-card UI on top, it doesn't sandbox the CLI itself.
+
+- **Default is ask-first.** Commands inside the vault go through Claude Code's own
+  permission prompts, surfaced as cards in the composer. Nothing outside the vault runs
+  without you approving it, unless you've turned on one of the auto-allow settings below.
+- **Auto-allow (outside the vault)** — per-action toggles (read / write / run commands)
+  under Settings. Off by default.
+- **Allow everything (high risk)** and **auto-allow unsafe/piped commands** are separate,
+  explicitly-labeled opt-ins. Both are off by default and both say what they cost you
+  before you turn them on.
+- Keep Obsidian's Restricted mode on unless you trust the community plugins you've
+  installed, this one included — Restricted mode is what stops any community plugin
+  from running third-party code at all.
+
 ## Known limits
 
 - Desktop only, and per-vault: paths and settings are never shared between vaults or
