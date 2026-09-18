@@ -12,6 +12,8 @@ set up for it (`CLAUDE.md`, hooks, skills, MCP servers, persistent memory) keeps
 exactly as it does in a terminal — this plugin is a different window onto the same CLI,
 not a separate assistant with its own, weaker context.
 
+![GuKi Chat panel open next to a vault, asking it to check the week's open projects and summarize a refactor plan](./docs/images/screenshot.png)
+
 ## Requirements
 
 - Desktop Obsidian (this plugin spawns a subprocess — no mobile support, and never will).
