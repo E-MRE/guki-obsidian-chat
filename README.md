@@ -84,6 +84,15 @@ already installed and trust, and renders its output. Everything the CLI can do o
 machine (read/write files, run shell commands, reach the network) it can still do here;
 the plugin adds a permission-card UI on top, it doesn't sandbox the CLI itself.
 
+### Data access used by features
+
+- **Vault file enumeration:** The `@` file picker lists and searches the names and paths of files
+  in the current vault. Enumerating the vault does not itself read file contents or transmit them.
+  A file is passed to Claude only after you select or attach it and send the message.
+- **Clipboard access:** GuKi Chat reads clipboard event data only when you paste into the panel,
+  so it can accept text, files, and screenshots. It writes to the clipboard only when you press a
+  message's Copy button. It does not monitor or poll the clipboard in the background.
+
 - **Default is ask-first.** Commands inside the vault go through Claude Code's own
   permission prompts, surfaced as cards in the composer. Nothing outside the vault runs
   without you approving it, unless you've turned on one of the auto-allow settings below.
