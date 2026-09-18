@@ -90,6 +90,7 @@ INIT_REPLACEMENTS = {
 }
 
 HOOK_SUBTYPES = ('hook_response', 'hook_progress')
+NON_IDENTIFYING_USERNAMES = frozenset({'root', 'runner'})
 
 
 def _needs_scrub(obj):
@@ -186,7 +187,7 @@ def get_host_patterns():
 	slug_candidates = {s for s in (home_slug, real_home_slug) if len(s) > 1 and s != '-'}
 	patterns['home_slug'] = sorted(slug_candidates, key=len, reverse=True)
 
-	if len(username) >= 2:
+	if len(username) >= 2 and username.casefold() not in NON_IDENTIFYING_USERNAMES:
 		patterns['username'] = re.compile(rf'\b{re.escape(username)}\b', re.IGNORECASE)
 
 	return patterns
