@@ -75,7 +75,7 @@ export class ChatView extends ItemView {
 		conversationTitles?: ConversationTitleStore,
 		promptHistory?: PromptHistoryStore,
 		private readonly getSendKey?: () => SendKeyMode,
-		private readonly getShowRateLimitUsage?: () => boolean,
+		private readonly getShowUsageStats?: () => boolean,
 	) {
 		super(leaf);
 		this.titleStore = conversationTitles;
@@ -758,7 +758,7 @@ export class ChatView extends ItemView {
 	 * nothing more.
 	 */
 	private currentStatus(): ComposerStatus {
-		return currentStatus(this.session.state, this.getShowRateLimitUsage?.() ?? false);
+		return currentStatus(this.session.state, this.getShowUsageStats?.() ?? false);
 	}
 
 	/** Called by the plugin after a settings change — the toggle applies to the open panel immediately. */
@@ -968,16 +968,16 @@ export class ChatView extends ItemView {
  * context % · 5h · 7d" rather than two elements both reporting on the session. Also carries the
  * transient "Compacting conversation…" indicator when compaction is active (SPEC §2 F1, §3 R1).
  *
- * `showRateLimitUsage` is the settings toggle, off by default — the quota fields are reported as
- * unset rather than parsed differently, so `Composer.setStatusLine`'s existing right-to-left crop
- * on width still applies unchanged to whatever fields remain.
+ * `showUsageStats` is the settings toggle, off by default — the model name is always shown, but
+ * context/5h/7d are reported as unset rather than parsed differently, so `Composer.setStatusLine`'s
+ * existing right-to-left crop on width still applies unchanged to whatever fields remain.
  */
-export function currentStatus(state: ChatState, showRateLimitUsage = false): ComposerStatus {
-	const quota = showRateLimitUsage ? state.quotaSnapshot : null;
+export function currentStatus(state: ChatState, showUsageStats = false): ComposerStatus {
+	const quota = showUsageStats ? state.quotaSnapshot : null;
 	return {
 		compacting: state.compacting,
 		model: state.model !== null ? formatModelName(state.model) : null,
-		contextPercent: state.contextPercent,
+		contextPercent: showUsageStats ? state.contextPercent : null,
 		fiveHourPercent:
 			quota?.fiveHourUtilization !== undefined ? Math.round(quota.fiveHourUtilization * 100) : null,
 		sevenDayPercent:

@@ -15302,40 +15302,46 @@ console.log('\nBA. i18n production gates');
 setLocale('en');
 check('BA G7. locale is restored to English after production i18n gates', getLocale() === 'en');
 
-// --- BB. Rate-limit usage status-line preference --------------------------
+// --- BB. Context/usage status-line preference ------------------------------
 //
-// The 5h/7d quota bars are off by default (README ask: most readers never look at them, and the
+// Context %, 5h and 7d are off by default (README ask: most readers never look at them, and the
 // panel narrowing already has to crop fields — starting with fewer of them is one less thing to
-// crop). `currentStatus`'s own flag decides this by reporting the quota as unset, not by adding a
-// second code path in `Composer.setStatusLine` — so the existing right-to-left width crop (K1)
-// keeps working unchanged on whatever fields are actually present.
+// crop). The model name is exempt and always shown. `currentStatus`'s own flag decides this by
+// reporting the other three as unset, not by adding a second code path in
+// `Composer.setStatusLine` — so the existing right-to-left width crop (K1) keeps working
+// unchanged on whatever fields are actually present.
 
-console.log('\nBB. Rate-limit usage status-line preference');
+console.log('\nBB. Context/usage status-line preference');
 
-check('BB1. DEFAULT_SETTINGS.showRateLimitUsage is false', DEFAULT_SETTINGS.showRateLimitUsage === false);
+check('BB1. DEFAULT_SETTINGS.showUsageStats is false', DEFAULT_SETTINGS.showUsageStats === false);
 
 {
 	const quotaState = new ChatState();
+	quotaState.setContextPercent(42);
 	quotaState.setQuotaSnapshot({ fiveHourUtilization: 0.61, sevenDayUtilization: 0.94 });
-	check('BB2.1 currentStatus omits quota fields when the flag is off',
-		currentStatus(quotaState).fiveHourPercent === null && currentStatus(quotaState).sevenDayPercent === null);
-	check('BB2.2 currentStatus reports quota fields when the flag is on',
-		currentStatus(quotaState, true).fiveHourPercent === 61 && currentStatus(quotaState, true).sevenDayPercent === 94);
+	check('BB2.1 currentStatus omits context and quota fields when the flag is off',
+		currentStatus(quotaState).contextPercent === null &&
+			currentStatus(quotaState).fiveHourPercent === null &&
+			currentStatus(quotaState).sevenDayPercent === null);
+	check('BB2.2 currentStatus reports context and quota fields when the flag is on',
+		currentStatus(quotaState, true).contextPercent === 42 &&
+			currentStatus(quotaState, true).fiveHourPercent === 61 &&
+			currentStatus(quotaState, true).sevenDayPercent === 94);
 }
 
-async function loadShowRateLimitUsage(data: unknown): Promise<unknown> {
+async function loadShowUsageStats(data: unknown): Promise<unknown> {
 	const plugin = new GukiChatPlugin(createMockPluginApp() as any, { dir: 'plugins/guki-chat' } as any);
 	plugin.loadData = async () => data as any;
 	await (plugin as any).loadSettings();
-	return plugin.settings.showRateLimitUsage;
+	return plugin.settings.showUsageStats;
 }
-eq('BB3.1 persisted true is retained', await loadShowRateLimitUsage({ showRateLimitUsage: true }), true);
+eq('BB3.1 persisted true is retained', await loadShowUsageStats({ showUsageStats: true }), true);
 check('BB3.2 garbage, number, null, and absent fall back to false',
 	(await Promise.all([
-		loadShowRateLimitUsage({ showRateLimitUsage: 'yes' }),
-		loadShowRateLimitUsage({ showRateLimitUsage: 1 }),
-		loadShowRateLimitUsage({ showRateLimitUsage: null }),
-		loadShowRateLimitUsage({}),
+		loadShowUsageStats({ showUsageStats: 'yes' }),
+		loadShowUsageStats({ showUsageStats: 1 }),
+		loadShowUsageStats({ showUsageStats: null }),
+		loadShowUsageStats({}),
 	])).every((value) => value === false),
 );
 
@@ -15360,6 +15366,7 @@ check('BB3.2 garbage, number, null, and absent fall back to false',
 		interrupt: () => {},
 		decidePermission: () => {},
 	} as unknown as SessionManager;
+	session.state.setContextPercent(42);
 	session.state.setQuotaSnapshot({ fiveHourUtilization: 0.61, sevenDayUtilization: 0.94 });
 	const view = plugin.createChatViewFactory(session)(leaf);
 	await (view as any).onOpen();
@@ -15371,11 +15378,12 @@ check('BB3.2 garbage, number, null, and absent fall back to false',
 	(statusEl as any).clientWidth = 9999;
 	(view as any).refreshComposerStatusLine();
 	const before = statusEl.text?.trim() ?? '';
-	plugin.settings = { ...plugin.settings, showRateLimitUsage: true };
+	plugin.settings = { ...plugin.settings, showUsageStats: true };
 	await plugin.saveSettings();
 	const after = statusEl.text?.trim() ?? '';
-	check('BB4. saveSettings toggles the quota bars on an open real ChatView status line',
-		!before.includes('5h') && !before.includes('7d') && after.includes('5h') && after.includes('7d'));
+	check('BB4. saveSettings toggles context and quota fields on an open real ChatView status line',
+		!before.includes('%') && !before.includes('5h') && !before.includes('7d') &&
+			after.includes('42%') && after.includes('5h') && after.includes('7d'));
 	await (view as any).onClose();
 }
 

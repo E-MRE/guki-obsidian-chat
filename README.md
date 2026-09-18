@@ -50,8 +50,9 @@ Settings → Community plugins → the gear icon next to **GuKi Chat**.
   asking. Off by default, and it says what it costs you.
 - **Remembered permissions** — the decisions you told it to remember, listed one by one,
   removable individually or all at once.
-- **Show 5h/7d usage in the status line** — adds your Claude usage-window bars next to the
-  model name and context percentage. Off by default.
+- **Show context and 5h/7d usage in the status line** — adds context-window percentage and
+  your Claude usage-window bars next to the model name, which stays visible either way. Off
+  by default.
 
 ## What it does
 

@@ -20,10 +20,10 @@ export const settingsStrings = {
 	},
 	'settings.sendKey.option.enter': { en: 'Enter', tr: 'Enter' },
 	'settings.sendKey.option.modEnter': { en: 'Cmd/Ctrl+Enter', tr: 'Cmd/Ctrl+Enter' },
-	'settings.showRateLimitUsage.name': { en: 'Show 5h/7d usage in the status line', tr: 'Durum satırında 5s/7g kullanımını göster' },
-	'settings.showRateLimitUsage.desc': {
-		en: 'Adds your Claude usage-window bars next to the model name and context percentage. Off by default.',
-		tr: 'Model adı ve bağlam yüzdesinin yanına Claude kullanım penceresi çubuklarını ekler. Varsayılan olarak kapalı.',
+	'settings.showUsageStats.name': { en: 'Show context and 5h/7d usage in the status line', tr: 'Durum satırında bağlam ve 5s/7g kullanımını göster' },
+	'settings.showUsageStats.desc': {
+		en: 'Adds context-window percentage and your Claude usage-window bars next to the model name. Off by default.',
+		tr: 'Model adının yanına bağlam penceresi yüzdesini ve Claude kullanım penceresi çubuklarını ekler. Varsayılan olarak kapalı.',
 	},
 	'settings.permissions.heading': { en: 'Permissions outside the vault', tr: 'Kasa dışındaki izinler' },
 	'settings.permissions.read.name': { en: 'Read outside the vault', tr: 'Kasa dışını okuma' },

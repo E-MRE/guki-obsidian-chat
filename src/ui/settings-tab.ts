@@ -22,8 +22,9 @@ export interface GukiChatSettings extends PermissionSettings {
 	conversationTitles?: ConversationTitleMap;
 	promptHistory?: string[];
 	language?: 'auto' | 'en' | 'tr';
-	/** The 5h/7d quota bars in the composer's status line. Off by default — most readers never ask. */
-	showRateLimitUsage?: boolean;
+	/** The context %, 5h and 7d bars in the composer's status line. Off by default — the model name
+	 * stays visible either way. */
+	showUsageStats?: boolean;
 }
 
 export const DEFAULT_SETTINGS: GukiChatSettings = {
@@ -32,7 +33,7 @@ export const DEFAULT_SETTINGS: GukiChatSettings = {
 	slashCommands: [],
 	promptHistory: [],
 	language: 'auto',
-	showRateLimitUsage: false,
+	showUsageStats: false,
 	...DEFAULT_PERMISSION_SETTINGS,
 };
 
@@ -134,13 +135,13 @@ export class GukiSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName(t('settings.showRateLimitUsage.name'))
-			.setDesc(t('settings.showRateLimitUsage.desc'))
+			.setName(t('settings.showUsageStats.name'))
+			.setDesc(t('settings.showUsageStats.desc'))
 			.addToggle((toggle) =>
 				toggle
-					.setValue(this.plugin.settings.showRateLimitUsage ?? false)
+					.setValue(this.plugin.settings.showUsageStats ?? false)
 					.onChange(async (value) => {
-						this.plugin.settings.showRateLimitUsage = value;
+						this.plugin.settings.showUsageStats = value;
 						await this.plugin.saveSettings();
 					}),
 			);

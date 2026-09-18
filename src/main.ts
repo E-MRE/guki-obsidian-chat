@@ -105,7 +105,7 @@ export default class GukiChatPlugin extends Plugin {
 			titleStore,
 			promptHistory,
 			() => this.settings.sendKey ?? DEFAULT_SEND_KEY,
-			() => this.settings.showRateLimitUsage ?? false,
+			() => this.settings.showUsageStats ?? false,
 		);
 	}
 
@@ -133,7 +133,7 @@ export default class GukiChatPlugin extends Plugin {
 				: {},
 			sendKey: data?.sendKey === 'mod-enter' ? 'mod-enter' : DEFAULT_SEND_KEY,
 			language: data?.language === 'en' || data?.language === 'tr' ? data.language : 'auto',
-			showRateLimitUsage: data?.showRateLimitUsage === true,
+			showUsageStats: data?.showUsageStats === true,
 		};
 	}
 
