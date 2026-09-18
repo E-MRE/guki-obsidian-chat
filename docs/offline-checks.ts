@@ -2863,7 +2863,7 @@ console.log('N1. containsPath: the one line where "inside the vault" is defined'
 }
 
 console.log('N2. createVaultPaths, against a real vault with a real symlink');
-const vaultPaths = await createVaultPaths(POLICY_VAULT.root);
+const vaultPaths = await createVaultPaths(POLICY_VAULT.root, '.obsidian');
 {
 	// A sibling that shares the root's name, on disk this time rather than as a string.
 	mkdirSync(`${POLICY_VAULT.root}-backup`, { recursive: true });
@@ -6417,7 +6417,7 @@ const e2eVault = join(e2eBase, 'vault');
 const e2eOutside = join(e2eBase, 'outside');
 mkdirSync(e2eVault, { recursive: true });
 mkdirSync(e2eOutside, { recursive: true });
-const e2eVaultPaths = await createVaultPaths(e2eVault);
+const e2eVaultPaths = await createVaultPaths(e2eVault, '.obsidian');
 
 function createMockPluginApp() {
 	const adapter = new FileSystemAdapter();
@@ -6673,7 +6673,7 @@ console.log('Z1. Absolute floor: Write and Bash into .obsidian prompt under all 
 	const zFloorBase = realpathSync(mkdtempSync(join(tmpdir(), 'guki-z-floor-')));
 	const zFloorVault = join(zFloorBase, 'vault');
 	mkdirSync(join(zFloorVault, '.obsidian', 'plugins', 'x'), { recursive: true });
-	const zFloorVaultPaths = await createVaultPaths(zFloorVault);
+	const zFloorVaultPaths = await createVaultPaths(zFloorVault, '.obsidian');
 	const pluginJs = join(zFloorVault, '.obsidian', 'plugins', 'x', 'main.js');
 	const bashEcho = `echo payload > ${pluginJs}`;
 	const bashCp = `cp /tmp/source.js ${pluginJs}`;
@@ -6762,12 +6762,48 @@ console.log('Z1. Absolute floor: Write and Bash into .obsidian prompt under all 
 	rmSync(zFloorBase, { recursive: true, force: true });
 }
 
+console.log('Z1b. Absolute floor follows Vault#configDir when the config folder is renamed');
+{
+	const customFloorBase = realpathSync(mkdtempSync(join(tmpdir(), 'guki-custom-config-floor-')));
+	const customFloorVault = join(customFloorBase, 'vault');
+	const customConfigDir = '.custom-config';
+	mkdirSync(join(customFloorVault, customConfigDir), { recursive: true });
+	mkdirSync(join(customFloorVault, '.obsidian'), { recursive: true });
+	const customFloorPaths = await createVaultPaths(customFloorVault, customConfigDir);
+	const customConfigFile = join(customFloorVault, customConfigDir, 'plugins.json');
+	const unusedDefaultFile = join(customFloorVault, '.obsidian', 'ordinary.md');
+	const allowEverythingOn: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, allowEverything: true };
+
+	eq(
+		'Write into renamed config dir prompts under allow everything',
+		permissionVerdict('Write', { file_path: customConfigFile, content: 'x' }, customFloorPaths, allowEverythingOn),
+		'ask',
+	);
+	eq(
+		'Bash into renamed config dir prompts under allow everything',
+		permissionVerdict('Bash', { command: `cp /tmp/source.json ${customConfigFile}` }, customFloorPaths, allowEverythingOn),
+		'ask',
+	);
+	eq(
+		'unused default config name is not protected after rename',
+		permissionVerdict('Write', { file_path: unusedDefaultFile, content: 'x' }, customFloorPaths, allowEverythingOn),
+		'allow',
+	);
+	eq(
+		'Bash may target unused default config name after rename',
+		permissionVerdict('Bash', { command: `cp /tmp/source.md ${unusedDefaultFile}` }, customFloorPaths, allowEverythingOn),
+		'allow',
+	);
+
+	rmSync(customFloorBase, { recursive: true, force: true });
+}
+
 console.log('Z2. Defect 0 end-to-end chain check: Bash without cwd in request scopes to session cwd');
 {
 	const e2eBaseZ = realpathSync(mkdtempSync(join(tmpdir(), 'guki-e2e-z-')));
 	const e2eVaultZ = join(e2eBaseZ, 'vault');
 	mkdirSync(e2eVaultZ, { recursive: true });
-	const e2eVaultPathsZ = await createVaultPaths(e2eVaultZ);
+	const e2eVaultPathsZ = await createVaultPaths(e2eVaultZ, '.obsidian');
 	const otherDirZ = mkdtempSync(join(tmpdir(), 'guki-e2e-other-z-'));
 	const bashCmdZ = 'npm test --run';
 
@@ -6874,7 +6910,7 @@ console.log('AA1. Structural floor: candidate verdict allows, wrapper and final 
 	const aaBase = realpathSync(mkdtempSync(join(tmpdir(), 'guki-aa-floor-')));
 	const aaVault = join(aaBase, 'vault');
 	mkdirSync(join(aaVault, '.obsidian', 'plugins', 'plugin-x'), { recursive: true });
-	const aaPaths = await createVaultPaths(aaVault);
+	const aaPaths = await createVaultPaths(aaVault, '.obsidian');
 	const targetObsidianFile = join(aaVault, '.obsidian', 'plugins', 'plugin-x', 'main.js');
 	const allowAllSettings: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, allowEverything: true };
 
@@ -6949,7 +6985,7 @@ console.log('AA2. Full floor matrix after restructure: 42 cells all prompt');
 	const aaBase2 = realpathSync(mkdtempSync(join(tmpdir(), 'guki-aa-matrix-')));
 	const aaVault2 = join(aaBase2, 'vault');
 	mkdirSync(join(aaVault2, '.obsidian', 'plugins', 'test-plugin'), { recursive: true });
-	const paths2 = await createVaultPaths(aaVault2);
+	const paths2 = await createVaultPaths(aaVault2, '.obsidian');
 	const targetFile2 = join(aaVault2, '.obsidian', 'plugins', 'test-plugin', 'main.js');
 
 	const defaultS: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS };
@@ -7045,7 +7081,7 @@ console.log('AA3. cd-then-relative evasions and harmless cases');
 	const aaVault3 = join(aaBase3, 'vault');
 	const pluginDir = join(aaVault3, '.obsidian', 'plugins', 'test-plugin');
 	mkdirSync(pluginDir, { recursive: true });
-	const paths3 = await createVaultPaths(aaVault3);
+	const paths3 = await createVaultPaths(aaVault3, '.obsidian');
 	const allowAllS: PermissionSettings = { ...DEFAULT_PERMISSION_SETTINGS, allowEverything: true };
 
 	// 1. cd-then-relative write from inside .obsidian cwd (tokens do NOT mention .obsidian)
@@ -15283,7 +15319,7 @@ console.log('\nBA. i18n production gates');
 	setLocale('en');
 	const manager = new SessionManager({ vault: { adapter: {} } } as never);
 	(manager as unknown as { vaultPaths(): ReturnType<typeof createVaultPaths> }).vaultPaths =
-		async () => createVaultPaths('/fake/vault');
+		async () => createVaultPaths('/fake/vault', '.obsidian');
 	const container = new FakeElement() as any;
 	const leaf = new WorkspaceLeaf(new App(), container);
 

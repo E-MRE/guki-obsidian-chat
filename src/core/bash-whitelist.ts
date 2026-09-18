@@ -184,18 +184,21 @@ export function resolveBashCwd(rawCwd: unknown, paths: VaultPaths): string | nul
 	return norm.endsWith('/') && norm.length > 1 ? norm.slice(0, -1) : norm;
 }
 
-export const PROTECTED_SEGMENTS = new Set(['.git', '.obsidian']);
+const DEFAULT_PROTECTED_SEGMENTS: ReadonlySet<string> = new Set(['.git']);
 
-export function hasProtectedSegment(pathOrToken: string): boolean {
+export function hasProtectedSegment(
+	pathOrToken: string,
+	protectedSegments: ReadonlySet<string> = DEFAULT_PROTECTED_SEGMENTS,
+): boolean {
 	const norm = pathOrToken.normalize('NFC').toLowerCase();
 	const segments = norm.split(/[/\\]/);
 	for (const seg of segments) {
-		if (PROTECTED_SEGMENTS.has(seg)) {
+		if (protectedSegments.has(seg)) {
 			return true;
 		}
 		if (seg.includes('=')) {
 			const subSegs = seg.split('=');
-			if (subSegs.some((s) => PROTECTED_SEGMENTS.has(s))) {
+			if (subSegs.some((s) => protectedSegments.has(s))) {
 				return true;
 			}
 		}
@@ -242,15 +245,15 @@ export function validateBashFloor(
 		return null;
 	}
 
-	// Cwd floor: if working directory is inside a protected segment (.obsidian or .git),
+	// Cwd floor: if working directory is inside a protected segment (the vault config dir or .git),
 	// relative writes or commands executed inside that directory are vetoed.
 	if (typeof rawCwd === 'string' && rawCwd.trim().length > 0) {
-		if (hasProtectedSegment(rawCwd)) {
+		if (hasProtectedSegment(rawCwd, paths?.protectedSegments)) {
 			return null;
 		}
 		if (paths) {
 			const resolved = paths.resolve(rawCwd);
-			if (resolved !== null && hasProtectedSegment(resolved)) {
+			if (resolved !== null && hasProtectedSegment(resolved, paths.protectedSegments)) {
 				return null;
 			}
 		}
@@ -269,8 +272,8 @@ export function validateBashFloor(
 		return null;
 	}
 
-	// Step 3: Protected segment check — any token naming .obsidian or .git
-	if (tokens.some((token) => hasProtectedSegment(token))) {
+	// Step 3: Protected segment check — any token naming the vault config dir or .git
+	if (tokens.some((token) => hasProtectedSegment(token, paths?.protectedSegments))) {
 		return null;
 	}
 
@@ -349,4 +352,3 @@ export function bashVerdict(
 
 	return validateBashFloor(command, rawCwd, paths) !== null ? 'allow' : 'ask';
 }
-

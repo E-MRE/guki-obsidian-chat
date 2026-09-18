@@ -179,7 +179,7 @@ export class PermissionBroker {
 
 		// Before the socket is listening, so no request can arrive while the policy has no
 		// filesystem to consult.
-		this.policyPaths = await createVaultPaths(this.vaultRoot);
+		this.policyPaths = await createVaultPaths(this.vaultRoot, this.app.vault.configDir);
 		this.readPriorContent = await createPriorContentReader();
 
 		// A private directory under the OS temp dir, not under the vault: the vault is synced and

@@ -21,7 +21,7 @@
  * - this is a **safety net, not the only defence** — the CLI resolves some low-risk calls itself and
  *   they never reach the bridge at all (RESEARCH B5).
  */
-import { evaluateBashCandidate, PROTECTED_SEGMENTS, resolveBashCwd, validateBashFloor } from './bash-whitelist';
+import { evaluateBashCandidate, hasProtectedSegment, resolveBashCwd, validateBashFloor } from './bash-whitelist';
 export { bashVerdict } from './bash-whitelist';
 
 export type PermissionVerdict = 'allow' | 'ask';
@@ -170,6 +170,8 @@ export function normalizePermissionSettings(raw: unknown): PermissionSettings {
 export interface VaultPaths {
 	/** The vault root, already resolved. */
 	readonly root: string;
+	/** Case-normalised path segments that must never be silently modified. */
+	readonly protectedSegments: ReadonlySet<string>;
 	resolve(raw: string): string | null;
 	isInside(raw: string): boolean;
 	exists?(rawOrResolved: string): boolean;
@@ -375,18 +377,17 @@ function isDestructiveEdit(toolName: string, input: unknown): boolean {
 }
 
 /**
- * Tests whether a path targets a floor-protected segment (.obsidian or .git).
+ * Tests whether a path targets a floor-protected segment (the vault config dir or .git).
  * Checks both the raw path as given and (if paths resolver is provided) the canonical resolved path.
  */
 export function isFloorProtectedPath(raw: string, paths?: VaultPaths): boolean {
-	if (raw.normalize('NFC').split(/[/\\]/).some((segment) => PROTECTED_SEGMENTS.has(segment.toLowerCase()))) {
+	if (hasProtectedSegment(raw, paths?.protectedSegments)) {
 		return true;
 	}
 	if (paths) {
 		const resolved = paths.resolve(raw);
 		if (resolved !== null) {
-			const canonicalPath = resolved.normalize('NFC');
-			if (canonicalPath.split('/').some((segment) => PROTECTED_SEGMENTS.has(segment.toLowerCase()))) {
+			if (hasProtectedSegment(resolved, paths.protectedSegments)) {
 				return true;
 			}
 		}
@@ -486,7 +487,7 @@ function webFetchVerdict(input: unknown): PermissionVerdict {
 /**
  * Builds a remembered decision from a tool request, enforcing all security invariants:
  * - Read: exact canonical absolute path.
- * - Write: exact canonical absolute path plus whether target existed on grant. Writes to .obsidian/ or .git are rejected.
+ * - Write: exact canonical absolute path plus whether target existed on grant. Writes to the vault config dir or .git are rejected.
  * - Bash: exact normalised argv token sequence. Metacharacters are vetoed.
  * Any malformed input, unresolvable path, or unrecognised tool returns null (fail-closed).
  */

@@ -21,13 +21,15 @@ import { containsPath, type VaultPaths } from './permission-policy';
 const MAX_ANCESTOR_DEPTH = 64;
 
 /**
- * Builds the `VaultPaths` the policy is handed.
+ * Builds the `VaultPaths` the policy is handed. `configDir` comes from `Vault#configDir`, so the
+ * security floor follows a vault whose Obsidian configuration folder has been renamed instead of
+ * assuming the default `.obsidian` name.
  *
  * `vaultRoot` is resolved once, here: if any ancestor of the vault is itself a symlink, an
  * unresolved root would never prefix-match the resolved paths coming out of `resolve`, and every
  * single call would read as "outside the vault".
  */
-export async function createVaultPaths(vaultRoot: string): Promise<VaultPaths> {
+export async function createVaultPaths(vaultRoot: string, configDir: string): Promise<VaultPaths> {
 	const fs = await nodeFs();
 	const path = await nodePath();
 
@@ -117,6 +119,14 @@ export async function createVaultPaths(vaultRoot: string): Promise<VaultPaths> {
 
 	return {
 		root,
+		protectedSegments: new Set([
+			'.git',
+			...configDir
+				.normalize('NFC')
+				.toLowerCase()
+				.split(/[/\\]/)
+				.filter((segment) => segment.length > 0),
+		]),
 		resolve,
 		/**
 		 * Note what this is *not*: on a case-insensitive volume (the default on macOS) `realpath`

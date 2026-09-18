@@ -295,7 +295,7 @@ export class SessionManager {
 					this.blockedReason ? t(this.blockedReason) : t('core.session.vaultUnsupportedShort'),
 				));
 			}
-			this.vaultPathsPromise = createVaultPaths(root);
+			this.vaultPathsPromise = createVaultPaths(root, this.app.vault.configDir);
 		}
 		return this.vaultPathsPromise;
 	}
