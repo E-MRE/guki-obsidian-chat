@@ -119,7 +119,7 @@ the plugin adds a permission-card UI on top, it doesn't sandbox the CLI itself.
 ## Building from source
 
 ```sh
-npm install
+npm ci
 npm run build   # tsc + esbuild, produces main.js (the permission server ships embedded inside it)
 npm run lint
 ```
