@@ -1,0 +1,41 @@
+name: Feature request
+description: Suggest a focused improvement to GuKi Chat
+title: "feat: "
+labels:
+  - "type: feature"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A clear problem statement helps the maintainer decide whether a proposal fits the plugin's scope.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What limitation or user problem would this address?
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: Who would benefit, and what would they be able to do more easily?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior or experience you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches or workarounds did you consider?
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add examples, links, mockups, or compatibility considerations. Do not include private vault content.

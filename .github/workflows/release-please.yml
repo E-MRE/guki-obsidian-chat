@@ -1,0 +1,96 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-main
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.repository }}
+
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Run Release Please
+        uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Sync versions.json on Release PR
+        if: ${{ steps.release.outputs.prs_created == 'true' && steps.release.outputs.release_created != 'true' }}
+        env:
+          PR_DATA: ${{ steps.release.outputs.pr }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          node << 'EOF'
+          const { execSync } = require('child_process');
+          const fs = require('fs');
+
+          const prDataRaw = process.env.PR_DATA;
+          if (!prDataRaw) {
+            console.log('No PR data found; skipping versions.json sync');
+            process.exit(0);
+          }
+
+          let pr;
+          try {
+            pr = JSON.parse(prDataRaw);
+          } catch (e) {
+            console.log('Could not parse PR data JSON:', e.message);
+            process.exit(0);
+          }
+
+          const headBranch = pr.headBranchName || pr.headRefName;
+          if (!headBranch) {
+            console.log('Could not determine head branch from PR data; skipping');
+            process.exit(0);
+          }
+
+          console.log(`Syncing versions.json on Release PR branch: ${headBranch}`);
+          execSync(`git fetch origin ${headBranch}:${headBranch}`, { stdio: 'inherit' });
+          execSync(`git checkout ${headBranch}`, { stdio: 'inherit' });
+
+          execSync('node version-bump.mjs', { stdio: 'inherit' });
+
+          const status = execSync('git status --porcelain versions.json manifest.json', { encoding: 'utf8' }).trim();
+          if (status.length > 0) {
+            console.log('Changes detected in versions.json or manifest.json. Committing and pushing...');
+            execSync('git config user.name "github-actions[bot]"', { stdio: 'inherit' });
+            execSync('git config user.email "github-actions[bot]@users.noreply.github.com"', { stdio: 'inherit' });
+            execSync('git add versions.json manifest.json', { stdio: 'inherit' });
+            execSync('git commit -m "chore: synchronize versions.json for release"', { stdio: 'inherit' });
+            execSync(`git push origin ${headBranch}`, { stdio: 'inherit' });
+            console.log('Successfully pushed versions.json sync to Release PR branch');
+          } else {
+            console.log('versions.json and manifest.json are already up to date');
+          }
+          EOF

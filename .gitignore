@@ -22,3 +22,5 @@ data.json
 # paths, and 15MB of logs. Kept on disk (agents read it), never shipped in the public repo.
 /.orchestration/
 /.claude/
+# Local agent skills and worker configuration are operational material, not plugin source.
+/.agents/

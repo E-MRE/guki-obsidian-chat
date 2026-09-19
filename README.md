@@ -22,7 +22,9 @@ not a separate assistant with its own, weaker context.
 
 ## Install
 
-Not on the Community Plugins list yet — install manually:
+Available in Obsidian's [Community Plugins directory](https://obsidian.md/plugins?id=guki-chat) as
+**GuKi Chat**. Search for **GuKi Chat** in Obsidian's Community Plugins settings and install it
+there. Manual installation remains available when you need to test a specific release:
 
 1. Download `main.js`, `manifest.json` and `styles.css` from the
    [latest release](https://github.com/E-MRE/guki-obsidian-chat/releases/latest)
@@ -128,3 +130,10 @@ at this repo's folder (or symlink it into `.obsidian/plugins/guki-chat/`) to ite
 ## License
 
 [BSD Zero Clause License](./LICENSE).
+
+## Contributing and support
+
+- Read [Contributing](./CONTRIBUTING.md) before opening a substantial pull request.
+- Report security vulnerabilities through the private process in [SECURITY.md](./SECURITY.md).
+- See the [Code of Conduct](./CODE_OF_CONDUCT.md) for community expectations.
+- Use GitHub issues for ordinary bug reports and feature requests.
