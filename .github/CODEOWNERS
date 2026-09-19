@@ -1,0 +1,24 @@
+# Critical governance, security, dependency, and release surfaces.
+# Ownership requests review; ruleset enforcement is configured separately.
+.github/CODEOWNERS @E-MRE
+.github/ISSUE_TEMPLATE/ @E-MRE
+.github/pull_request_template.md @E-MRE
+.github/dependabot.yml @E-MRE
+.github/workflows/ @E-MRE
+
+CONTRIBUTING.md @E-MRE
+CODE_OF_CONDUCT.md @E-MRE
+SECURITY.md @E-MRE
+
+package.json @E-MRE
+package-lock.json @E-MRE
+
+manifest.json @E-MRE
+versions.json @E-MRE
+version-bump.mjs @E-MRE
+
+release-please-config.json @E-MRE
+.release-please-manifest.json @E-MRE
+
+docs/scrub-capture.py @E-MRE
+docs/offline-checks.ts @E-MRE

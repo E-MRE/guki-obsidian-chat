@@ -1,0 +1,141 @@
+name: PR title
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conventional-commits:
+    name: Conventional Commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Validate Conventional Commit PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          node << 'EOF'
+          const ALLOWED_TYPES = new Set([
+            'feat',
+            'fix',
+            'docs',
+            'style',
+            'refactor',
+            'perf',
+            'test',
+            'build',
+            'ci',
+            'chore',
+            'revert'
+          ]);
+
+          function validatePRTitle(rawTitle) {
+            if (!rawTitle || typeof rawTitle !== 'string' || rawTitle.trim().length === 0) {
+              return { valid: false, reason: 'Pull request title cannot be empty.' };
+            }
+            const trimmed = rawTitle.trim();
+
+            if (/^[^\s:]+\s+:/.test(trimmed)) {
+              return { valid: false, reason: 'Do not put a space before the colon.' };
+            }
+
+            const match = trimmed.match(/^([a-zA-Z0-9_-]+)(?:\(([^()\r\n]*)\))?(!)?(:)(\s*)(.*)$/s);
+            if (!match) {
+              return {
+                valid: false,
+                reason: 'PR title does not match Conventional Commits format "<type>[optional scope][!]: <description>".'
+              };
+            }
+
+            const [, type, scope, breaking, , whitespace, description] = match;
+
+            if (type !== type.toLowerCase()) {
+              return {
+                valid: false,
+                reason: `Type "${type}" must be lowercase ("${type.toLowerCase()}").`
+              };
+            }
+
+            if (!ALLOWED_TYPES.has(type)) {
+              return {
+                valid: false,
+                reason: `Type "${type}" is not recognized. Allowed types: ${Array.from(ALLOWED_TYPES).join(', ')}.`
+              };
+            }
+
+            if (scope !== undefined && scope.trim().length === 0) {
+              return {
+                valid: false,
+                reason: 'Scope cannot be empty when parentheses "()" are present.'
+              };
+            }
+
+            if (whitespace.length === 0) {
+              return {
+                valid: false,
+                reason: 'Missing space after colon. Use ": <description>".'
+              };
+            }
+
+            if (!description || description.trim().length === 0) {
+              return {
+                valid: false,
+                reason: 'Description cannot be empty.'
+              };
+            }
+
+            return {
+              valid: true,
+              type,
+              scope: scope ? scope.trim() : null,
+              breaking: !!breaking,
+              description: description.trim()
+            };
+          }
+
+          const prTitle = process.env.PR_TITLE;
+          const result = validatePRTitle(prTitle);
+
+          if (!result.valid) {
+            console.error('::error::Invalid Pull Request Title!');
+            console.error(`Received: "${prTitle || ''}"`);
+            console.error(`Reason:   ${result.reason}\n`);
+            console.error('PR titles must follow the Conventional Commits specification:');
+            console.error('  <type>[optional scope][!]: <description>\n');
+            console.error('Allowed types:');
+            console.error(`  ${Array.from(ALLOWED_TYPES).join(', ')}\n`);
+            console.error('Examples of valid PR titles:');
+            console.error('  feat: add Turkish language support');
+            console.error('  fix(composer): prevent double send on enter key');
+            console.error('  docs: clarify local test requirements in CONTRIBUTING.md');
+            console.error('  chore(deps): update esbuild to 0.25.5');
+            console.error('  feat(api)!: drop deprecated settings method\n');
+            console.error('Why this is required:');
+            console.error('  Pull requests are squash-merged into main using the PR title, which');
+            console.error('  feeds automated changelog generation and version calculation.\n');
+            console.error('How to fix:');
+            console.error('  Click "Edit" next to the PR title at the top of the GitHub pull request');
+            console.error('  page and update the title to match the Conventional Commits specification.');
+            process.exit(1);
+          }
+
+          console.log(`PASS: PR title matches Conventional Commits format: "${prTitle.trim()}"`);
+          console.log(`  Type:        ${result.type}`);
+          console.log(`  Scope:       ${result.scope || '(none)'}`);
+          console.log(`  Breaking:    ${result.breaking}`);
+          console.log(`  Description: ${result.description}`);
+          EOF
