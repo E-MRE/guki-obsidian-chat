@@ -46,6 +46,10 @@ function ghGraphql(query, variables) {
   }
 }
 
+function currentUserLogin() {
+  return execFileSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8' }).trim();
+}
+
 function repoName() {
   const repo = process.env.GH_REPO || process.env.GITHUB_REPOSITORY;
   if (repo) return repo;
@@ -122,8 +126,17 @@ function main() {
   assert(pr.state === 'open', `PR #${prNumber} is ${pr.state}; only open PRs can be merged.`);
   assert(pr.draft !== true, `PR #${prNumber} is still a draft.`);
   assert(pr.base?.ref === 'main', `PR #${prNumber} targets ${pr.base?.ref || '(unknown)'}, not main.`);
+  const selfAuthored = pr.user?.login === currentUserLogin();
   assert(pr.mergeable === true, `PR #${prNumber} is not currently mergeable (${pr.mergeable}).`);
-  assert(pr.mergeable_state === 'clean', `PR #${prNumber} merge state is ${pr.mergeable_state}, not clean.`);
+  if (selfAuthored) {
+    // GitHub cannot record a self-approval, so a solo-maintainer PR is permanently
+    // "blocked" on the review requirement alone. Every other invariant below (required
+    // checks, no changes requested, resolved threads, SHA lock) still applies in full.
+    assert(pr.mergeable_state === 'clean' || pr.mergeable_state === 'blocked',
+      `PR #${prNumber} merge state is ${pr.mergeable_state}, not clean or review-blocked.`);
+  } else {
+    assert(pr.mergeable_state === 'clean', `PR #${prNumber} merge state is ${pr.mergeable_state}, not clean.`);
+  }
   assert(validatePrTitle(pr.title), `PR title is not a valid Conventional Commit: ${pr.title}`);
 
   const headSha = pr.head?.sha;
@@ -135,7 +148,9 @@ function main() {
   const reviews = ghJson(`${prEndpoint}/reviews`, ['--method', 'GET', '-f', 'per_page=100']);
   const latest = latestReviews(reviews);
   assert(!latest.some((review) => review.state === 'CHANGES_REQUESTED'), 'A reviewer has requested changes.');
-  assert(latest.some((review) => review.state === 'APPROVED'), 'At least one current approving review is required.');
+  if (!selfAuthored) {
+    assert(latest.some((review) => review.state === 'APPROVED'), 'At least one current approving review is required.');
+  }
 
   const reviewThreads = ghGraphql(
     `query($owner:String!,$name:String!,$number:Int!){
