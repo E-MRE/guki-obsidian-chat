@@ -8,3 +8,9 @@ updates:
     groups:
       development-dependencies:
         dependency-type: development
+    ignore:
+      # typescript-eslint's peer range (>=4.8.4 <6.1.0) does not support TypeScript's
+      # next major yet; a grouped major bump produces an unresolvable ERESOLVE conflict.
+      # Drop this once typescript-eslint publishes support for the new major.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
