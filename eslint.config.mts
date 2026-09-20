@@ -23,6 +23,9 @@ export default defineConfig(
 		'tsconfig.json',
 		// Phase 0 spike harnesses: standalone scripts, not part of the plugin build.
 		'docs',
+		// Standalone Node CLI invoked through npm, not plugin code — same treatment as
+		// mcp-permission-server.mjs above.
+		'scripts/merge-pr.mjs',
 	]),
 	{
 		languageOptions: {
