@@ -3,6 +3,13 @@
 All notable changes to GuKi Chat are documented here. This file records released versions and
 unreleased, reviewed work; it is not a substitute for GitHub release notes.
 
+## [1.1.5](https://github.com/E-MRE/guki-obsidian-chat/compare/1.1.4...1.1.5) (2026-09-20)
+
+
+### Bug Fixes
+
+* **release:** prevent Co-Authored-By trailers in future squash merges ([#9](https://github.com/E-MRE/guki-obsidian-chat/issues/9)) ([fd52667](https://github.com/E-MRE/guki-obsidian-chat/commit/fd52667ab65558a2ee48ecbe213b55b18b7865df))
+
 ## [1.1.4](https://github.com/E-MRE/guki-obsidian-chat/compare/1.1.3...1.1.4) (2026-09-19)
 
 
