@@ -52,8 +52,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           node << 'EOF'
-          const { execSync } = require('child_process');
-          const fs = require('fs');
+          const { execFileSync } = require('child_process');
 
           const prDataRaw = process.env.PR_DATA;
           if (!prDataRaw) {
@@ -76,19 +75,23 @@ jobs:
           }
 
           console.log(`Syncing versions.json on Release PR branch: ${headBranch}`);
-          execSync(`git fetch origin ${headBranch}:${headBranch}`, { stdio: 'inherit' });
-          execSync(`git checkout ${headBranch}`, { stdio: 'inherit' });
+          const runGit = (args, options = {}) => execFileSync('git', args, { stdio: 'inherit', ...options });
+          runGit(['fetch', 'origin', `${headBranch}:${headBranch}`]);
+          runGit(['checkout', headBranch]);
 
-          execSync('node version-bump.mjs', { stdio: 'inherit' });
+          execFileSync('node', ['version-bump.mjs'], { stdio: 'inherit' });
 
-          const status = execSync('git status --porcelain versions.json manifest.json', { encoding: 'utf8' }).trim();
+          const status = execFileSync('git', ['status', '--porcelain', 'versions.json', 'manifest.json'], { encoding: 'utf8' }).trim();
           if (status.length > 0) {
             console.log('Changes detected in versions.json or manifest.json. Committing and pushing...');
-            execSync('git config user.name "github-actions[bot]"', { stdio: 'inherit' });
-            execSync('git config user.email "github-actions[bot]@users.noreply.github.com"', { stdio: 'inherit' });
-            execSync('git add versions.json manifest.json', { stdio: 'inherit' });
-            execSync('git commit -m "chore: synchronize versions.json for release"', { stdio: 'inherit' });
-            execSync(`git push origin ${headBranch}`, { stdio: 'inherit' });
+            const authorName = execFileSync('git', ['log', '-1', '--format=%an', 'HEAD'], { encoding: 'utf8' }).trim();
+            const authorEmail = execFileSync('git', ['log', '-1', '--format=%ae', 'HEAD'], { encoding: 'utf8' }).trim();
+            if (!authorName || !authorEmail) throw new Error('Could not determine the Release PR HEAD author.');
+            runGit(['config', 'user.name', authorName]);
+            runGit(['config', 'user.email', authorEmail]);
+            runGit(['add', 'versions.json', 'manifest.json']);
+            runGit(['commit', '-m', 'chore: synchronize versions.json for release']);
+            runGit(['push', 'origin', headBranch]);
             console.log('Successfully pushed versions.json sync to Release PR branch');
           } else {
             console.log('versions.json and manifest.json are already up to date');

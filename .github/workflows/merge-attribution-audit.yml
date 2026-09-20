@@ -1,0 +1,32 @@
+name: Merge attribution audit
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Reject prohibited commit trailers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check the pushed commit message
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Reject Co-Authored-By trailers
+        env:
+          PUSHED_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          if git show --no-patch --format=%B "$PUSHED_SHA" | grep -Eiq '(^|[[:space:]])co-authored-by:'; then
+            echo '::error::The pushed commit contains a prohibited Co-Authored-By trailer.'
+            exit 1
+          fi
+          echo 'PASS: pushed commit contains no Co-Authored-By trailer.'
